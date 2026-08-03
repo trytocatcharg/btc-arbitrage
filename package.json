@@ -1,0 +1,30 @@
+{
+  "name": "btc-arbitrage",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "yarn@4.5.3",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:bot": "yarn workspace @btc-arbitrage/bot dev",
+    "dev:web": "yarn workspace @btc-arbitrage/web dev",
+    "build:bot": "yarn workspace @btc-arbitrage/domain build && yarn workspace @btc-arbitrage/shared build && yarn workspace @btc-arbitrage/exchange-core build && yarn workspace @btc-arbitrage/config build && yarn workspace @btc-arbitrage/db build && yarn workspace @btc-arbitrage/bot build",
+    "build": "yarn workspace @btc-arbitrage/domain build && yarn workspace @btc-arbitrage/shared build && yarn workspace @btc-arbitrage/exchange-core build && yarn workspace @btc-arbitrage/config build && yarn workspace @btc-arbitrage/db build && yarn workspace @btc-arbitrage/bot build && yarn workspace @btc-arbitrage/web build",
+    "start": "yarn start:bot",
+    "start:bot": "yarn workspace @btc-arbitrage/bot start",
+    "typecheck": "yarn workspace @btc-arbitrage/domain typecheck && yarn workspace @btc-arbitrage/shared typecheck && yarn workspace @btc-arbitrage/exchange-core typecheck && yarn workspace @btc-arbitrage/config typecheck && yarn workspace @btc-arbitrage/db typecheck && yarn workspace @btc-arbitrage/bot typecheck && yarn workspace @btc-arbitrage/web typecheck",
+    "lint": "yarn typecheck",
+    "test": "yarn build && yarn workspace @btc-arbitrage/domain test && yarn workspace @btc-arbitrage/shared test && yarn workspace @btc-arbitrage/exchange-core test && yarn workspace @btc-arbitrage/config test && yarn workspace @btc-arbitrage/db test && yarn workspace @btc-arbitrage/bot test && yarn workspace @btc-arbitrage/web test",
+    "db:generate": "yarn workspace @btc-arbitrage/db db:generate",
+    "db:migrate": "yarn workspace @btc-arbitrage/db db:migrate",
+    "db:studio": "yarn workspace @btc-arbitrage/db db:studio"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "@btc-arbitrage/bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "dev": "tsx src/main.ts",
+    "start": "node dist/main.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -b tsconfig.json --pretty false",
+    "lint": "tsc -b tsconfig.json --pretty false",
+    "test": "node --import tsx --test test/**/*.test.ts",
+    "test:watch": "node --test --watch dist-test/**/*.test.js"
+  },
+  "dependencies": {
+    "@btc-arbitrage/config": "workspace:*",
+    "@btc-arbitrage/domain": "workspace:*",
+    "@btc-arbitrage/exchange-core": "workspace:*",
+    "@btc-arbitrage/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2"
+  }
+}

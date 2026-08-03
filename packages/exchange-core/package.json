@@ -1,0 +1,23 @@
+{
+  "name": "@btc-arbitrage/exchange-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@btc-arbitrage/domain": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -b tsconfig.json --pretty false",
+    "lint": "tsc -b tsconfig.json --pretty false",
+    "test": "node --import tsx --test test/**/*.test.ts"
+  }
+}
