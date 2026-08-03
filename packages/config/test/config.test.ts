@@ -15,7 +15,7 @@ test('loadBotConfig applies safe monitoring defaults', () => {
   assert.equal(config.botExecutionMode, 'dry-run');
   assert.equal(config.botRunOnce, false);
   assert.equal(config.telegram.enabled, false);
-  assert.equal(config.telegram.alertCooldownMs, 60000);
+  assert.equal(config.telegram.alertCooldownMs, 3600000);
 });
 
 test('loadBotConfig rejects same exchange on both sides', () => {

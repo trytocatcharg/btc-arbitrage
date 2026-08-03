@@ -6,7 +6,7 @@ Safe-by-default TypeScript monorepo for monitoring BTC perpetual/futures prices 
 
 - Monitors BTC price snapshots from RISEx and Extended through read-only adapters.
 - Calculates absolute price spread and emits a signal when `absoluteDiffUsd >= MIN_PRICE_DIFF_USD`.
-- Sends Telegram alerts when `TELEGRAM_ENABLED=true` and Telegram credentials are configured. Repeated alerts for the same opportunity are throttled by `TELEGRAM_ALERT_COOLDOWN_MS`.
+- Sends Telegram alerts when `TELEGRAM_ENABLED=true` and Telegram credentials are configured. Telegram alerts are globally throttled by `TELEGRAM_ALERT_COOLDOWN_MS`; default is one notification per hour.
 - Keeps execution in `BOT_EXECUTION_MODE=dry-run` by default. No live order placement is implemented.
 - Provides a minimal read-only web scaffold and a base Drizzle/MariaDB schema.
 
@@ -40,7 +40,7 @@ Set these for Telegram alerts:
 TELEGRAM_ENABLED=true
 TELEGRAM_BOT_TOKEN=your_bot_token
 TELEGRAM_CHAT_ID=your_chat_id
-TELEGRAM_ALERT_COOLDOWN_MS=60000
+TELEGRAM_ALERT_COOLDOWN_MS=3600000
 ```
 
 Telegram alerts are always sent to the configured `TELEGRAM_CHAT_ID`. The bot also exposes a chat guard for future Telegram inbound handlers; any incoming update must be rejected unless its `chat.id` matches `TELEGRAM_CHAT_ID`.

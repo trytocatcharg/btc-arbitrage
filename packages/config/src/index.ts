@@ -66,7 +66,7 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     throw new Error('Live order placement is not implemented in this slice; keep BOT_EXECUTION_MODE=dry-run and ENABLE_ORDER_PLACEMENT=false');
   }
   const telegramEnabled = parseBoolean(env.TELEGRAM_ENABLED ?? 'false');
-  const telegramAlertCooldownMs = parseNonNegativeInteger(env.TELEGRAM_ALERT_COOLDOWN_MS ?? '60000', 'TELEGRAM_ALERT_COOLDOWN_MS');
+  const telegramAlertCooldownMs = parseNonNegativeInteger(env.TELEGRAM_ALERT_COOLDOWN_MS ?? '3600000', 'TELEGRAM_ALERT_COOLDOWN_MS');
 
   if (telegramEnabled && (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID)) {
     throw new Error('TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required when TELEGRAM_ENABLED=true');

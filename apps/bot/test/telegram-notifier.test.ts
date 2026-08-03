@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { assertAllowedTelegramChat, isAllowedTelegramChat, TelegramNotifier } from '../src/notifications/telegram-notifier.js';
+import { assertAllowedTelegramChat, formatTelegramSignal, isAllowedTelegramChat, TelegramNotifier } from '../src/notifications/telegram-notifier.js';
 import type { TradingSignal } from '@btc-arbitrage/domain';
 
 const signal: TradingSignal = {
@@ -51,12 +51,11 @@ test('Telegram chat guard only allows configured TELEGRAM_CHAT_ID', () => {
   assert.throws(() => assertAllowedTelegramChat({ id: '999999' }, '123456'), /chat id is not allowed/);
 });
 
-
-test('TelegramNotifier suppresses repeated alerts for the same signal during cooldown', async () => {
+test('TelegramNotifier suppresses all alerts during the global one-hour cooldown', async () => {
   let calls = 0;
   let now = 1_000;
   const notifier = new TelegramNotifier(
-    { enabled: true, botToken: 'secret-token', chatId: 'chat', alertCooldownMs: 60_000 },
+    { enabled: true, botToken: 'secret-token', chatId: 'chat', alertCooldownMs: 3_600_000 },
     async () => {
       calls += 1;
       return new Response('{"ok":true}', { status: 200 });
@@ -65,9 +64,9 @@ test('TelegramNotifier suppresses repeated alerts for the same signal during coo
   );
 
   await notifier.notifySignal(signal);
-  now += 30_000;
-  await notifier.notifySignal(signal);
-  now += 31_000;
+  now += 30 * 60_000;
+  await notifier.notifySignal({ ...signal, longExchange: 'risex', shortExchange: 'extended', absoluteDiffUsd: '100' });
+  now += 31 * 60_000;
   await notifier.notifySignal(signal);
 
   assert.equal(calls, 2);
@@ -77,7 +76,7 @@ test('TelegramNotifier suppresses retries during cooldown after Telegram failure
   let calls = 0;
   let now = 1_000;
   const notifier = new TelegramNotifier(
-    { enabled: true, botToken: 'secret-token', chatId: 'chat', alertCooldownMs: 60_000 },
+    { enabled: true, botToken: 'secret-token', chatId: 'chat', alertCooldownMs: 3_600_000 },
     async () => {
       calls += 1;
       return new Response('{"ok":false}', { status: 500 });
@@ -86,7 +85,7 @@ test('TelegramNotifier suppresses retries during cooldown after Telegram failure
   );
 
   await assert.rejects(() => notifier.notifySignal(signal), /Telegram sendMessage failed/);
-  now += 30_000;
+  now += 30 * 60_000;
   await notifier.notifySignal(signal);
 
   assert.equal(calls, 1);

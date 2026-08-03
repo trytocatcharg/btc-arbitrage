@@ -15,8 +15,7 @@ export interface TelegramChatLike {
 }
 
 export class TelegramNotifier implements Notifier {
-  private lastSignalKey?: string;
-  private lastSentAtMs = 0;
+  private lastNotificationAttemptAtMs = 0;
 
   constructor(private readonly config: TelegramConfig, private readonly fetchImpl: FetchLike = fetch, private readonly now: () => number = Date.now) {}
 
@@ -27,9 +26,8 @@ export class TelegramNotifier implements Notifier {
     }
     const allowedChatId = normalizeTelegramChatId(this.config.chatId);
 
-    if (this.isSuppressedByCooldown(signal)) return;
-    this.lastSignalKey = signalKey(signal);
-    this.lastSentAtMs = this.now();
+    if (this.isSuppressedByCooldown()) return;
+    this.lastNotificationAttemptAtMs = this.now();
 
     const response = await this.fetchImpl(`https://api.telegram.org/bot${this.config.botToken}/sendMessage`, {
       method: 'POST',
@@ -46,15 +44,11 @@ export class TelegramNotifier implements Notifier {
     }
   }
 
-  private isSuppressedByCooldown(signal: TradingSignal): boolean {
-    const cooldownMs = this.config.alertCooldownMs ?? 60_000;
+  private isSuppressedByCooldown(): boolean {
+    const cooldownMs = this.config.alertCooldownMs ?? 3_600_000;
     if (cooldownMs <= 0) return false;
-    return this.lastSignalKey === signalKey(signal) && this.now() - this.lastSentAtMs < cooldownMs;
+    return this.lastNotificationAttemptAtMs > 0 && this.now() - this.lastNotificationAttemptAtMs < cooldownMs;
   }
-}
-
-function signalKey(signal: TradingSignal): string {
-  return [signal.symbol, signal.priceSource, signal.longExchange, signal.shortExchange, signal.thresholdUsd].join(':');
 }
 
 export function formatTelegramSignal(signal: TradingSignal): string {
@@ -62,13 +56,19 @@ export function formatTelegramSignal(signal: TradingSignal): string {
     'BTC arbitrage signal',
     `Symbol: ${signal.symbol}`,
     `Source: ${signal.priceSource}`,
-    `Long: ${signal.longExchange}`,
-    `Short: ${signal.shortExchange}`,
-    `Spread: $${signal.absoluteDiffUsd}`,
+    `Long  📈: ${signal.longExchange}`,
+    `Short 📉: ${signal.shortExchange}`,
+    `Spread: $${formatUsdAmount(signal.absoluteDiffUsd)}`,
     `Threshold: $${signal.thresholdUsd}`,
     `Leverage: ${signal.leverage}x`,
     'Mode: dry-run / no live order submitted'
   ].join('\n');
+}
+
+function formatUsdAmount(value: string): string {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return value;
+  return parsed.toFixed(2);
 }
 
 export function normalizeTelegramChatId(chatId: string | number): string {
