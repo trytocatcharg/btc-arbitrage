@@ -29,8 +29,14 @@ test('loadBotConfig validates Telegram credentials when enabled', () => {
 test('loadBotConfig blocks live execution in the monitoring-only slice', () => {
   assert.throws(() => loadBotConfig({ BOT_EXECUTION_MODE: 'live' }), /Live order placement is not implemented/);
   assert.throws(() => loadBotConfig({ ENABLE_ORDER_PLACEMENT: 'true' }), /Live order placement is not implemented/);
-  assert.throws(() => loadBotConfig({ RISEX_TRADING_ENABLED: 'true' }), /Live order placement is not implemented/);
-  assert.throws(() => loadBotConfig({ EXTENDED_TRADING_ENABLED: 'true' }), /Live order placement is not implemented/);
+});
+
+test('loadBotConfig accepts exchange trading flags while global order placement stays disabled', () => {
+  const config = loadBotConfig({ RISEX_TRADING_ENABLED: 'true', EXTENDED_TRADING_ENABLED: 'true' });
+  assert.equal(config.botExecutionMode, 'dry-run');
+  assert.equal(config.enableOrderPlacement, false);
+  assert.equal(config.risex.tradingEnabled, true);
+  assert.equal(config.extended.tradingEnabled, true);
 });
 
 test('redactSecrets redacts token-like fields and database passwords', () => {

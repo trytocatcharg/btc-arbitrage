@@ -240,6 +240,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@btc-arbitrage/db@workspace:packages/db"
   dependencies:
+    "@types/node": "npm:20"
     drizzle-kit: "npm:^0.30.1"
     drizzle-orm: "npm:^0.38.3"
     mysql2: "npm:^3.12.0"
@@ -1312,12 +1313,12 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@types/node@npm:^22.10.5":
-  version: 22.20.1
-  resolution: "@types/node@npm:22.20.1"
+"@types/node@npm:20":
+  version: 20.19.43
+  resolution: "@types/node@npm:20.19.43"
   dependencies:
     undici-types: "npm:~6.21.0"
-  checksum: 10c0/f2ba54d3d1fb92e1c57c78d32c3a17655b1e87363b707136f55c422b4838d4054901ce5d27f75bb0e5ecb7ebfee3804e0987822d22b473473008091857a09353
+  checksum: 10c0/9bcec3b5295bdd77ff0b44a528a69f7e22028c347507ba2c69be47ec84e30299f45043b222e9c86c510e138c9c53b2419dd5cd34920602a4a5a381c288075318
   languageName: node
   linkType: hard
 
@@ -1454,7 +1455,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "btc-arbitrage@workspace:."
   dependencies:
-    "@types/node": "npm:^22.10.5"
+    "@types/node": "npm:20"
     tsx: "npm:^4.19.2"
     typescript: "npm:^5.7.2"
   languageName: unknown

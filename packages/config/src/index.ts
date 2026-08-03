@@ -62,8 +62,8 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   const enableOrderPlacement = parseBoolean(env.ENABLE_ORDER_PLACEMENT ?? 'false');
   const risexTradingEnabled = parseBoolean(env.RISEX_TRADING_ENABLED ?? 'false');
   const extendedTradingEnabled = parseBoolean(env.EXTENDED_TRADING_ENABLED ?? 'false');
-  if (executionMode === 'live' || enableOrderPlacement || risexTradingEnabled || extendedTradingEnabled) {
-    throw new Error('Live order placement is not implemented in this slice; keep BOT_EXECUTION_MODE=dry-run, ENABLE_ORDER_PLACEMENT=false, and exchange trading flags disabled');
+  if (executionMode === 'live' || enableOrderPlacement) {
+    throw new Error('Live order placement is not implemented in this slice; keep BOT_EXECUTION_MODE=dry-run and ENABLE_ORDER_PLACEMENT=false');
   }
   const telegramEnabled = parseBoolean(env.TELEGRAM_ENABLED ?? 'false');
   const telegramAlertCooldownMs = parseNonNegativeInteger(env.TELEGRAM_ALERT_COOLDOWN_MS ?? '60000', 'TELEGRAM_ALERT_COOLDOWN_MS');

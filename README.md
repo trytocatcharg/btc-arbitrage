@@ -49,6 +49,8 @@ If your global `yarn --version` is `1.x`, use `corepack yarn <command>` or run `
 
 Do not commit real credentials. Tokens, private keys, API keys, and DB passwords must never be logged.
 
+In Docker, `Environment file status { loaded: false }` is OK when env vars are injected by Compose/Portainer/Kubernetes instead of a repo `.env` file.
+
 ## Safe defaults
 
 ```txt
@@ -63,6 +65,8 @@ RISEX_TRADING_ENABLED=false
 EXTENDED_TRADING_ENABLED=false
 ENABLE_ORDER_PLACEMENT=false
 ```
+
+`RISEX_TRADING_ENABLED` and `EXTENDED_TRADING_ENABLED` may exist in the environment, but they are ignored while this is a monitoring-only bot. Real order placement still requires future TP/SL/execution work and stays blocked unless `ENABLE_ORDER_PLACEMENT` is implemented later.
 
 Smoke test one monitoring tick:
 

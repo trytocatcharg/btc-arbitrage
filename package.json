@@ -23,8 +23,11 @@
     "db:studio": "yarn workspace @btc-arbitrage/db db:studio"
   },
   "devDependencies": {
-    "@types/node": "^22.10.5",
+    "@types/node": "20",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20.20.1 <21"
   }
 }

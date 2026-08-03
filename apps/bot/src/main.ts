@@ -16,6 +16,15 @@ async function main() {
   console.log('Environment file status', { loaded: Boolean(loadedEnvPath), path: loadedEnvPath ?? null });
 
   const config = loadBotConfig();
+  if (config.risex.tradingEnabled || config.extended.tradingEnabled) {
+    console.warn('Exchange trading flags are enabled but ignored in this monitoring-only slice', {
+      risexTradingEnabled: config.risex.tradingEnabled,
+      extendedTradingEnabled: config.extended.tradingEnabled,
+      orderPlacementImplemented: false,
+      botExecutionMode: config.botExecutionMode
+    });
+  }
+
   console.log('Bot runtime config loaded', redactSecrets({
     exchangeA: config.exchangeA,
     exchangeB: config.exchangeB,
