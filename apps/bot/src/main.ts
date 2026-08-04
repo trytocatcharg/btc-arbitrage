@@ -27,10 +27,7 @@ async function main() {
     });
   }
 
-  await validateDbConnection(config.database.url);
-  console.log('connection succesfull');
-
-  console.log('Bot runtime config loaded', redactSecrets({
+ console.log('Bot runtime config loaded', redactSecrets({
     database: {
       hostName: config.database.hostName,
       port: config.database.port,
@@ -51,6 +48,10 @@ async function main() {
     telegramAlertCooldownMs: config.telegram.alertCooldownMs,
     readApiEnabled: config.readApi.enabled
   }));
+
+  await validateDbConnection(config.database.url);
+  console.log('connection succesfull');
+
 
   console.log('Initializing exchange registry');
   const registry = createExchangeRegistry(config);
