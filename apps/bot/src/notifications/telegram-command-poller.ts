@@ -16,6 +16,18 @@ export interface TelegramUpdatesResponse {
   result?: TelegramUpdate[];
 }
 
+export interface TelegramApiResponse {
+  ok: boolean;
+  description?: string;
+}
+
+const AVAILABLE_COMMANDS = [
+  {
+    command: 'config',
+    description: 'Show active bot configuration'
+  }
+] as const;
+
 export class TelegramCommandPoller {
   private offset = 0;
 
@@ -23,6 +35,32 @@ export class TelegramCommandPoller {
     private readonly config: BotConfig,
     private readonly fetchImpl: FetchLike = fetch
   ) {}
+
+  async configureAvailableCommands(): Promise<void> {
+    if (!this.config.telegram.enabled) return;
+    if (!this.config.telegram.botToken || !this.config.telegram.chatId) return;
+
+    const response = await this.fetchImpl(`https://api.telegram.org/bot${this.config.telegram.botToken}/setMyCommands`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        commands: AVAILABLE_COMMANDS,
+        scope: {
+          type: 'chat',
+          chat_id: normalizeTelegramChatId(this.config.telegram.chatId)
+        }
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Telegram setMyCommands failed with HTTP ${response.status}`);
+    }
+
+    const payload = await response.json() as TelegramApiResponse;
+    if (!payload.ok) {
+      throw new Error(`Telegram setMyCommands returned ok=false${payload.description ? `: ${payload.description}` : ''}`);
+    }
+  }
 
   async pollOnce(): Promise<void> {
     if (!this.config.telegram.enabled) return;

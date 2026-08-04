@@ -49,6 +49,8 @@ Available Telegram commands:
 
 - `/config` — replies only to `TELEGRAM_CHAT_ID` with the active basic bot configuration and the configured Exchange A / Exchange B pair.
 
+On startup, the bot registers the Telegram command menu with `setMyCommands` scoped to the configured `TELEGRAM_CHAT_ID`.
+
 If your global `yarn --version` is `1.x`, use `corepack yarn <command>` or run `corepack enable` first. The repo is pinned to Yarn 4 through `packageManager`.
 
 Do not commit real credentials. Tokens, private keys, API keys, and DB passwords must never be logged.

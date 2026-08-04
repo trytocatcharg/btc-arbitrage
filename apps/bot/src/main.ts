@@ -63,6 +63,17 @@ async function main() {
   const registry = createExchangeRegistry(config);
   const notifier = new TelegramNotifier(config.telegram);
   const commandPoller = config.telegram.enabled ? new TelegramCommandPoller(config) : undefined;
+  if (commandPoller) {
+    try {
+      await commandPoller.configureAvailableCommands();
+      console.log('Telegram commands configured', {
+        scope: 'chat',
+        commands: ['config']
+      });
+    } catch (error) {
+      console.warn('Telegram command configuration failed; monitoring will continue', error instanceof Error ? { message: error.message } : { error });
+    }
+  }
 
   if (config.readApi.enabled) {
     console.log('Starting read-only API server', { host: config.readApi.host, port: config.readApi.port });
