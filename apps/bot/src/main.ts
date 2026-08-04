@@ -1,4 +1,5 @@
 import { loadBotConfig, loadDotEnvFile, redactSecrets } from '@btc-arbitrage/config';
+import { validateDbConnection } from '@btc-arbitrage/db';
 import { createExchangeRegistry } from './exchanges/registry.js';
 import { TelegramNotifier } from './notifications/telegram-notifier.js';
 import { runPollingLoop } from './runtime/polling-loop.js';
@@ -16,14 +17,19 @@ async function main() {
   console.log('Environment file status', { loaded: Boolean(loadedEnvPath), path: loadedEnvPath ?? null });
 
   const config = loadBotConfig();
-  if (config.risex.tradingEnabled || config.extended.tradingEnabled) {
+  if (config.risex.tradingEnabled || config.extended.tradingEnabled || config.arcus.tradingEnabled) {
     console.warn('Exchange trading flags are enabled but ignored in this monitoring-only slice', {
       risexTradingEnabled: config.risex.tradingEnabled,
       extendedTradingEnabled: config.extended.tradingEnabled,
+      arcusTradingEnabled: config.arcus.tradingEnabled,
       orderPlacementImplemented: false,
       botExecutionMode: config.botExecutionMode
     });
   }
+
+  if (!config.databaseUrl) throw new Error('DATABASE_URL is required to validate the database connection');
+  await validateDbConnection(config.databaseUrl);
+  console.log('connection succesfull');
 
   console.log('Bot runtime config loaded', redactSecrets({
     exchangeA: config.exchangeA,

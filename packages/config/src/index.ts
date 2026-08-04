@@ -30,6 +30,13 @@ export interface BotConfig {
     tradingEnabled: boolean;
     userAgent: string;
   };
+  arcus: {
+    apiBaseUrl: string;
+    apiKey?: string;
+    accountAddress?: string;
+    tradingEnabled: boolean;
+    userAgent: string;
+  };
   telegram: {
     enabled: boolean;
     botToken?: string;
@@ -62,6 +69,7 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   const enableOrderPlacement = parseBoolean(env.ENABLE_ORDER_PLACEMENT ?? 'false');
   const risexTradingEnabled = parseBoolean(env.RISEX_TRADING_ENABLED ?? 'false');
   const extendedTradingEnabled = parseBoolean(env.EXTENDED_TRADING_ENABLED ?? 'false');
+  const arcusTradingEnabled = parseBoolean(env.ARCUS_TRADING_ENABLED ?? 'false');
   if (executionMode === 'live' || enableOrderPlacement) {
     throw new Error('Live order placement is not implemented in this slice; keep BOT_EXECUTION_MODE=dry-run and ENABLE_ORDER_PLACEMENT=false');
   }
@@ -100,6 +108,13 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       tradingEnabled: extendedTradingEnabled,
       userAgent: env.EXTENDED_USER_AGENT ?? 'btc-arbitrage-bot/0.1'
     },
+    arcus: {
+      apiBaseUrl: trimTrailingSlash(env.ARCUS_API_BASE_URL ?? 'https://api.arcus.xyz'),
+      apiKey: emptyToUndefined(env.ARCUS_API_KEY),
+      accountAddress: emptyToUndefined(env.ARCUS_ACCOUNT_ADDRESS),
+      tradingEnabled: arcusTradingEnabled,
+      userAgent: env.ARCUS_USER_AGENT ?? 'btc-arbitrage-bot/0.1'
+    },
     telegram: {
       enabled: telegramEnabled,
       botToken: emptyToUndefined(env.TELEGRAM_BOT_TOKEN),
@@ -134,8 +149,8 @@ function redactString(value: string): string {
 }
 
 function parseExchange(value: string, field: string): ExchangeId {
-  if (value === 'risex' || value === 'extended') return value;
-  throw new Error(`${field} must be one of: risex, extended`);
+  if (value === 'risex' || value === 'extended' || value === 'arcus') return value;
+  throw new Error(`${field} must be one of: risex, extended, arcus`);
 }
 
 function parsePriceSource(value: string): PriceSource {

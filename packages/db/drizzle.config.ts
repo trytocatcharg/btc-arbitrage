@@ -5,7 +5,7 @@ export default defineConfig({
   out: './migrations',
   dialect: 'mysql',
   dbCredentials: {
-    url: process.env.DATABASE_URL ?? 'mysql://user:password@127.0.0.1:3306/btc_arbitrage'
+    url: process.env.DATABASE_URL
   },
   strict: true,
   verbose: true

@@ -1,10 +1,10 @@
 # btc-arbitrage
 
-Safe-by-default TypeScript monorepo for monitoring BTC perpetual/futures prices on RISEx and Extended.
+Safe-by-default TypeScript monorepo for monitoring BTC perpetual/futures prices across a configured exchange pair: RISEx, Extended, or Arcus.
 
 ## What this slice does
 
-- Monitors BTC price snapshots from RISEx and Extended through read-only adapters.
+- Monitors BTC price snapshots from the configured exchange pair through read-only adapters: RISEx, Extended, or Arcus.
 - Calculates absolute price spread and emits a signal when `absoluteDiffUsd >= MIN_PRICE_DIFF_USD`.
 - Sends Telegram alerts when `TELEGRAM_ENABLED=true` and Telegram credentials are configured. Telegram alerts are globally throttled by `TELEGRAM_ALERT_COOLDOWN_MS`; default is one notification per hour.
 - Keeps execution in `BOT_EXECUTION_MODE=dry-run` by default. No live order placement is implemented.
@@ -63,10 +63,11 @@ BOT_EXECUTION_MODE=dry-run
 BOT_RUN_ONCE=false
 RISEX_TRADING_ENABLED=false
 EXTENDED_TRADING_ENABLED=false
+ARCUS_TRADING_ENABLED=false
 ENABLE_ORDER_PLACEMENT=false
 ```
 
-`RISEX_TRADING_ENABLED` and `EXTENDED_TRADING_ENABLED` may exist in the environment, but they are ignored while this is a monitoring-only bot. Real order placement still requires future TP/SL/execution work and stays blocked unless `ENABLE_ORDER_PLACEMENT` is implemented later.
+`RISEX_TRADING_ENABLED`, `EXTENDED_TRADING_ENABLED`, and `ARCUS_TRADING_ENABLED` may exist in the environment, but they are ignored while this is a monitoring-only bot. Real order placement still requires future TP/SL/execution work and stays blocked unless `ENABLE_ORDER_PLACEMENT` is implemented later.
 
 Smoke test one monitoring tick:
 

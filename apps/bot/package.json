@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@btc-arbitrage/config": "workspace:*",
+    "@btc-arbitrage/db": "workspace:*",
     "@btc-arbitrage/domain": "workspace:*",
     "@btc-arbitrage/exchange-core": "workspace:*",
     "@btc-arbitrage/shared": "workspace:*"

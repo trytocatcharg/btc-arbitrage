@@ -1,4 +1,4 @@
-export type ExchangeId = 'risex' | 'extended';
+export type ExchangeId = 'risex' | 'extended' | 'arcus';
 export type MarketType = 'perpetual' | 'futures';
 export type PriceSource = 'mark' | 'index' | 'last';
 export type OrderSide = 'long' | 'short';

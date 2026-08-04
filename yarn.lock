@@ -221,6 +221,7 @@ __metadata:
   resolution: "@btc-arbitrage/bot@workspace:apps/bot"
   dependencies:
     "@btc-arbitrage/config": "workspace:*"
+    "@btc-arbitrage/db": "workspace:*"
     "@btc-arbitrage/domain": "workspace:*"
     "@btc-arbitrage/exchange-core": "workspace:*"
     "@btc-arbitrage/shared": "workspace:*"
@@ -236,7 +237,7 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@btc-arbitrage/db@workspace:packages/db":
+"@btc-arbitrage/db@workspace:*, @btc-arbitrage/db@workspace:packages/db":
   version: 0.0.0-use.local
   resolution: "@btc-arbitrage/db@workspace:packages/db"
   dependencies:
