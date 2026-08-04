@@ -107,6 +107,16 @@ Current adapter behavior is fail-safe: if the configured `PRICE_SOURCE` is not p
 
 The initial Drizzle schema lives in `packages/db/src/schema.ts`.
 
+The bot and Drizzle use these MariaDB env vars:
+
+```txt
+DATABASE_HOST_NAME=127.0.0.1
+DATABASE_USER_NAME=user
+DB_PORT=3306
+DATABASE_USER_PASSWORD=password
+DATABASE_DB_NAME=btc_arbitrage
+```
+
 ```bash
 yarn db:generate
 yarn db:migrate

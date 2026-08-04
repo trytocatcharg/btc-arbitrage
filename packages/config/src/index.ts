@@ -2,8 +2,17 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { ExchangeId, ExecutionMode, MarketType, PriceSource } from '@btc-arbitrage/domain';
 
+export interface DatabaseConfig {
+  hostName: string;
+  userName: string;
+  port: number;
+  userPassword: string;
+  dbName: string;
+  url: string;
+}
+
 export interface BotConfig {
-  databaseUrl?: string;
+  database: DatabaseConfig;
   exchangeA: ExchangeId;
   exchangeB: ExchangeId;
   exchangeLong?: ExchangeId;
@@ -80,8 +89,10 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     throw new Error('TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required when TELEGRAM_ENABLED=true');
   }
 
+  const database = loadDatabaseConfig(env);
+
   return {
-    databaseUrl: emptyToUndefined(env.DATABASE_URL),
+    database,
     exchangeA,
     exchangeB,
     exchangeLong: env.EXCHANGE_LONG ? parseExchange(env.EXCHANGE_LONG, 'EXCHANGE_LONG') : undefined,
@@ -137,11 +148,39 @@ export function redactSecrets(value: unknown): unknown {
   if (value && typeof value === 'object') {
     const out: Record<string, unknown> = {};
     for (const [key, entry] of Object.entries(value)) {
-      out[key] = /token|key|secret|private|signature|authorization|databaseUrl|DATABASE_URL/i.test(key) ? '[REDACTED]' : redactSecrets(entry);
+      out[key] = /token|key|secret|private|signature|authorization|password|databaseUrl|DATABASE_URL/i.test(key) ? '[REDACTED]' : redactSecrets(entry);
     }
     return out;
   }
   return value;
+}
+
+
+function loadDatabaseConfig(env: NodeJS.ProcessEnv): DatabaseConfig {
+  const hostName = env.DATABASE_HOST_NAME ?? '127.0.0.1';
+  const userName = env.DATABASE_USER_NAME ?? 'user';
+  const port = parsePositiveInteger(env.DB_PORT ?? '3306', 'DB_PORT');
+  const userPassword = env.DATABASE_USER_PASSWORD ?? 'password';
+  const dbName = env.DATABASE_DB_NAME ?? 'btc_arbitrage';
+
+  return {
+    hostName,
+    userName,
+    port,
+    userPassword,
+    dbName,
+    url: buildDatabaseUrl({ hostName, userName, port, userPassword, dbName })
+  };
+}
+
+function buildDatabaseUrl(input: Omit<DatabaseConfig, 'url'>): string {
+  const url = new URL('mysql://localhost');
+  url.hostname = input.hostName;
+  url.port = String(input.port);
+  url.username = input.userName;
+  url.password = input.userPassword;
+  url.pathname = `/${input.dbName}`;
+  return url.toString();
 }
 
 function redactString(value: string): string {

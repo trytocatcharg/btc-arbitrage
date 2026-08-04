@@ -21,6 +21,18 @@ yarn workspace @btc-arbitrage/db db:studio
 ```
 
 
+## Environment
+
+The DB package uses these MariaDB env vars:
+
+```txt
+DATABASE_HOST_NAME=127.0.0.1
+DATABASE_USER_NAME=user
+DB_PORT=3306
+DATABASE_USER_PASSWORD=password
+DATABASE_DB_NAME=btc_arbitrage
+```
+
 ## SQL scripts
 
 Manual SQL scripts live in `packages/db/scripts`.
@@ -28,7 +40,12 @@ Manual SQL scripts live in `packages/db/scripts`.
 For a fresh MariaDB database:
 
 ```bash
-mariadb --host 127.0.0.1 --port 3306 --user user --password btc_arbitrage < packages/db/scripts/001_create_schema.sql
+mariadb \
+  --host "$DATABASE_HOST_NAME" \
+  --port "$DB_PORT" \
+  --user "$DATABASE_USER_NAME" \
+  --password \
+  "$DATABASE_DB_NAME" < packages/db/scripts/001_create_schema.sql
 ```
 
 If the database already has a different schema, do not use this as a migration. Create an ALTER-only migration instead.

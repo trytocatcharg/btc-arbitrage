@@ -27,11 +27,16 @@ async function main() {
     });
   }
 
-  if (!config.databaseUrl) throw new Error('DATABASE_URL is required to validate the database connection');
-  await validateDbConnection(config.databaseUrl);
+  await validateDbConnection(config.database.url);
   console.log('connection succesfull');
 
   console.log('Bot runtime config loaded', redactSecrets({
+    database: {
+      hostName: config.database.hostName,
+      port: config.database.port,
+      userName: config.database.userName,
+      dbName: config.database.dbName
+    },
     exchangeA: config.exchangeA,
     exchangeB: config.exchangeB,
     symbol: config.btcSymbol,
