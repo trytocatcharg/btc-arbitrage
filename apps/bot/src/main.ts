@@ -1,6 +1,7 @@
 import { loadBotConfig, loadDotEnvFile, redactSecrets } from '@btc-arbitrage/config';
 import { getDb, validateDbConnection } from '@btc-arbitrage/db';
 import { createExchangeRegistry } from './exchanges/registry.js';
+import { TelegramCommandPoller } from './notifications/telegram-command-poller.js';
 import { TelegramNotifier } from './notifications/telegram-notifier.js';
 import { runPollingLoop } from './runtime/polling-loop.js';
 import { createReadOnlyApiServer } from './api/read-only-api.js';
@@ -61,6 +62,7 @@ async function main() {
   console.log('Initializing exchange registry');
   const registry = createExchangeRegistry(config);
   const notifier = new TelegramNotifier(config.telegram);
+  const commandPoller = config.telegram.enabled ? new TelegramCommandPoller(config) : undefined;
 
   if (config.readApi.enabled) {
     console.log('Starting read-only API server', { host: config.readApi.host, port: config.readApi.port });
@@ -70,7 +72,7 @@ async function main() {
   }
 
   console.log('Starting monitoring loop');
-  await runPollingLoop({ config, registry, notifier });
+  await runPollingLoop({ config, registry, notifier, commandPoller });
   console.log('Monitoring loop stopped', { stoppedAt: new Date().toISOString() });
 }
 

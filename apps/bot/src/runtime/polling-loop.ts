@@ -9,7 +9,11 @@ export interface ExchangeRegistry {
   get(id: string): ExchangeAdapter;
 }
 
-export async function runPollingLoop(input: { config: BotConfig; registry: ExchangeRegistry; notifier: Notifier }): Promise<void> {
+export interface CommandPoller {
+  pollOnce(): Promise<void>;
+}
+
+export async function runPollingLoop(input: { config: BotConfig; registry: ExchangeRegistry; notifier: Notifier; commandPoller?: CommandPoller }): Promise<void> {
   const signalEngine = new SignalEngine({ thresholdUsd: input.config.minPriceDiffUsd, leverage: input.config.leverage });
   const exchangeA = input.registry.get(input.config.exchangeA);
   const exchangeB = input.registry.get(input.config.exchangeB);
@@ -34,6 +38,12 @@ export async function runPollingLoop(input: { config: BotConfig; registry: Excha
     });
 
     try {
+      try {
+        await input.commandPoller?.pollOnce();
+      } catch (error) {
+        console.error('Telegram command polling failed', error instanceof Error ? { tick, message: error.message } : { tick, error });
+      }
+
       const [priceA, priceB] = await Promise.all([
         exchangeA.getPriceSnapshot({ symbol: input.config.btcSymbol, marketType: input.config.marketType, priceSource: input.config.priceSource }),
         exchangeB.getPriceSnapshot({ symbol: input.config.btcSymbol, marketType: input.config.marketType, priceSource: input.config.priceSource })

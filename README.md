@@ -45,6 +45,10 @@ TELEGRAM_ALERT_COOLDOWN_MS=3600000
 
 Telegram alerts are always sent to the configured `TELEGRAM_CHAT_ID`. The bot also exposes a chat guard for future Telegram inbound handlers; any incoming update must be rejected unless its `chat.id` matches `TELEGRAM_CHAT_ID`.
 
+Available Telegram commands:
+
+- `/config` — replies only to `TELEGRAM_CHAT_ID` with the active basic bot configuration and the configured Exchange A / Exchange B pair.
+
 If your global `yarn --version` is `1.x`, use `corepack yarn <command>` or run `corepack enable` first. The repo is pinned to Yarn 4 through `packageManager`.
 
 Do not commit real credentials. Tokens, private keys, API keys, and DB passwords must never be logged.
@@ -96,6 +100,12 @@ command: >
     yarn start
   "
 ```
+
+## Architecture rules
+
+Project-level architecture decisions live in [`docs/architecture.md`](./docs/architecture.md).
+
+Important DB rule: all application DB access must use `getDb()` from `@btc-arbitrage/db`.
 
 ## Exchange contracts
 
