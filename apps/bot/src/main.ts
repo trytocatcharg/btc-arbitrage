@@ -1,5 +1,5 @@
 import { loadBotConfig, loadDotEnvFile, redactSecrets } from '@btc-arbitrage/config';
-import { validateDbConnection } from '@btc-arbitrage/db';
+import { getDb, validateDbConnection } from '@btc-arbitrage/db';
 import { createExchangeRegistry } from './exchanges/registry.js';
 import { TelegramNotifier } from './notifications/telegram-notifier.js';
 import { runPollingLoop } from './runtime/polling-loop.js';
@@ -50,8 +50,12 @@ async function main() {
     readApiEnabled: config.readApi.enabled
   }));
 
-  await validateDbConnection(config.database.url);
-  console.log('connection succesfull');
+
+  console.log('Connecting to database...');
+  await getDb();
+  console.log('Database connected');
+  // await validateDbConnection(config.database.url);
+  // console.log('connection succesfull');
 
 
   console.log('Initializing exchange registry');
