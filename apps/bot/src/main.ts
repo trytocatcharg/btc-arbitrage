@@ -32,7 +32,8 @@ async function main() {
       hostName: config.database.hostName,
       port: config.database.port,
       userName: config.database.userName,
-      dbName: config.database.dbName
+      dbName: config.database.dbName,
+      url: config.database.url
     },
     exchangeA: config.exchangeA,
     exchangeB: config.exchangeB,
