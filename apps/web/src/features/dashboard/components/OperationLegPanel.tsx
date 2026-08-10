@@ -1,3 +1,4 @@
+import type { FC } from 'react';
 import { formatBtc, formatSignedUsd, formatUsd } from '../dashboard-formatters.js';
 import type { OperationLeg } from '../operations.js';
 import { LegStat } from './LegStat.js';
@@ -6,7 +7,7 @@ interface OperationLegPanelProps {
   leg: OperationLeg;
 }
 
-export function OperationLegPanel({ leg }: OperationLegPanelProps) {
+export const OperationLegPanel: FC<OperationLegPanelProps> = ({ leg }) => {
   const sideTone = leg.side === 'long' ? 'text-profit' : 'text-loss';
   const pnlTone = leg.unrealizedPnlUsd >= 0 ? 'border-profit-border bg-profit-surface/60 text-profit' : 'border-loss-border bg-loss-surface/60 text-loss';
 
@@ -36,4 +37,4 @@ export function OperationLegPanel({ leg }: OperationLegPanelProps) {
       </dl>
     </section>
   );
-}
+};

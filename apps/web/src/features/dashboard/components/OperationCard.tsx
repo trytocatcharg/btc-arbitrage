@@ -1,3 +1,4 @@
+import type { FC } from 'react';
 import { formatDateTime, formatSignedUsd, formatUsd } from '../dashboard-formatters.js';
 import { calculateOperationPnl, isProfitable, type ArbitrageOperation } from '../operations.js';
 import { OperationLegPanel } from './OperationLegPanel.js';
@@ -8,7 +9,7 @@ interface OperationCardProps {
   operation: ArbitrageOperation;
 }
 
-export function OperationCard({ operation }: OperationCardProps) {
+export const OperationCard: FC<OperationCardProps> = ({ operation }) => {
   const pnl = calculateOperationPnl(operation);
   const profitable = isProfitable(pnl);
 
@@ -49,4 +50,4 @@ export function OperationCard({ operation }: OperationCardProps) {
       </footer>
     </article>
   );
-}
+};

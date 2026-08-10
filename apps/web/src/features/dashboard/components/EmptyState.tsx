@@ -1,10 +1,11 @@
+import type { FC } from 'react';
 import { ExecutionMode } from '@btc-arbitrage/domain';
 
 interface EmptyStateProps {
   executionMode: ExecutionMode;
 }
 
-export function EmptyState({ executionMode }: EmptyStateProps) {
+export const EmptyState: FC<EmptyStateProps> = ({ executionMode }) => {
   return (
     <div className="rounded-2xl border border-slate-800 bg-slate-900 p-8 text-center">
       <h3 className="text-lg font-semibold">No open operations</h3>
@@ -15,4 +16,4 @@ export function EmptyState({ executionMode }: EmptyStateProps) {
       </p>
     </div>
   );
-}
+};

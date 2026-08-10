@@ -1,3 +1,4 @@
+import type { FC } from 'react';
 import { ExecutionMode } from '@btc-arbitrage/domain';
 import { mockOpenOperations } from './mock-operations.js';
 import { EmptyState } from './components/EmptyState.js';
@@ -10,7 +11,7 @@ const executionMode = getExecutionMode();
 const openOperations = executionMode === ExecutionMode.DryRun ? mockOpenOperations : [];
 const portfolioPnl = openOperations.reduce((total, operation) => total + calculateOperationPnl(operation).netPnlUsd, 0);
 
-export function Dashboard() {
+export const Dashboard: FC = () => {
   return (
     <main className="mx-auto max-w-7xl px-6 py-10">
       <section className="rounded-3xl border border-panel-border bg-panel/85 p-6 shadow-2xl shadow-slate-950/50 backdrop-blur">
@@ -69,7 +70,7 @@ export function Dashboard() {
       </section>
     </main>
   );
-}
+};
 
 function getExecutionMode(): ExecutionMode {
   return import.meta.env.VITE_BOT_EXECUTION_MODE === ExecutionMode.Live ? ExecutionMode.Live : ExecutionMode.DryRun;

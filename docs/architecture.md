@@ -61,6 +61,22 @@ mock-operations.ts
 
 Do not reintroduce multiple React components into `Dashboard.tsx`. `Dashboard.tsx` should compose the screen.
 
+React components must be declared as typed functional components:
+
+```tsx
+import type { FC } from 'react';
+
+interface MetricCardProps {
+  label: string;
+}
+
+export const MetricCard: FC<MetricCardProps> = ({ label }) => {
+  return <article>{label}</article>;
+};
+```
+
+Pure helpers can remain regular functions.
+
 ## Tailwind CSS
 
 The web uses Tailwind CSS v4 with the official Vite plugin.
