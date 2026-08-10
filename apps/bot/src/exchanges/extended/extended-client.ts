@@ -1,4 +1,4 @@
-import type { PriceSnapshot } from '@btc-arbitrage/domain';
+import { ExecutionMode, type PriceSnapshot } from '@btc-arbitrage/domain';
 import type { ExchangeAdapter, ExchangeMarket, PriceRequest } from '@btc-arbitrage/exchange-core';
 import { normalizeSymbol } from '@btc-arbitrage/exchange-core';
 import { extractPrice, extractTimestamp, findMarket, getMarketId } from '../market-normalization.js';
@@ -32,7 +32,7 @@ export function createExtendedAdapter(config: ExtendedConfig, http = new Extende
     },
     async createOrder() {
       return {
-        mode: 'dry-run',
+        mode: ExecutionMode.DryRun,
         symbol: 'BTCUSDT',
         leverage: 0,
         status: 'blocked',

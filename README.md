@@ -1,63 +1,77 @@
 # btc-arbitrage
 
-Safe-by-default TypeScript monorepo for monitoring BTC perpetual/futures prices across a configured exchange pair: RISEx, Extended, or Arcus.
+Safe-by-default TypeScript monorepo for monitoring BTC perpetual/futures prices across a configured exchange pair and visualizing arbitrage operations in a read-only web dashboard.
 
-## What this slice does
+## Current state
 
-- Monitors BTC price snapshots from the configured exchange pair through read-only adapters: RISEx, Extended, or Arcus.
-- Calculates absolute price spread and emits a signal when `absoluteDiffUsd >= MIN_PRICE_DIFF_USD`.
-- Sends Telegram alerts when `TELEGRAM_ENABLED=true` and Telegram credentials are configured. Telegram alerts are globally throttled by `TELEGRAM_ALERT_COOLDOWN_MS`; default is one notification per hour.
-- Keeps execution in `BOT_EXECUTION_MODE=dry-run` by default. No live order placement is implemented.
-- Provides a minimal read-only web scaffold and a base Drizzle/MariaDB schema.
+| Area | Status |
+|---|---|
+| Bot | Monitors BTC prices on two configured exchanges and sends Telegram alerts when spread threshold is met. |
+| Exchanges | Read-only market data adapters for RISEx, Extended, and Arcus. |
+| Trading | Blocked. No live order placement, TP, or SL is implemented yet. |
+| Database | MariaDB + Drizzle schema and SQL scripts for prices, spreads, signals, events, trades, legs, status history, and Telegram command logs. |
+| Web | React + Tailwind CSS v4 read-only dashboard for open operations, dry-run mocks, and net PnL visualization. |
+| Telegram | Alerts plus `/config` command, both restricted to `TELEGRAM_CHAT_ID`. |
+
+## What works now
+
+- Monitors BTC price snapshots from `EXCHANGE_A` and `EXCHANGE_B`.
+- Supports `risex`, `extended`, and `arcus` as exchange ids.
+- Calculates absolute spread and emits a signal when `absoluteDiffUsd >= MIN_PRICE_DIFF_USD`.
+- Sends Telegram alerts with a global cooldown; default is one alert per hour.
+- Registers `/config` as a Telegram command scoped to the configured chat.
+- Shows a web dashboard with open operations and net PnL.
+- Uses dry-run mock operations in the web when `VITE_BOT_EXECUTION_MODE` is not `live`.
 
 ## Monorepo layout
 
 ```txt
 apps/bot      Node.js + TypeScript monitoring runtime
-apps/web      React + Tailwind read-only dashboard scaffold
+apps/web      React + Tailwind v4 read-only operations dashboard
 packages/config
 packages/db
 packages/domain
 packages/exchange-core
 packages/shared
+docs
+```
+
+## Tooling
+
+The repo uses Yarn workspaces with a Yarn Berry lockfile.
+
+Important: the root `package.json` intentionally does **not** include `packageManager`. Do not add it automatically.
+
+If your global `yarn --version` is `1.x`, prefer explicit Corepack commands to avoid accidental package metadata changes:
+
+```bash
+COREPACK_ENABLE_AUTO_PIN=0 corepack yarn@4.5.3 install
+COREPACK_ENABLE_AUTO_PIN=0 corepack yarn@4.5.3 dev:bot
+COREPACK_ENABLE_AUTO_PIN=0 corepack yarn@4.5.3 dev:web
+```
+
+If your shell already resolves to Yarn 4, these are enough:
+
+```bash
+yarn install
+yarn dev:bot
+yarn dev:web
 ```
 
 ## First run
 
 ```bash
-corepack enable
-yarn install
+COREPACK_ENABLE_AUTO_PIN=0 corepack yarn@4.5.3 install
 cp .env.example .env
-yarn typecheck
-yarn test
-yarn dev:bot
-yarn dev:web
+COREPACK_ENABLE_AUTO_PIN=0 corepack yarn@4.5.3 dev:bot
+COREPACK_ENABLE_AUTO_PIN=0 corepack yarn@4.5.3 dev:web
 ```
-
-Set these for Telegram alerts:
-
-```txt
-TELEGRAM_ENABLED=true
-TELEGRAM_BOT_TOKEN=your_bot_token
-TELEGRAM_CHAT_ID=your_chat_id
-TELEGRAM_ALERT_COOLDOWN_MS=3600000
-```
-
-Telegram alerts are always sent to the configured `TELEGRAM_CHAT_ID`. The bot also exposes a chat guard for future Telegram inbound handlers; any incoming update must be rejected unless its `chat.id` matches `TELEGRAM_CHAT_ID`.
-
-Available Telegram commands:
-
-- `/config` — replies only to `TELEGRAM_CHAT_ID` with the active basic bot configuration and the configured Exchange A / Exchange B pair.
-
-On startup, the bot registers the Telegram command menu with `setMyCommands` scoped to the configured `TELEGRAM_CHAT_ID`.
-
-If your global `yarn --version` is `1.x`, use `corepack yarn <command>` or run `corepack enable` first. The repo is pinned to Yarn 4 through `packageManager`.
 
 Do not commit real credentials. Tokens, private keys, API keys, and DB passwords must never be logged.
 
-In Docker, `Environment file status { loaded: false }` is OK when env vars are injected by Compose/Portainer/Kubernetes instead of a repo `.env` file.
+## Bot configuration
 
-## Safe defaults
+Safe defaults:
 
 ```txt
 EXCHANGE_A=risex
@@ -73,13 +87,121 @@ ARCUS_TRADING_ENABLED=false
 ENABLE_ORDER_PLACEMENT=false
 ```
 
-`RISEX_TRADING_ENABLED`, `EXTENDED_TRADING_ENABLED`, and `ARCUS_TRADING_ENABLED` may exist in the environment, but they are ignored while this is a monitoring-only bot. Real order placement still requires future TP/SL/execution work and stays blocked unless `ENABLE_ORDER_PLACEMENT` is implemented later.
+`BOT_EXECUTION_MODE=live` and `ENABLE_ORDER_PLACEMENT=true` are blocked until live trading is intentionally implemented.
 
-Smoke test one monitoring tick:
+The runtime uses the global `ExecutionMode` enum from `@btc-arbitrage/domain`; do not duplicate `dry-run` / `live` strings in app code.
+
+## Telegram
+
+Required for alerts and commands:
+
+```txt
+TELEGRAM_ENABLED=true
+TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_CHAT_ID=your_chat_id
+TELEGRAM_ALERT_COOLDOWN_MS=3600000
+```
+
+Rules:
+
+- Alerts are sent only to `TELEGRAM_CHAT_ID`.
+- Inbound commands are ignored unless `chat.id` matches `TELEGRAM_CHAT_ID`.
+- `/config` returns the active basic bot configuration and configured Exchange A / Exchange B.
+- On startup, the bot registers `/config` through `setMyCommands` scoped to the configured chat.
+
+## Web dashboard
+
+The web app is read-only.
+
+Current dashboard sections:
+
+- Open operations.
+- Two exchange legs per operation.
+- Entry price, mark price, size, notional, margin, leverage, fees, funding, liquidation price.
+- PnL per leg.
+- Net open PnL across both legs.
+- Historical operations placeholder for the next slice.
+
+Dry-run behavior:
 
 ```bash
-BOT_RUN_ONCE=true TELEGRAM_ENABLED=false READ_API_ENABLED=false yarn dev:bot
+VITE_BOT_EXECUTION_MODE=dry-run COREPACK_ENABLE_AUTO_PIN=0 corepack yarn@4.5.3 dev:web
 ```
+
+When dry-run is active, the dashboard uses mock open operations from:
+
+```txt
+apps/web/src/features/dashboard/mock-operations.ts
+```
+
+Mock `fundingUsd` and `unrealizedPnlUsd` values are randomized on module load so refreshes can show different positive/negative PnL states.
+
+More detail: [`docs/web-dashboard.md`](./docs/web-dashboard.md).
+
+## Tailwind CSS v4
+
+The web uses Tailwind CSS v4 with the official Vite plugin.
+
+Key files:
+
+```txt
+apps/web/vite.config.ts
+apps/web/src/styles/tailwind.css
+```
+
+There is no `tailwind.config.ts` and no `postcss.config.js` for the web app. Tailwind v4 theme tokens live in CSS:
+
+```css
+@theme {
+  --color-profit-border: oklch(52% 0.13 154);
+}
+```
+
+That token generates utilities such as:
+
+```txt
+border-profit-border
+bg-profit-border
+text-profit-border
+```
+
+## Database
+
+The bot and Drizzle use these MariaDB env vars:
+
+```txt
+DATABASE_HOST_NAME=127.0.0.1
+DATABASE_USER_NAME=user
+DB_PORT=3306
+DATABASE_USER_PASSWORD=password
+DATABASE_DB_NAME=btc_arbitrage
+```
+
+DB access rule:
+
+```ts
+const db = await getDb();
+const rows = await db.select().from(priceSnapshots);
+```
+
+All application DB access must use `getDb()` from `@btc-arbitrage/db`. Do not create ad-hoc pools in bot/web code.
+
+Manual SQL scripts:
+
+```bash
+mariadb \
+  --host "$DATABASE_HOST_NAME" \
+  --port "$DB_PORT" \
+  --user "$DATABASE_USER_NAME" \
+  --password \
+  "$DATABASE_DB_NAME" < packages/db/scripts/001_create_schema.sql
+```
+
+More detail:
+
+- [`packages/db/README.md`](./packages/db/README.md)
+- [`packages/db/scripts/README.md`](./packages/db/scripts/README.md)
+- [`docs/architecture.md`](./docs/architecture.md)
 
 ## Docker command for bot only
 
@@ -97,43 +219,30 @@ command: >
     else
       git pull --ff-only;
     fi &&
-    yarn install &&
-    yarn build:bot &&
-    yarn start
+    COREPACK_ENABLE_AUTO_PIN=0 corepack yarn@4.5.3 install &&
+    COREPACK_ENABLE_AUTO_PIN=0 corepack yarn@4.5.3 build:bot &&
+    COREPACK_ENABLE_AUTO_PIN=0 corepack yarn@4.5.3 start
   "
 ```
 
-## Architecture rules
-
-Project-level architecture decisions live in [`docs/architecture.md`](./docs/architecture.md).
-
-Important DB rule: all application DB access must use `getDb()` from `@btc-arbitrage/db`.
+In Docker, `Environment file status { loaded: false }` is OK when env vars are injected by Compose/Portainer/Kubernetes instead of a repo `.env` file.
 
 ## Exchange contracts
 
-Local specs under `docs/exchanges/` are the repo-level adapter contract. Update those docs before changing adapter behavior or enabling live trading.
+Local specs under [`docs/exchanges/`](./docs/exchanges/) are the repo-level adapter contract. Update those docs before changing adapter behavior or enabling live trading.
 
 Current adapter behavior is fail-safe: if the configured `PRICE_SOURCE` is not present in the exchange market payload, the bot throws an explicit error instead of silently falling back.
 
-## Database
+## Architecture rules
 
-The initial Drizzle schema lives in `packages/db/src/schema.ts`.
+Project-level decisions live in [`docs/architecture.md`](./docs/architecture.md).
 
-The bot and Drizzle use these MariaDB env vars:
+Most important rules:
 
-```txt
-DATABASE_HOST_NAME=127.0.0.1
-DATABASE_USER_NAME=user
-DB_PORT=3306
-DATABASE_USER_PASSWORD=password
-DATABASE_DB_NAME=btc_arbitrage
-```
-
-```bash
-yarn db:generate
-yarn db:migrate
-yarn db:studio
-```
+- DB access goes through `getDb()`.
+- Shared runtime values such as `ExecutionMode` live in `packages/domain`.
+- Web dashboard components follow one component per file.
+- No axios; use native `fetch`.
 
 ## Important non-goals
 
@@ -141,8 +250,4 @@ yarn db:studio
 - No TP/SL.
 - No real order submission.
 - No mutating web/API endpoints.
-- No axios; use native `fetch`.
-
-## Large-change note
-
-This SDD apply uses the accepted `delivery_strategy=exception-ok`, so this first slice is intentionally larger than the normal 400-line review budget. Future work should still be split by work unit.
+- No axios.

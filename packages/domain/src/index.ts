@@ -2,7 +2,10 @@ export type ExchangeId = 'risex' | 'extended' | 'arcus';
 export type MarketType = 'perpetual' | 'futures';
 export type PriceSource = 'mark' | 'index' | 'last';
 export type OrderSide = 'long' | 'short';
-export type ExecutionMode = 'dry-run' | 'live';
+export enum ExecutionMode {
+  DryRun = 'dry-run',
+  Live = 'live'
+}
 export type SignalStatus = 'created' | 'notified' | 'failed' | 'ignored';
 export type OperationStatus = 'dry_run' | 'blocked' | 'submitted' | 'failed';
 export type EventLevel = 'debug' | 'info' | 'warn' | 'error';

@@ -7,19 +7,18 @@ MariaDB persistence is managed with Drizzle ORM from this workspace.
 Run from the repository root:
 
 ```bash
-yarn db:generate
-yarn db:migrate
-yarn db:studio
+COREPACK_ENABLE_AUTO_PIN=0 corepack yarn@4.5.3 db:generate
+COREPACK_ENABLE_AUTO_PIN=0 corepack yarn@4.5.3 db:migrate
+COREPACK_ENABLE_AUTO_PIN=0 corepack yarn@4.5.3 db:studio
 ```
 
 Or directly from this package:
 
 ```bash
-yarn workspace @btc-arbitrage/db db:generate
-yarn workspace @btc-arbitrage/db db:migrate
-yarn workspace @btc-arbitrage/db db:studio
+COREPACK_ENABLE_AUTO_PIN=0 corepack yarn@4.5.3 workspace @btc-arbitrage/db db:generate
+COREPACK_ENABLE_AUTO_PIN=0 corepack yarn@4.5.3 workspace @btc-arbitrage/db db:migrate
+COREPACK_ENABLE_AUTO_PIN=0 corepack yarn@4.5.3 workspace @btc-arbitrage/db db:studio
 ```
-
 
 ## Environment
 

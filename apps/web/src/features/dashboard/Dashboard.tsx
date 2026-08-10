@@ -1,22 +1,76 @@
+import { ExecutionMode } from '@btc-arbitrage/domain';
+import { mockOpenOperations } from './mock-operations.js';
+import { EmptyState } from './components/EmptyState.js';
+import { MetricCard } from './components/MetricCard.js';
+import { OperationCard } from './components/OperationCard.js';
+import { formatSignedUsd } from './dashboard-formatters.js';
+import { calculateOperationPnl } from './operations.js';
+
+const executionMode = getExecutionMode();
+const openOperations = executionMode === ExecutionMode.DryRun ? mockOpenOperations : [];
+const portfolioPnl = openOperations.reduce((total, operation) => total + calculateOperationPnl(operation).netPnlUsd, 0);
+
 export function Dashboard() {
   return (
-    <main className="mx-auto max-w-5xl px-6 py-10">
-      <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6 shadow-xl">
-        <p className="text-sm uppercase tracking-[0.3em] text-cyan-300">Read-only</p>
-        <h1 className="mt-3 text-3xl font-semibold">BTC Arbitrage Monitor</h1>
-        <p className="mt-4 max-w-2xl text-slate-300">
-          This dashboard is intentionally read-only. The first slice focuses on RISEx and Extended price monitoring,
-          spread detection, and Telegram alerts. Live trading controls are not implemented here.
-        </p>
+    <main className="mx-auto max-w-7xl px-6 py-10">
+      <section className="rounded-3xl border border-panel-border bg-panel/85 p-6 shadow-2xl shadow-slate-950/50 backdrop-blur">
+        <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <p className="text-sm uppercase tracking-[0.3em] text-cyan-300">Read-only dashboard</p>
+            <h1 className="mt-3 text-4xl font-semibold tracking-tight">BTC Arbitrage Operations</h1>
+            <p className="mt-4 max-w-3xl text-slate-300">
+              Monitor open arbitrage operations across both exchange legs. The net PnL includes unrealized PnL, fees,
+              and funding so the dashboard shows whether the hedge is actually profitable.
+            </p>
+          </div>
+          <div className="rounded-2xl border border-panel-border bg-panel-muted/90 p-4 text-sm shadow-inner">
+            <p className="text-slate-400">Execution mode</p>
+            <p className="mt-1 text-xl font-semibold text-cyan-200">{executionMode}</p>
+            {executionMode === ExecutionMode.DryRun ? <p className="mt-2 text-slate-400">Using mock open operations.</p> : null}
+          </div>
+        </div>
       </section>
-      <section className="mt-6 grid gap-4 md:grid-cols-2">
-        {['Latest spreads', 'Signals', 'Operations', 'Events'].map((title) => (
-          <article key={title} className="rounded-xl border border-slate-800 bg-slate-900 p-5">
-            <h2 className="text-lg font-medium">{title}</h2>
-            <p className="mt-2 text-sm text-slate-400">Waiting for the read-only bot API data source.</p>
-          </article>
-        ))}
+
+      <section className="mt-6 grid gap-4 md:grid-cols-3">
+        <MetricCard label="Open operations" value={String(openOperations.length)} />
+        <MetricCard label="Net open PnL" value={formatSignedUsd(portfolioPnl)} tone={portfolioPnl >= 0 ? 'positive' : 'negative'} emphasis />
+        <MetricCard label="History" value="Coming soon" />
+      </section>
+
+      <section className="mt-8">
+        <div className="mb-4 flex items-end justify-between gap-4">
+          <div>
+            <h2 className="text-2xl font-semibold">Open operations</h2>
+            <p className="mt-1 text-sm text-slate-400">Each operation shows both exchange legs and the final net result.</p>
+          </div>
+        </div>
+
+        {openOperations.length > 0 ? (
+          <div className="space-y-5">
+            {openOperations.map((operation) => (
+              <OperationCard key={operation.id} operation={operation} />
+            ))}
+          </div>
+        ) : (
+          <EmptyState executionMode={executionMode} />
+        )}
+      </section>
+
+      <section className="mt-8 rounded-3xl border border-dashed border-panel-border bg-panel/40 p-6">
+        <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h2 className="text-xl font-semibold">Historical operations</h2>
+            <p className="mt-1 text-sm text-slate-400">
+              This section is reserved for closed trades, realized PnL, entry/exit prices, fees, and close reasons.
+            </p>
+          </div>
+          <span className="rounded-full border border-slate-700 px-3 py-1 text-xs uppercase tracking-[0.2em] text-slate-400">Later</span>
+        </div>
       </section>
     </main>
   );
+}
+
+function getExecutionMode(): ExecutionMode {
+  return import.meta.env.VITE_BOT_EXECUTION_MODE === ExecutionMode.Live ? ExecutionMode.Live : ExecutionMode.DryRun;
 }

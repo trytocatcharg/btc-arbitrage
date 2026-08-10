@@ -1,4 +1,4 @@
-import type { PriceSnapshot, PriceSource } from '@btc-arbitrage/domain';
+import { ExecutionMode, type PriceSnapshot, type PriceSource } from '@btc-arbitrage/domain';
 import type { ExchangeAdapter, ExchangeMarket, PriceRequest } from '@btc-arbitrage/exchange-core';
 import { normalizeSymbol } from '@btc-arbitrage/exchange-core';
 import { findMarket, getMarketId } from '../market-normalization.js';
@@ -52,7 +52,7 @@ export function createArcusAdapter(config: ArcusConfig, http = new ArcusHttpClie
     },
     async createOrder() {
       return {
-        mode: 'dry-run',
+        mode: ExecutionMode.DryRun,
         symbol: 'BTCUSDT',
         leverage: 0,
         status: 'blocked',

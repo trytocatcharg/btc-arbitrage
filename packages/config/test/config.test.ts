@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { ExecutionMode } from '@btc-arbitrage/domain';
 import { loadBotConfig, loadDotEnvFile, redactSecrets } from '../src/index.js';
 
 test('loadBotConfig applies safe monitoring defaults', () => {
@@ -12,7 +13,7 @@ test('loadBotConfig applies safe monitoring defaults', () => {
   assert.equal(config.priceSource, 'mark');
   assert.equal(config.minPriceDiffUsd, '40');
   assert.equal(config.leverage, 3);
-  assert.equal(config.botExecutionMode, 'dry-run');
+  assert.equal(config.botExecutionMode, ExecutionMode.DryRun);
   assert.equal(config.botRunOnce, false);
   assert.equal(config.telegram.enabled, false);
   assert.equal(config.telegram.alertCooldownMs, 3600000);
@@ -27,13 +28,13 @@ test('loadBotConfig validates Telegram credentials when enabled', () => {
 });
 
 test('loadBotConfig blocks live execution in the monitoring-only slice', () => {
-  assert.throws(() => loadBotConfig({ BOT_EXECUTION_MODE: 'live' }), /Live order placement is not implemented/);
+  assert.throws(() => loadBotConfig({ BOT_EXECUTION_MODE: ExecutionMode.Live }), /Live order placement is not implemented/);
   assert.throws(() => loadBotConfig({ ENABLE_ORDER_PLACEMENT: 'true' }), /Live order placement is not implemented/);
 });
 
 test('loadBotConfig accepts exchange trading flags while global order placement stays disabled', () => {
   const config = loadBotConfig({ RISEX_TRADING_ENABLED: 'true', EXTENDED_TRADING_ENABLED: 'true' });
-  assert.equal(config.botExecutionMode, 'dry-run');
+  assert.equal(config.botExecutionMode, ExecutionMode.DryRun);
   assert.equal(config.enableOrderPlacement, false);
   assert.equal(config.risex.tradingEnabled, true);
   assert.equal(config.extended.tradingEnabled, true);

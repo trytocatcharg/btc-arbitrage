@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import type { ExchangeId, ExecutionMode, MarketType, PriceSource } from '@btc-arbitrage/domain';
+import { ExecutionMode, type ExchangeId, type MarketType, type PriceSource } from '@btc-arbitrage/domain';
 
 export interface DatabaseConfig {
   hostName: string;
@@ -73,13 +73,13 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   const leverage = parsePositiveInteger(env.LEVERAGE ?? '3', 'LEVERAGE');
   if (leverage > maxLeverage) throw new Error('LEVERAGE must be <= MAX_LEVERAGE');
 
-  const executionMode = parseExecutionMode(env.BOT_EXECUTION_MODE ?? 'dry-run');
+  const executionMode = parseExecutionMode(env.BOT_EXECUTION_MODE ?? ExecutionMode.DryRun);
   const botRunOnce = parseBoolean(env.BOT_RUN_ONCE ?? 'false');
   const enableOrderPlacement = parseBoolean(env.ENABLE_ORDER_PLACEMENT ?? 'false');
   const risexTradingEnabled = parseBoolean(env.RISEX_TRADING_ENABLED ?? 'false');
   const extendedTradingEnabled = parseBoolean(env.EXTENDED_TRADING_ENABLED ?? 'false');
   const arcusTradingEnabled = parseBoolean(env.ARCUS_TRADING_ENABLED ?? 'false');
-  if (executionMode === 'live' || enableOrderPlacement) {
+  if (executionMode === ExecutionMode.Live || enableOrderPlacement) {
     throw new Error('Live order placement is not implemented in this slice; keep BOT_EXECUTION_MODE=dry-run and ENABLE_ORDER_PLACEMENT=false');
   }
   const telegramEnabled = parseBoolean(env.TELEGRAM_ENABLED ?? 'false');
@@ -203,7 +203,7 @@ function parseMarketType(value: string): MarketType {
 }
 
 function parseExecutionMode(value: string): ExecutionMode {
-  if (value === 'dry-run' || value === 'live') return value;
+  if (value === ExecutionMode.DryRun || value === ExecutionMode.Live) return value;
   throw new Error('BOT_EXECUTION_MODE must be dry-run or live');
 }
 
