@@ -52,12 +52,6 @@ export interface BotConfig {
     chatId?: string;
     alertCooldownMs: number;
   };
-  readApi: {
-    enabled: boolean;
-    host: string;
-    port: number;
-  };
-  webApiBaseUrl: string;
   logLevel: string;
 }
 
@@ -132,12 +126,6 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       chatId: emptyToUndefined(env.TELEGRAM_CHAT_ID),
       alertCooldownMs: telegramAlertCooldownMs
     },
-    readApi: {
-      enabled: parseBoolean(env.READ_API_ENABLED ?? 'true'),
-      host: env.READ_API_HOST ?? '127.0.0.1',
-      port: parsePositiveInteger(env.READ_API_PORT ?? '3001', 'READ_API_PORT')
-    },
-    webApiBaseUrl: env.WEB_API_BASE_URL ?? 'http://127.0.0.1:3001',
     logLevel: env.LOG_LEVEL ?? 'info'
   };
 }

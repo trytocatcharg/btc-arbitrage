@@ -4,7 +4,6 @@ import { createExchangeRegistry } from './exchanges/registry.js';
 import { TelegramCommandPoller } from './notifications/telegram-command-poller.js';
 import { TelegramNotifier } from './notifications/telegram-notifier.js';
 import { runPollingLoop } from './runtime/polling-loop.js';
-import { createReadOnlyApiServer } from './api/read-only-api.js';
 
 async function main() {
   console.log('btc-arbitrage bot process booting', {
@@ -28,7 +27,7 @@ async function main() {
     });
   }
 
- console.log('Bot runtime config loaded', redactSecrets({
+  console.log('Bot runtime config loaded', redactSecrets({
     database: {
       hostName: config.database.hostName,
       port: config.database.port,
@@ -47,8 +46,7 @@ async function main() {
     botExecutionMode: config.botExecutionMode,
     botRunOnce: config.botRunOnce,
     telegramEnabled: config.telegram.enabled,
-    telegramAlertCooldownMs: config.telegram.alertCooldownMs,
-    readApiEnabled: config.readApi.enabled
+    telegramAlertCooldownMs: config.telegram.alertCooldownMs
   }));
 
 
@@ -73,13 +71,6 @@ async function main() {
     } catch (error) {
       console.warn('Telegram command configuration failed; monitoring will continue', error instanceof Error ? { message: error.message } : { error });
     }
-  }
-
-  if (config.readApi.enabled) {
-    console.log('Starting read-only API server', { host: config.readApi.host, port: config.readApi.port });
-    createReadOnlyApiServer({ host: config.readApi.host, port: config.readApi.port });
-  } else {
-    console.log('Read-only API server disabled');
   }
 
   console.log('Starting monitoring loop');
