@@ -9,6 +9,13 @@ export function formatSignedUsd(value: number): string {
   return formatted;
 }
 
+export function formatNullableUsd(value: string | null | undefined): string {
+  if (value === null || value === undefined) return 'Not available';
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return value;
+  return formatUsd(parsed);
+}
+
 export function formatBtc(value: number): string {
   return new Intl.NumberFormat('en-US', { maximumFractionDigits: 8 }).format(value);
 }

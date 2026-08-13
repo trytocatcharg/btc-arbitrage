@@ -10,23 +10,29 @@
   "scripts": {
     "dev:bot": "yarn workspace @btc-arbitrage/bot dev",
     "dev:web": "yarn workspace @btc-arbitrage/web dev",
+    "dev:backend": "yarn workspace @btc-arbitrage/backend dev",
+    "start:web": "yarn workspace @btc-arbitrage/web start",
     "build:bot": "yarn workspace @btc-arbitrage/domain build && yarn workspace @btc-arbitrage/shared build && yarn workspace @btc-arbitrage/exchange-core build && yarn workspace @btc-arbitrage/config build && yarn workspace @btc-arbitrage/db build && yarn workspace @btc-arbitrage/bot build",
-    "build": "yarn workspace @btc-arbitrage/domain build && yarn workspace @btc-arbitrage/shared build && yarn workspace @btc-arbitrage/exchange-core build && yarn workspace @btc-arbitrage/config build && yarn workspace @btc-arbitrage/db build && yarn workspace @btc-arbitrage/bot build && yarn workspace @btc-arbitrage/web build",
-    "start": "yarn start:bot",
+    "build:backend": "yarn workspace @btc-arbitrage/backend build",
+    "build": "yarn workspace @btc-arbitrage/domain build && yarn workspace @btc-arbitrage/shared build && yarn workspace @btc-arbitrage/exchange-core build && yarn workspace @btc-arbitrage/config build && yarn workspace @btc-arbitrage/db build && yarn workspace @btc-arbitrage/bot build && yarn workspace @btc-arbitrage/backend build && yarn workspace @btc-arbitrage/web build",
+    "start": "yarn build && sh -c 'BACKEND_HOST=0.0.0.0 READ_API_HOST=0.0.0.0 yarn start:backend & backend_pid=$!; BACKEND_HOST=0.0.0.0 READ_API_HOST=0.0.0.0 yarn start:bot & bot_pid=$!; yarn start:web & web_pid=$!; trap \"kill $backend_pid $bot_pid $web_pid\" EXIT INT TERM; wait $backend_pid $bot_pid $web_pid'",
     "start:bot": "yarn workspace @btc-arbitrage/bot start",
-    "typecheck": "yarn workspace @btc-arbitrage/domain typecheck && yarn workspace @btc-arbitrage/shared typecheck && yarn workspace @btc-arbitrage/exchange-core typecheck && yarn workspace @btc-arbitrage/config typecheck && yarn workspace @btc-arbitrage/db typecheck && yarn workspace @btc-arbitrage/bot typecheck && yarn workspace @btc-arbitrage/web typecheck",
+    "start:backend": "yarn workspace @btc-arbitrage/backend start",
+    "typecheck": "yarn workspace @btc-arbitrage/domain typecheck && yarn workspace @btc-arbitrage/shared typecheck && yarn workspace @btc-arbitrage/exchange-core typecheck && yarn workspace @btc-arbitrage/config typecheck && yarn workspace @btc-arbitrage/db typecheck && yarn workspace @btc-arbitrage/bot typecheck && yarn workspace @btc-arbitrage/backend typecheck && yarn workspace @btc-arbitrage/web typecheck",
     "lint": "yarn typecheck",
-    "test": "yarn build && yarn workspace @btc-arbitrage/domain test && yarn workspace @btc-arbitrage/shared test && yarn workspace @btc-arbitrage/exchange-core test && yarn workspace @btc-arbitrage/config test && yarn workspace @btc-arbitrage/db test && yarn workspace @btc-arbitrage/bot test && yarn workspace @btc-arbitrage/web test",
+    "test": "yarn build && yarn workspace @btc-arbitrage/domain test && yarn workspace @btc-arbitrage/shared test && yarn workspace @btc-arbitrage/exchange-core test && yarn workspace @btc-arbitrage/config test && yarn workspace @btc-arbitrage/db test && yarn workspace @btc-arbitrage/bot test && yarn workspace @btc-arbitrage/backend test && yarn workspace @btc-arbitrage/web test",
     "db:generate": "yarn workspace @btc-arbitrage/db db:generate",
     "db:migrate": "yarn workspace @btc-arbitrage/db db:migrate",
-    "db:studio": "yarn workspace @btc-arbitrage/db db:studio"
+    "db:studio": "yarn workspace @btc-arbitrage/db db:studio",
+    "dev": "sh -c 'yarn dev:backend & backend_pid=$!; yarn dev:web & web_pid=$!; trap \"kill $backend_pid $web_pid\" EXIT INT TERM; wait $backend_pid $web_pid'"
   },
   "devDependencies": {
-    "@types/node": "20",
-    "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+    "@types/node": "20.19.43",
+    "tsx": "4.19.2",
+    "typescript": "5.7.2"
   },
   "engines": {
     "node": ">=20.20.1"
-  }
+  },
+  "packageManager": "yarn@4.18.0+sha512.fcb8716fe7cd0eece141ffc18b92193a9df9204c1ba83189c288835223fc0bbe64af473bab0d5e9927a7daeb5caf2bb07eb2787cc9338ca040ea125f2a1f2f7e"
 }

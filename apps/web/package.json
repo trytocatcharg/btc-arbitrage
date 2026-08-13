@@ -5,22 +5,24 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "build": "tsc -p tsconfig.json && vite build",
+    "build": "yarn run -T tsc -p tsconfig.json && vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "tsc -p tsconfig.json --noEmit",
-    "test": "tsc -p tsconfig.json --noEmit"
+    "start": "vite preview --host 0.0.0.0 --port 4173 --strictPort",
+    "typecheck": "yarn run -T tsc -p tsconfig.json --noEmit",
+    "lint": "yarn run -T tsc -p tsconfig.json --noEmit",
+    "test": "yarn run -T tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@tailwindcss/vite": "^4.3.3",
-    "@vitejs/plugin-react": "^4.3.4",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "tailwindcss": "^4",
-    "vite": "^6.0.7"
+    "@btc-arbitrage/domain": "workspace:*",
+    "@tailwindcss/vite": "4.3.3",
+    "@vitejs/plugin-react": "4.7.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "tailwindcss": "4.3.3",
+    "vite": "6.4.3"
   },
   "devDependencies": {
-    "@types/react": "^19.0.2",
-    "@types/react-dom": "^19.0.2"
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4"
   }
 }

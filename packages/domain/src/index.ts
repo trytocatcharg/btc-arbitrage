@@ -2,6 +2,7 @@ export type ExchangeId = 'risex' | 'extended' | 'arcus';
 export type MarketType = 'perpetual' | 'futures';
 export type PriceSource = 'mark' | 'index' | 'last';
 export type OrderSide = 'long' | 'short';
+export type ExchangeBalanceStatus = 'available' | 'unconfigured' | 'error';
 export enum ExecutionMode {
   DryRun = 'dry-run',
   Live = 'live'
@@ -72,6 +73,26 @@ export interface Operation {
   guardrailReason?: string;
   legs?: Array<{ exchangeId: ExchangeId; side: OrderSide; plannedPriceUsd?: string }>;
   createdAt: Date;
+}
+
+export interface ExchangeBalance {
+  exchangeId: ExchangeId;
+  displayName: string;
+  asset: string;
+  status: ExchangeBalanceStatus;
+  totalEquityUsd: string | null;
+  availableUsd: string | null;
+  marginUsedUsd: string | null;
+  unrealizedPnlUsd: string | null;
+  source: string;
+  syntheticZeroBalance?: boolean;
+  message?: string;
+  receivedAt: string;
+}
+
+export interface ExchangeBalancesResponse {
+  generatedAt: string;
+  balances: ExchangeBalance[];
 }
 
 export interface EventRecord {

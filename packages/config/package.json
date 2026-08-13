@@ -15,9 +15,9 @@
     "@btc-arbitrage/domain": "workspace:*"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -b tsconfig.json --pretty false",
-    "lint": "tsc -b tsconfig.json --pretty false",
+    "build": "yarn run -T tsc -p tsconfig.json",
+    "typecheck": "yarn run -T tsc -b tsconfig.json --pretty false",
+    "lint": "yarn run -T tsc -b tsconfig.json --pretty false",
     "test": "node --import tsx --test test/**/*.test.ts"
   }
 }

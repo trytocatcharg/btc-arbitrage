@@ -1,26 +1,24 @@
 {
-  "name": "@btc-arbitrage/bot",
+  "name": "@btc-arbitrage/backend",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
-    "dev": "yarn run -T tsx src/main.ts",
+    "dev": "yarn build && node dist/main.js",
     "start": "node dist/main.js",
-    "build": "yarn run -T tsc -p tsconfig.json",
+    "build": "yarn run -T tsc -b tsconfig.json --pretty false",
     "typecheck": "yarn run -T tsc -b tsconfig.json --pretty false",
     "lint": "yarn run -T tsc -b tsconfig.json --pretty false",
-    "test": "node --import tsx --test test/**/*.test.ts",
-    "test:watch": "node --test --watch dist-test/**/*.test.js"
+    "test": "node --import tsx --test test/**/*.test.ts"
   },
   "dependencies": {
     "@btc-arbitrage/config": "workspace:*",
-    "@btc-arbitrage/db": "workspace:*",
     "@btc-arbitrage/domain": "workspace:*",
-    "@btc-arbitrage/exchange-core": "workspace:*",
-    "@btc-arbitrage/shared": "workspace:*"
+    "express": "5.1.0"
   },
   "devDependencies": {
+    "@types/express": "5.0.3",
     "tsx": "4.19.2"
   }
 }
