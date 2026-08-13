@@ -22,26 +22,31 @@ export const Dashboard: FC = () => {
   useEffect(() => {
     let isMounted = true;
 
-    fetchExchangeBalances()
-      .then((response) => {
+    const refreshBalances = async () => {
+      try {
+        const response = await fetchExchangeBalances();
         if (!isMounted) return;
         setExchangeBalances({
           balances: response.balances,
           generatedAt: response.generatedAt,
           loading: false
         });
-      })
-      .catch((error: unknown) => {
+      } catch (error: unknown) {
         if (!isMounted) return;
         setExchangeBalances({
           balances: [],
           loading: false,
           error: error instanceof Error ? error.message : 'Could not load exchange balances'
         });
-      });
+      }
+    };
+
+    void refreshBalances();
+    const intervalId = window.setInterval(refreshBalances, 30_000);
 
     return () => {
       isMounted = false;
+      window.clearInterval(intervalId);
     };
   }, []);
 
