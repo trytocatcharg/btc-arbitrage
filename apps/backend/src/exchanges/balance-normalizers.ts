@@ -2,6 +2,30 @@ import type { ExchangeBalance } from '@btc-arbitrage/domain';
 
 const COLLATERAL_ASSET = 'USDC';
 
+export function normalizeRisexTokenBalance(payload: unknown, receivedAt: Date = new Date()): ExchangeBalance {
+  const body = unwrapData(payload);
+  const availableUsd = primitiveDecimal(body)
+    ?? findDecimalAtPaths(body, [['balance'], ['amount']])
+    ?? findDecimalValue(body, ['balance', 'amount', 'value']);
+
+  if (!availableUsd) {
+    throw new Error('Could not normalize RISEx token balance payload');
+  }
+
+  return {
+    exchangeId: 'risex',
+    displayName: 'RISEx',
+    asset: COLLATERAL_ASSET,
+    status: 'available',
+    totalEquityUsd: availableUsd,
+    availableUsd,
+    marginUsedUsd: null,
+    unrealizedPnlUsd: null,
+    source: '/v1/account/balance',
+    receivedAt: receivedAt.toISOString()
+  };
+}
+
 export function normalizeRisexBalance(payload: unknown, receivedAt: Date = new Date()): ExchangeBalance {
   const body = unwrapData(payload);
   const totalEquityUsd = primitiveDecimal(body) ?? findDecimalAtPaths(body, [

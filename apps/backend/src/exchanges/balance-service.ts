@@ -1,7 +1,7 @@
 import type { ExchangeBalance, ExchangeBalancesResponse } from '@btc-arbitrage/domain';
 import type { BackendConfig } from '../config.js';
 import { createErrorBalance, createUnconfiguredBalance, normalizeExtendedBalance, normalizeRisexBalance } from './balance-normalizers.js';
-import { JsonHttpClient, type FetchLike } from './http-client.js';
+import { ExchangeHttpError, JsonHttpClient, type FetchLike } from './http-client.js';
 
 export interface BalanceService {
   getRisexBalance(): Promise<ExchangeBalance>;
@@ -17,7 +17,6 @@ export function createBalanceService(config: BackendConfig, fetchImpl: FetchLike
     { 'user-agent': config.extended.userAgent },
     fetchImpl
   );
-
   return {
     async getRisexBalance(): Promise<ExchangeBalance> {
       if (!config.risex.accountAddress) {
@@ -29,11 +28,27 @@ export function createBalanceService(config: BackendConfig, fetchImpl: FetchLike
       }
 
       try {
+        console.log('RISEx balance read starting', {
+          endpoint: '/v1/account/cross-margin-balance',
+          account: redactAddress(config.risex.accountAddress)
+        });
         const payload = await risexClient.get('/v1/account/cross-margin-balance', {
           query: { account: config.risex.accountAddress }
         });
-        return normalizeRisexBalance(payload);
+        const balance = normalizeRisexBalance(payload);
+        console.log('RISEx balance read succeeded', {
+          account: redactAddress(config.risex.accountAddress),
+          totalEquityUsd: balance.totalEquityUsd,
+          availableUsd: balance.availableUsd,
+          source: balance.source
+        });
+        return balance;
       } catch (error) {
+        console.error('RISEx balance read failed', {
+          account: redactAddress(config.risex.accountAddress),
+          message: error instanceof Error ? error.message : 'Unknown RISEx balance error',
+          responseBody: error instanceof ExchangeHttpError ? error.responseBody : undefined
+        });
         return createErrorBalance({
           exchangeId: 'risex',
           displayName: 'RISEx',
@@ -79,4 +94,9 @@ export function createBalanceService(config: BackendConfig, fetchImpl: FetchLike
 function toPublicErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return 'Unknown exchange balance error';
+}
+
+function redactAddress(address: string | undefined): string | undefined {
+  if (!address) return undefined;
+  return `${address.slice(0, 6)}...${address.slice(-4)}`;
 }

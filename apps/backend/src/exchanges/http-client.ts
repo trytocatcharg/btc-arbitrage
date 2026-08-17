@@ -4,9 +4,11 @@ export class ExchangeHttpError extends Error {
   constructor(
     readonly exchangeName: string,
     readonly path: string,
-    readonly status: number
+    readonly status: number,
+    readonly method: 'GET' | 'POST' = 'GET',
+    readonly responseBody?: unknown
   ) {
-    super(`${exchangeName} GET ${path} failed with HTTP ${status}`);
+    super(`${exchangeName} ${method} ${path} failed with HTTP ${status}`);
   }
 }
 
@@ -39,14 +41,51 @@ export class JsonHttpClient {
         }
       });
 
+      const payload = await parseJsonResponse(response);
+
       if (response.status === 404 && options.zeroOn404) {
         return { syntheticZeroBalance: true };
       }
 
-      if (!response.ok) throw new ExchangeHttpError(this.exchangeName, path, response.status);
-      return response.json() as Promise<unknown>;
+      if (!response.ok) throw new ExchangeHttpError(this.exchangeName, path, response.status, 'GET', payload);
+      return payload;
     } finally {
       clearTimeout(timeout);
     }
+  }
+
+  async post(path: string, options: { body?: unknown; headers?: Record<string, string> } = {}): Promise<unknown> {
+    const abortController = new AbortController();
+    const timeout = setTimeout(() => abortController.abort(), this.timeoutMs);
+
+    try {
+      const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+        method: 'POST',
+        signal: abortController.signal,
+        headers: {
+          accept: 'application/json',
+          'content-type': 'application/json',
+          ...this.defaultHeaders,
+          ...options.headers
+        },
+        body: JSON.stringify(options.body ?? {})
+      });
+
+      const payload = await parseJsonResponse(response);
+      if (!response.ok) throw new ExchangeHttpError(this.exchangeName, path, response.status, 'POST', payload);
+      return payload;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+async function parseJsonResponse(response: Response): Promise<unknown> {
+  const text = await response.text();
+  if (!text) return undefined;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return text;
   }
 }

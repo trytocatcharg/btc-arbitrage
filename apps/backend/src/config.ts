@@ -5,6 +5,8 @@ export interface BackendConfig {
   risex: {
     apiBaseUrl: string;
     accountAddress?: string;
+    accountPrivateKey?: string;
+    sessionSignerPrivateKey?: string;
   };
   extended: {
     apiBaseUrl: string;
@@ -20,7 +22,9 @@ export function loadBackendConfig(env: NodeJS.ProcessEnv = process.env): Backend
     corsAllowedOrigins: parseCorsOrigins(env.BACKEND_CORS_ORIGINS ?? 'http://127.0.0.1:5173,http://localhost:5173'),
     risex: {
       apiBaseUrl: trimTrailingSlash(env.RISEX_API_BASE_URL ?? 'https://api.rise.trade'),
-      accountAddress: emptyToUndefined(env.RISEX_ACCOUNT_ADDRESS)
+      accountAddress: emptyToUndefined(env.RISEX_ACCOUNT_ADDRESS),
+      accountPrivateKey: emptyToUndefined(env.RISEX_ACCOUNT_PRIVATE_KEY),
+      sessionSignerPrivateKey: emptyToUndefined(env.RISEX_SESSION_SIGNER_PRIVATE_KEY)
     },
     extended: {
       apiBaseUrl: trimTrailingSlash(env.EXTENDED_API_BASE_URL ?? 'https://api.starknet.extended.exchange'),

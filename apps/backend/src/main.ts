@@ -21,7 +21,9 @@ async function main() {
     corsAllowedOrigins: config.corsAllowedOrigins,
     risex: {
       apiBaseUrl: config.risex.apiBaseUrl,
-      accountAddressConfigured: Boolean(config.risex.accountAddress)
+      accountAddressConfigured: Boolean(config.risex.accountAddress),
+      accountPrivateKeyConfigured: Boolean(config.risex.accountPrivateKey),
+      sessionSignerPrivateKeyConfigured: Boolean(config.risex.sessionSignerPrivateKey)
     },
     extended: {
       apiBaseUrl: config.extended.apiBaseUrl,

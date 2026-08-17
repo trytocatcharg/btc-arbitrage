@@ -35,13 +35,19 @@ export class TelegramNotifier implements Notifier {
       body: JSON.stringify({
         chat_id: allowedChatId,
         text: formatTelegramSignal(signal),
-        disable_web_page_preview: true
+        disable_web_page_preview: true,
+        ...(signal.id ? { reply_markup: { inline_keyboard: [[{ text: 'Open Trade', callback_data: `open:${signal.id}` }]] } } : {})
       })
     });
 
     if (!response.ok) {
       throw new Error(`Telegram sendMessage failed with HTTP ${response.status}`);
     }
+  }
+  async notifyUrgent(text: string): Promise<void> {
+    if (!this.config.enabled || !this.config.botToken || !this.config.chatId) return;
+    const response = await this.fetchImpl(`https://api.telegram.org/bot${this.config.botToken}/sendMessage`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id: normalizeTelegramChatId(this.config.chatId), text, disable_web_page_preview: true }) });
+    if (!response.ok) throw new Error(`Telegram urgent message failed with HTTP ${response.status}`);
   }
 
   private isSuppressedByCooldown(): boolean {

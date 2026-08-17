@@ -15,8 +15,8 @@ This spec captures the RISEx API facts this bot relies on, so trading work is re
 | Capability | Current state | Endpoint |
 |---|---:|---|
 | Markets | wired | `GET /v1/markets` |
+| Orderbook / executable BBO | wired | `GET /v1/orderbook?market_id={marketId}&limit=1` |
 | Cross-margin balance | wired | `GET /v1/account/cross-margin-balance?account={address}` |
-| Portfolio fallback | wired | `GET /v1/portfolio/details?account={address}` |
 | Positions | wired | `GET /v1/positions?account={address}` |
 | Single position | wired | `GET /v1/account/position?account={address}&market_id={marketId}` |
 | Open orders | wired | `GET /v1/orders/open?account={address}` |
@@ -26,6 +26,10 @@ This spec captures the RISEx API facts this bot relies on, so trading work is re
 ## Auth and signing decisions
 
 - Read methods require `RISEX_ACCOUNT_ADDRESS` where the endpoint is account-scoped.
+- `GET /v1/markets` must not be used as a source of executable BBO on RISEx production payloads because it exposes `last_price` / `mark_price` / `index_price` but not bid/ask.
+- Executable BBO is read from `GET /v1/orderbook` using the resolved `market_id`.
+- The backend balance endpoint mirrors `GET /v1/account/cross-margin-balance` from RISEx and uses the production API base `https://api.rise.trade` by default.
+- The backend authenticates RISEx REST balance reads with the official JWT login flow: `GET /v1/auth/nonce?account=...`, `GET /v1/auth/eip712-domain`, sign `Login(address account,uint256 nonce,uint32 deadline)` with `RISEX_ACCOUNT_PRIVATE_KEY`, then call `POST /v1/auth/login` with `account`, `nonce`, `deadline`, and `signature`, and send `Authorization: Bearer <access_token>`.
 - Trading remains disabled unless `RISEX_TRADING_ENABLED=true`.
 - Placing and closing trades requires a prebuilt signed permit. The bot must not invent or partially build a permit in production code.
 - `RISEX_PRIVATE_KEY` is a secret and must never be logged.

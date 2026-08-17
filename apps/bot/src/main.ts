@@ -17,12 +17,26 @@ async function main() {
   console.log('Environment file status', { loaded: Boolean(loadedEnvPath), path: loadedEnvPath ?? null });
 
   const config = loadBotConfig();
-  if (config.risex.tradingEnabled || config.extended.tradingEnabled || config.arcus.tradingEnabled) {
-    console.warn('Exchange trading flags are enabled but ignored in this monitoring-only slice', {
-      risexTradingEnabled: config.risex.tradingEnabled,
-      extendedTradingEnabled: config.extended.tradingEnabled,
-      arcusTradingEnabled: config.arcus.tradingEnabled,
-      orderPlacementImplemented: false,
+  if (config.risex.tradingEnabled) {
+    console.warn('RISEx live execution adapter is enabled; signed REST mutations require configured account and session signer credentials', {
+      risexTradingEnabled: true,
+      hasRisexAccountAddress: Boolean(config.risex.accountAddress),
+      hasRisexSessionSignerPrivateKey: Boolean(config.risex.sessionSignerPrivateKey),
+      botExecutionMode: config.botExecutionMode
+    });
+  }
+  if (config.extended.tradingEnabled) {
+    console.warn('Extended live execution adapter is enabled; signed Stark REST mutations require API key, Stark private key and vault id', {
+      extendedTradingEnabled: true,
+      hasExtendedApiKey: Boolean(config.extended.apiKey),
+      hasExtendedStarkPrivateKey: Boolean(config.extended.starkPrivateKey),
+      hasExtendedVaultId: Boolean(config.extended.vaultId),
+      botExecutionMode: config.botExecutionMode
+    });
+  }
+  if (config.arcus.tradingEnabled) {
+    console.warn('Arcus trading flag is enabled but live execution remains unreviewed for this exchange', {
+      arcusTradingEnabled: true,
       botExecutionMode: config.botExecutionMode
     });
   }
@@ -51,7 +65,7 @@ async function main() {
 
 
   console.log('Connecting to database...');
-  await getDb();
+  const db = await getDb();
   console.log('Database connected');
   // await validateDbConnection(config.database.url);
   // console.log('connection succesfull');
@@ -60,13 +74,13 @@ async function main() {
   console.log('Initializing exchange registry');
   const registry = createExchangeRegistry(config);
   const notifier = new TelegramNotifier(config.telegram);
-  const commandPoller = config.telegram.enabled ? new TelegramCommandPoller(config) : undefined;
+  const commandPoller = config.telegram.enabled ? new TelegramCommandPoller(config, db, registry) : undefined;
   if (commandPoller) {
     try {
       await commandPoller.configureAvailableCommands();
       console.log('Telegram commands configured', {
         scope: 'chat',
-        commands: ['config']
+        commands: ['config', 'trade']
       });
     } catch (error) {
       console.warn('Telegram command configuration failed; monitoring will continue', error instanceof Error ? { message: error.message } : { error });
@@ -74,7 +88,7 @@ async function main() {
   }
 
   console.log('Starting monitoring loop');
-  await runPollingLoop({ config, registry, notifier, commandPoller });
+  await runPollingLoop({ config, registry, notifier, db, commandPoller });
   console.log('Monitoring loop stopped', { stoppedAt: new Date().toISOString() });
 }
 

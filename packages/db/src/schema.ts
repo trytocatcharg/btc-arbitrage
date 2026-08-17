@@ -1,14 +1,15 @@
 import { boolean, decimal, index, int, json, mysqlEnum, mysqlTable, timestamp, varchar } from 'drizzle-orm/mysql-core';
 
-export const tradeStatuses = ['planned', 'open', 'closing', 'closed', 'cancelled', 'failed'] as const;
+export const tradeStatuses = ['awaiting_confirmation', 'executing_limit', 'hedging', 'protecting', 'open', 'closing', 'unhedged', 'closed', 'cancelled', 'failed'] as const;
 export type TradeStatus = (typeof tradeStatuses)[number];
 
-export const openTradeStatuses: readonly TradeStatus[] = ['planned', 'open', 'closing'];
+export const activeTradeStatuses: readonly TradeStatus[] = ['executing_limit', 'hedging', 'protecting', 'open', 'closing', 'unhedged'];
+export const openTradeStatuses: readonly TradeStatus[] = activeTradeStatuses;
 
 export const tradeLegSides = ['long', 'short'] as const;
 export type TradeLegSide = (typeof tradeLegSides)[number];
 
-export const tradeLegStatuses = ['planned', 'submitted', 'open', 'closed', 'cancelled', 'failed'] as const;
+export const tradeLegStatuses = ['planned', 'submitted', 'open', 'unhedged', 'closed', 'cancelled', 'failed'] as const;
 export type TradeLegStatus = (typeof tradeLegStatuses)[number];
 
 export const priceSnapshots = mysqlTable('price_snapshots', {
@@ -92,6 +93,19 @@ export const trades = mysqlTable('trades', {
   symbolStatusIdx: index('trade_symbol_status_idx').on(table.symbol, table.status)
 }));
 
+export const tradePreviews = mysqlTable('trade_previews', {
+  id: int('id').autoincrement().primaryKey(),
+  signalId: int('signal_id').notNull().references(() => signals.id),
+  tradeId: int('trade_id').references(() => trades.id),
+  token: varchar('token', { length: 96 }).notNull(),
+  status: varchar('status', { length: 32 }).notNull(),
+  expiresAt: timestamp('expires_at').notNull(),
+  consumedAt: timestamp('consumed_at'),
+  payload: json('payload').notNull(),
+  createdAt: timestamp('created_at').notNull(),
+  updatedAt: timestamp('updated_at').notNull()
+}, (table) => ({ tokenIdx: index('trade_preview_token_idx').on(table.token), signalStatusIdx: index('trade_preview_signal_status_idx').on(table.signalId, table.status) }));
+
 export const tradeLegs = mysqlTable('trade_legs', {
   id: int('id').autoincrement().primaryKey(),
   tradeId: int('trade_id').notNull().references(() => trades.id),
@@ -109,6 +123,8 @@ export const tradeLegs = mysqlTable('trade_legs', {
   externalPositionId: varchar('external_position_id', { length: 128 }),
   entryOrderId: varchar('entry_order_id', { length: 128 }),
   exitOrderId: varchar('exit_order_id', { length: 128 }),
+  closeReason: varchar('close_reason', { length: 32 }),
+  closureNotifiedAt: timestamp('closure_notified_at'),
   openedAt: timestamp('opened_at'),
   closedAt: timestamp('closed_at'),
   raw: json('raw')

@@ -8,6 +8,13 @@
       "when": 1785826877574,
       "tag": "0000_spicy_amphibian",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1785826877575,
+      "tag": "0001_open_trade_execution",
+      "breakpoints": true
     }
   ]
 }

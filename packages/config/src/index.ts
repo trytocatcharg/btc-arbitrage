@@ -28,14 +28,29 @@ export interface BotConfig {
   botRunOnce: boolean;
   enableOrderPlacement: boolean;
   confirmLiveTrading?: string;
+  openTrade: {
+    notionalUsd: string;
+    previewTtlMs: number;
+    quoteMaxAgeMs: number;
+    limitTimeoutMs: number;
+    residualDeltaToleranceBase: string;
+    risexMakerFeeBps: string;
+    risexTakerFeeBps: string;
+    extendedMakerFeeBps: string;
+    extendedTakerFeeBps: string;
+  };
   risex: {
     apiBaseUrl: string;
     accountAddress?: string;
+    accountPrivateKey?: string;
+    sessionSignerPrivateKey?: string;
     tradingEnabled: boolean;
   };
   extended: {
     apiBaseUrl: string;
     apiKey?: string;
+    starkPrivateKey?: string;
+    vaultId?: string;
     tradingEnabled: boolean;
     userAgent: string;
   };
@@ -102,14 +117,29 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     botRunOnce,
     enableOrderPlacement,
     confirmLiveTrading: emptyToUndefined(env.CONFIRM_LIVE_TRADING),
+    openTrade: {
+      notionalUsd: parsePositiveDecimalString(env.OPEN_TRADE_NOTIONAL_USD ?? '100', 'OPEN_TRADE_NOTIONAL_USD'),
+      previewTtlMs: parsePositiveInteger(env.OPEN_TRADE_PREVIEW_TTL_MS ?? '120000', 'OPEN_TRADE_PREVIEW_TTL_MS'),
+      quoteMaxAgeMs: parsePositiveInteger(env.OPEN_TRADE_QUOTE_MAX_AGE_MS ?? '5000', 'OPEN_TRADE_QUOTE_MAX_AGE_MS'),
+      limitTimeoutMs: parsePositiveInteger(env.OPEN_TRADE_LIMIT_TIMEOUT_MS ?? '30000', 'OPEN_TRADE_LIMIT_TIMEOUT_MS'),
+      residualDeltaToleranceBase: parsePositiveDecimalString(env.OPEN_TRADE_RESIDUAL_DELTA_BTC ?? '0.00001', 'OPEN_TRADE_RESIDUAL_DELTA_BTC'),
+      risexMakerFeeBps: parseNonNegativeDecimalString(env.RISEX_MAKER_FEE_BPS ?? '0', 'RISEX_MAKER_FEE_BPS'),
+      risexTakerFeeBps: parseNonNegativeDecimalString(env.RISEX_TAKER_FEE_BPS ?? '0', 'RISEX_TAKER_FEE_BPS'),
+      extendedMakerFeeBps: parseNonNegativeDecimalString(env.EXTENDED_MAKER_FEE_BPS ?? '0', 'EXTENDED_MAKER_FEE_BPS'),
+      extendedTakerFeeBps: parseNonNegativeDecimalString(env.EXTENDED_TAKER_FEE_BPS ?? '0', 'EXTENDED_TAKER_FEE_BPS')
+    },
     risex: {
       apiBaseUrl: trimTrailingSlash(env.RISEX_API_BASE_URL ?? 'https://api.rise.trade'),
       accountAddress: emptyToUndefined(env.RISEX_ACCOUNT_ADDRESS),
+      accountPrivateKey: emptyToUndefined(env.RISEX_ACCOUNT_PRIVATE_KEY),
+      sessionSignerPrivateKey: emptyToUndefined(env.RISEX_SESSION_SIGNER_PRIVATE_KEY),
       tradingEnabled: risexTradingEnabled
     },
     extended: {
       apiBaseUrl: trimTrailingSlash(env.EXTENDED_API_BASE_URL ?? 'https://api.starknet.extended.exchange'),
       apiKey: emptyToUndefined(env.EXTENDED_API_KEY),
+      starkPrivateKey: emptyToUndefined(env.EXTENDED_STARK_PRIVATE_KEY),
+      vaultId: emptyToUndefined(env.EXTENDED_VAULT_ID),
       tradingEnabled: extendedTradingEnabled,
       userAgent: env.EXTENDED_USER_AGENT ?? 'btc-arbitrage-bot/0.1'
     },
@@ -215,6 +245,10 @@ function parseNonNegativeInteger(value: string, field: string): number {
 
 function parsePositiveDecimalString(value: string, field: string): string {
   if (!/^\d+(\.\d+)?$/.test(value) || Number(value) <= 0) throw new Error(`${field} must be a positive decimal`);
+  return value;
+}
+function parseNonNegativeDecimalString(value: string, field: string): string {
+  if (!/^\d+(\.\d+)?$/.test(value) || Number(value) < 0) throw new Error(`${field} must be a non-negative decimal`);
   return value;
 }
 

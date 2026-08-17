@@ -4,6 +4,11 @@ import type { BotConfig } from '@btc-arbitrage/config';
 import type { ExchangeAdapter } from '@btc-arbitrage/exchange-core';
 import { SignalEngine } from '../signals/signal-engine.js';
 import type { Notifier } from '../notifications/notifier.js';
+import type { getDb } from '@btc-arbitrage/db';
+import { signals, activeTradeStatuses, trades } from '@btc-arbitrage/db';
+import { desc, inArray } from 'drizzle-orm';
+import { monitorTrades } from '../trading/trade-monitor.js';
+import { shouldSuppressSignalForActiveTrades } from '../trading/trade-guards.js';
 
 export interface ExchangeRegistry {
   get(id: string): ExchangeAdapter;
@@ -13,7 +18,7 @@ export interface CommandPoller {
   pollOnce(): Promise<void>;
 }
 
-export async function runPollingLoop(input: { config: BotConfig; registry: ExchangeRegistry; notifier: Notifier; commandPoller?: CommandPoller }): Promise<void> {
+export async function runPollingLoop(input: { config: BotConfig; registry: ExchangeRegistry; notifier: Notifier; db: Awaited<ReturnType<typeof getDb>>; commandPoller?: CommandPoller }): Promise<void> {
   const signalEngine = new SignalEngine({ thresholdUsd: input.config.minPriceDiffUsd, leverage: input.config.leverage });
   const exchangeA = input.registry.get(input.config.exchangeA);
   const exchangeB = input.registry.get(input.config.exchangeB);
@@ -43,6 +48,7 @@ export async function runPollingLoop(input: { config: BotConfig; registry: Excha
       } catch (error) {
         console.error('Telegram command polling failed', error instanceof Error ? { tick, message: error.message } : { tick, error });
       }
+      await monitorTrades({ db: input.db, registry: input.registry, notify: (text) => input.notifier.notifyUrgent(text) });
 
       const [priceA, priceB] = await Promise.all([
         exchangeA.getPriceSnapshot({ symbol: input.config.btcSymbol, marketType: input.config.marketType, priceSource: input.config.priceSource }),
@@ -68,6 +74,13 @@ export async function runPollingLoop(input: { config: BotConfig; registry: Excha
         thresholdMatched: spread.thresholdMatched
       });
       if (signal) {
+        const active = await input.db.select({ id: trades.id }).from(trades).where(inArray(trades.status, [...activeTradeStatuses])).orderBy(desc(trades.id));
+        if (shouldSuppressSignalForActiveTrades(active.map((trade) => trade.id))) {
+          console.log('Signal suppressed because an active or unhedged trade exists', { tick, activeTradeId: active[0]?.id });
+          continue;
+        }
+        const created = await input.db.insert(signals).values({ spreadId: signal.spreadId ? Number(signal.spreadId) : null, longExchange: signal.longExchange, shortExchange: signal.shortExchange, source: signal.priceSource, leverage: signal.leverage, thresholdUsd: signal.thresholdUsd, observedDiffUsd: signal.absoluteDiffUsd, reason: signal.reason, status: 'notified', createdAt: signal.createdAt });
+        const signalId = Number((created as { insertId?: number }).insertId ?? 0);
         console.warn('Trading signal created', {
           tick,
           symbol: signal.symbol,
@@ -77,7 +90,7 @@ export async function runPollingLoop(input: { config: BotConfig; registry: Excha
           thresholdUsd: signal.thresholdUsd,
           mode: input.config.botExecutionMode
         });
-        await input.notifier.notifySignal(signal);
+        await input.notifier.notifySignal({ ...signal, id: signalId ? String(signalId) : undefined });
       }
       console.log('Monitoring tick completed', {
         tick,

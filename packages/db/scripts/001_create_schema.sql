@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS `trades` (
 	`market_type` varchar(32) NOT NULL,
 	`price_source` varchar(16) NOT NULL,
 	`mode` varchar(16) NOT NULL,
-	`status` enum('planned','open','closing','closed','cancelled','failed') NOT NULL,
+	`status` enum('awaiting_confirmation','executing_limit','hedging','protecting','open','closing','unhedged','closed','cancelled','failed') NOT NULL,
 	`long_exchange` varchar(32) NOT NULL,
 	`short_exchange` varchar(32) NOT NULL,
 	`leverage` int NOT NULL,
@@ -92,7 +92,7 @@ CREATE TABLE IF NOT EXISTS `trade_legs` (
 	`trade_id` int NOT NULL,
 	`exchange_id` varchar(32) NOT NULL,
 	`side` enum('long','short') NOT NULL,
-	`status` enum('planned','submitted','open','closed','cancelled','failed') NOT NULL,
+	`status` enum('planned','submitted','open','unhedged','closed','cancelled','failed') NOT NULL,
 	`entry_price_usd` decimal(24,8),
 	`exit_price_usd` decimal(24,8),
 	`quantity_base` decimal(24,10),
@@ -104,11 +104,29 @@ CREATE TABLE IF NOT EXISTS `trade_legs` (
 	`external_position_id` varchar(128),
 	`entry_order_id` varchar(128),
 	`exit_order_id` varchar(128),
+	`close_reason` varchar(32),
+	`closure_notified_at` timestamp,
 	`opened_at` timestamp,
 	`closed_at` timestamp,
 	`raw` json,
 	CONSTRAINT `trade_legs_id` PRIMARY KEY(`id`),
 	CONSTRAINT `trade_legs_trade_id_trades_id_fk` FOREIGN KEY (`trade_id`) REFERENCES `trades`(`id`) ON DELETE no action ON UPDATE no action
+);
+
+CREATE TABLE IF NOT EXISTS `trade_previews` (
+	`id` int AUTO_INCREMENT NOT NULL,
+	`signal_id` int NOT NULL,
+	`trade_id` int,
+	`token` varchar(96) NOT NULL,
+	`status` varchar(32) NOT NULL,
+	`expires_at` timestamp NOT NULL,
+	`consumed_at` timestamp,
+	`payload` json NOT NULL,
+	`created_at` timestamp NOT NULL,
+	`updated_at` timestamp NOT NULL,
+	CONSTRAINT `trade_previews_id` PRIMARY KEY(`id`),
+	CONSTRAINT `trade_previews_signal_id_signals_id_fk` FOREIGN KEY (`signal_id`) REFERENCES `signals`(`id`) ON DELETE no action ON UPDATE no action,
+	CONSTRAINT `trade_previews_trade_id_trades_id_fk` FOREIGN KEY (`trade_id`) REFERENCES `trades`(`id`) ON DELETE no action ON UPDATE no action
 );
 
 CREATE TABLE IF NOT EXISTS `trade_status_history` (
@@ -160,6 +178,8 @@ CREATE INDEX IF NOT EXISTS `trade_status_created_at_idx` ON `trades` (`status`,`
 CREATE INDEX IF NOT EXISTS `trade_status_opened_at_idx` ON `trades` (`status`,`opened_at`);
 CREATE INDEX IF NOT EXISTS `trade_signal_idx` ON `trades` (`signal_id`);
 CREATE INDEX IF NOT EXISTS `trade_symbol_status_idx` ON `trades` (`symbol`,`status`);
+CREATE INDEX IF NOT EXISTS `trade_preview_token_idx` ON `trade_previews` (`token`);
+CREATE INDEX IF NOT EXISTS `trade_preview_signal_status_idx` ON `trade_previews` (`signal_id`,`status`);
 CREATE INDEX IF NOT EXISTS `trade_leg_trade_idx` ON `trade_legs` (`trade_id`);
 CREATE INDEX IF NOT EXISTS `trade_leg_exchange_status_idx` ON `trade_legs` (`exchange_id`,`status`);
 CREATE INDEX IF NOT EXISTS `trade_leg_trade_side_idx` ON `trade_legs` (`trade_id`,`side`);

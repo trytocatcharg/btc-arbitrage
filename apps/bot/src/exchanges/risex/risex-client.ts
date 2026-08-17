@@ -4,12 +4,14 @@ import { normalizeSymbol } from '@btc-arbitrage/exchange-core';
 import { extractPrice, extractTimestamp, findMarket, getMarketId } from '../market-normalization.js';
 import { RisexHttpClient } from './risex-http-client.js';
 import type { RisexConfig } from './risex.types.js';
+import { createRisexExecutionAdapter } from './risex-execution-adapter.js';
 
 export function createRisexAdapter(config: RisexConfig, http = new RisexHttpClient(config.apiBaseUrl)): ExchangeAdapter {
   return {
     id: 'risex',
     displayName: 'RISEx',
-    capabilities: { nativeFetch: true, websocket: 'polling-only', orderPlacement: false },
+    capabilities: { nativeFetch: true, websocket: 'polling-only', orderPlacement: config.tradingEnabled },
+    execution: createRisexExecutionAdapter(config, http),
     async getMarkets(): Promise<ExchangeMarket[]> {
       const payload = await http.get('/v1/markets');
       const market = findMarket(payload, 'BTCUSDT', 'perpetual');
@@ -25,6 +27,8 @@ export function createRisexAdapter(config: RisexConfig, http = new RisexHttpClie
         marketType: input.marketType,
         priceSource: input.priceSource,
         priceUsd: extractPrice(market, input.priceSource),
+        bidUsd: extractOptionalPrice(market, ['bid', 'bid_price', 'bestBid']),
+        askUsd: extractOptionalPrice(market, ['ask', 'ask_price', 'bestAsk']),
         exchangeTimestamp: normalizeRisexTimestamp(extractTimestamp(market)),
         receivedAt: new Date(),
         raw: market
@@ -41,6 +45,11 @@ export function createRisexAdapter(config: RisexConfig, http = new RisexHttpClie
       };
     }
   };
+}
+
+function extractOptionalPrice(market: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) { const value = market[key]; if (typeof value === 'string' || typeof value === 'number') return String(value); }
+  return undefined;
 }
 
 export function normalizeRisexTimestamp(value: unknown): Date {
