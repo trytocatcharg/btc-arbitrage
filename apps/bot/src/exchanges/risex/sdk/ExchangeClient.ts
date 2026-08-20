@@ -15,6 +15,8 @@ interface RisexSdkHttpClient {
 }
 
 const MAX_UINT96 = (1n << 96n) - 1n;
+const MAX_NONCE_BITMAP_INDEX = 207;
+const APPROVE_SINGLE_NONCE_RETRY_COUNT = 8;
 
 export class ExchangeClient {
   public readonly info: InfoClient;
@@ -98,25 +100,40 @@ export class ExchangeClient {
     if (typeof operator !== 'string' || !operator) throw new Error('No operator_hub found in RISEx system config');
     const nonceState = await this.getNonceState();
     const allowanceExpiry = Math.floor(Date.now() / 1000) + expirySeconds;
-    const signature = signPermitSingle({
-      privateKey: this.accountPrivateKey!,
-      domain: this.domain,
-      account: this.account,
-      operator,
-      budget,
-      allowanceExpiry,
-      nonceAnchor: Number(nonceState.nonce_anchor),
-      nonceBitmap: nonceState.current_bitmap_index
-    });
-    return await this.info.http.post('/v1/auth/approve-single', {
-      account: this.account,
-      operator,
-      budget: String(budget),
-      allowance_expiry: allowanceExpiry,
-      nonce_anchor: String(nonceState.nonce_anchor),
-      nonce_bitmap_index: nonceState.current_bitmap_index,
-      signature
-    }) as PermitSingleApprovalResult;
+    const baseAnchor = Number(nonceState.nonce_anchor);
+    const baseBitmap = nonceState.current_bitmap_index;
+
+    let lastError: unknown;
+    for (let attempt = 0; attempt < APPROVE_SINGLE_NONCE_RETRY_COUNT; attempt += 1) {
+      const { anchor, bitmap } = advancePermitSingleNonce(baseAnchor, baseBitmap, attempt);
+      const signature = signPermitSingle({
+        privateKey: this.accountPrivateKey!,
+        domain: this.domain,
+        account: this.account,
+        operator,
+        budget,
+        allowanceExpiry,
+        nonceAnchor: anchor,
+        nonceBitmap: bitmap
+      });
+
+      try {
+        return await this.info.http.post('/v1/auth/approve-single', {
+          account: this.account,
+          operator,
+          budget: String(budget),
+          allowance_expiry: allowanceExpiry,
+          nonce_anchor: String(anchor),
+          nonce_bitmap_index: bitmap,
+          signature
+        }) as PermitSingleApprovalResult;
+      } catch (error) {
+        lastError = error;
+        if (!isNonceUsedError(error) || attempt === APPROVE_SINGLE_NONCE_RETRY_COUNT - 1) throw error;
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error('RISEx approve-single failed after nonce retries');
   }
 
   async placeOrder(orderParams: OrderParams): Promise<OrderResponse> {
@@ -171,7 +188,7 @@ export class ExchangeClient {
     return this.info.http.post('/v1/account/leverage', {
       market_id: marketId,
       leverage: String(leverage),
-      permit
+      permit_params: permit
     });
   }
 
@@ -181,7 +198,7 @@ export class ExchangeClient {
     return this.info.http.post('/v1/account/margin-mode', {
       market_id: marketId,
       margin_mode: mode,
-      permit
+      permit_params: permit
     });
   }
 
@@ -191,7 +208,7 @@ export class ExchangeClient {
     return this.info.http.post('/v1/account/isolated-margin', {
       market_id: marketId,
       amount: String(amount),
-      permit
+      permit_params: permit
     });
   }
 
@@ -296,4 +313,18 @@ function unwrapData(payload: unknown): unknown {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function advancePermitSingleNonce(anchor: number, bitmap: number, steps: number): { anchor: number; bitmap: number } {
+  let nextAnchor = anchor;
+  let nextBitmap = bitmap + steps;
+  while (nextBitmap > MAX_NONCE_BITMAP_INDEX) {
+    nextAnchor += 1;
+    nextBitmap -= MAX_NONCE_BITMAP_INDEX + 1;
+  }
+  return { anchor: nextAnchor, bitmap: nextBitmap };
+}
+
+function isNonceUsedError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes('NonceUsed(');
 }

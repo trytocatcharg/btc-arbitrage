@@ -4,10 +4,16 @@ import { abiSignedWord, abiWord, bytes32Word, concatBytes, hashString, hexToByte
 const ACTION_PLACE_ORDER = 'RISE_PERPS_PLACE_ORDER_V1';
 const ACTION_CANCEL_ORDER = 'RISE_PERPS_CANCEL_ORDER_V1';
 const ACTION_CANCEL_ALL_ORDERS = 'RISE_PERPS_CANCEL_ALL_ORDERS_V1';
+const ACTION_UPDATE_LEVERAGE = 'RISE_PERPS_UPDATE_LEVERAGE_V1';
+const ACTION_UPDATE_MARGIN_MODE = 'RISE_PERPS_UPDATE_MARGIN_MODE_V1';
+const ACTION_UPDATE_ISOLATED_MARGIN = 'RISE_PERPS_UPDATE_ISOLATED_MARGIN_V1';
 
 const ACTION_PLACE_ORDER_HASH = hashString(ACTION_PLACE_ORDER);
 const ACTION_CANCEL_ORDER_HASH = hashString(ACTION_CANCEL_ORDER);
 const ACTION_CANCEL_ALL_ORDERS_HASH = hashString(ACTION_CANCEL_ALL_ORDERS);
+const ACTION_UPDATE_LEVERAGE_HASH = hashString(ACTION_UPDATE_LEVERAGE);
+const ACTION_UPDATE_MARGIN_MODE_HASH = hashString(ACTION_UPDATE_MARGIN_MODE);
+const ACTION_UPDATE_ISOLATED_MARGIN_HASH = hashString(ACTION_UPDATE_ISOLATED_MARGIN);
 
 const V3_FLAG_PERMIT = 0x01;
 const V3_FLAG_BUILDER = 0x02;
@@ -68,17 +74,17 @@ export function encodeCancelAll(marketId: number): string {
 }
 
 export function encodeLeverage(marketId: number, leverage: bigint): string {
-  const encoded = concatBytes(abiWord(BigInt(marketId)), abiWord(leverage));
+  const encoded = concatBytes(bytes32Word(ACTION_UPDATE_LEVERAGE_HASH), abiWord(BigInt(marketId)), abiWord(leverage));
   return `0x${Buffer.from(keccakBytes(encoded)).toString('hex')}`;
 }
 
 export function encodeMarginMode(marketId: number, marginMode: number): string {
-  const encoded = concatBytes(abiWord(BigInt(marketId)), abiWord(marginMode));
+  const encoded = concatBytes(bytes32Word(ACTION_UPDATE_MARGIN_MODE_HASH), abiWord(BigInt(marketId)), abiWord(marginMode));
   return `0x${Buffer.from(keccakBytes(encoded)).toString('hex')}`;
 }
 
 export function encodeIsolatedMargin(marketId: number, amount: bigint): string {
-  const encoded = concatBytes(abiWord(BigInt(marketId)), abiSignedWord(amount));
+  const encoded = concatBytes(bytes32Word(ACTION_UPDATE_ISOLATED_MARGIN_HASH), abiWord(BigInt(marketId)), abiSignedWord(amount));
   return `0x${Buffer.from(keccakBytes(encoded)).toString('hex')}`;
 }
 

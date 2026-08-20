@@ -29,6 +29,14 @@ export class TelegramNotifier implements Notifier {
     if (this.isSuppressedByCooldown()) return;
     this.lastNotificationAttemptAtMs = this.now();
 
+    console.log('Sending Telegram signal notification', {
+      signalId: signal.id ?? null,
+      hasOpenTradeButton: Boolean(signal.id),
+      longExchange: signal.longExchange,
+      shortExchange: signal.shortExchange,
+      spreadUsd: signal.absoluteDiffUsd
+    });
+
     const response = await this.fetchImpl(`https://api.telegram.org/bot${this.config.botToken}/sendMessage`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -67,7 +75,7 @@ export function formatTelegramSignal(signal: TradingSignal): string {
     `Spread: $${formatUsdAmount(signal.absoluteDiffUsd)}`,
     `Threshold: $${signal.thresholdUsd}`,
     `Leverage: ${signal.leverage}x`,
-    'Mode: dry-run / no live order submitted'
+    'Action: tap Open Trade to review and confirm before live execution'
   ].join('\n');
 }
 

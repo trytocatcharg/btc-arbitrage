@@ -93,6 +93,7 @@ export interface ExchangeBalance {
 export interface ExchangeBalancesResponse {
   generatedAt: string;
   balances: ExchangeBalance[];
+  total: string | null;
 }
 
 export interface EventRecord {

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { RisexExecutionAdapter, packRisexOrderData } from '../src/exchanges/risex/risex-execution-adapter.js';
+import { encodeLeverage, encodeMarginMode } from '../src/exchanges/risex/sdk/signing/encoder.js';
 
 const ACCOUNT = '0x1111111111111111111111111111111111111111';
 const ACCOUNT_PRIVATE_KEY = `0x${'2'.repeat(64)}`;
@@ -97,7 +98,7 @@ test('RISEx exposes balance and position reads but refuses undocumented TP/SL tr
   assert.match(posted.body.signature, /^[A-Za-z0-9+/=]+$/);
 });
 
-test('RISEx leverage update goes through adapted ExchangeClient with permit payload', async () => {
+test('RISEx leverage update goes through adapted ExchangeClient with permit_params payload', async () => {
   const http = fakeHttp();
   const adapter = new RisexExecutionAdapter({ apiBaseUrl: 'https://example.test', accountAddress: ACCOUNT, sessionSignerPrivateKey: SIGNER_PRIVATE_KEY, tradingEnabled: true }, http, fixedNow);
 
@@ -107,10 +108,10 @@ test('RISEx leverage update goes through adapted ExchangeClient with permit payl
   assert.equal(posted.path, '/v1/account/leverage');
   assert.equal(posted.body.market_id, 1);
   assert.equal(posted.body.leverage, '3');
-  assert.ok('permit' in posted.body);
-  assert.ok(!('permit_params' in posted.body));
-  assert.equal(posted.body.permit.nonce_anchor, 7);
-  assert.equal(posted.body.permit.nonce_bitmap_index, 0);
+  assert.ok('permit_params' in posted.body);
+  assert.ok(!('permit' in posted.body));
+  assert.equal(posted.body.permit_params.nonce_anchor, 7);
+  assert.equal(posted.body.permit_params.nonce_bitmap_index, 0);
 });
 
 test('RISEx approve-single uses the main wallet and hex signature', async () => {
@@ -133,6 +134,11 @@ test('RISEx approve-single uses the main wallet and hex signature', async () => 
 
 test('RISEx order packing follows documented uint88 layout', () => {
   assert.equal(packRisexOrderData({ marketId: 1, sizeSteps: 200n, priceTicks: 550248n, side: 0, postOnly: true, reduceOnly: false, stpMode: 0, orderType: 1, timeInForce: 0 }), 1180591675702007957634n);
+});
+
+test('RISEx leverage and margin hashes match the verified Python reference', () => {
+  assert.equal(encodeLeverage(1, 10n), '0xc358a04124587a5809f1d6ddf57fc2ecb3d1691fd0a76a930c0518e961081880');
+  assert.equal(encodeMarginMode(1, 1), '0x447f808acbdae07c8c46502182357efa3110ed0e3b401f16c0d3d49a8fdb7b3f');
 });
 
 function fixedNow(): Date { return new Date('2026-01-01T00:00:00.000Z'); }

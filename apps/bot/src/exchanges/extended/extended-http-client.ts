@@ -1,3 +1,5 @@
+import { JsonFileLogger } from '../../logging/json-file-logger.js';
+
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
 export interface ExtendedHttpRequestOptions {
@@ -6,7 +8,13 @@ export interface ExtendedHttpRequestOptions {
 }
 
 export class ExtendedHttpClient {
-  constructor(private readonly baseUrl: string, private readonly userAgent: string, private readonly apiKey?: string, private readonly fetchImpl: FetchLike = fetch) {}
+  constructor(
+    private readonly baseUrl: string,
+    private readonly userAgent: string,
+    private readonly apiKey?: string,
+    private readonly fetchImpl: FetchLike = fetch,
+    private readonly logger = new JsonFileLogger('logs/extended-http.jsonl')
+  ) {}
 
   async get(path: string, options: ExtendedHttpRequestOptions = {}): Promise<unknown> {
     return this.request('GET', path, undefined, options);
@@ -28,16 +36,23 @@ export class ExtendedHttpClient {
       headers['x-api-key'] = this.apiKey;
     }
     const response = await this.fetchImpl(this.url(path, options.query), { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+    const text = response.status === 204 ? '' : await response.text();
+    const payload = parseResponseBody(text);
+    await this.logger.write({
+      timestamp: new Date().toISOString(),
+      event: 'extended_http_response',
+      method,
+      path,
+      query: options.query,
+      private: options.private === true,
+      status: response.status,
+      ok: response.ok,
+      body: payload
+    });
     if (response.status === 404 && method === 'GET' && path === '/api/v1/user/balance') return { syntheticZeroBalance: true };
-    if (!response.ok) throw new Error(`Extended ${method} ${path} failed with HTTP ${response.status}`);
+    if (!response.ok) throw new Error(`Extended ${method} ${path} failed with HTTP ${response.status}${text ? `: ${truncateForError(text)}` : ''}`);
     if (response.status === 204) return undefined;
-    const text = await response.text();
-    if (!text) return undefined;
-    try {
-      return JSON.parse(text) as unknown;
-    } catch {
-      return text;
-    }
+    return payload;
   }
 
   private url(path: string, query?: ExtendedHttpRequestOptions['query']): string {
@@ -49,4 +64,17 @@ export class ExtendedHttpClient {
     }
     return url.toString();
   }
+}
+
+function parseResponseBody(text: string): unknown {
+  if (!text) return undefined;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return text;
+  }
+}
+
+function truncateForError(value: string, maxLength = 400): string {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength)}…`;
 }

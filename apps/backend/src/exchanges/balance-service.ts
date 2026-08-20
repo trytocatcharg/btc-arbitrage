@@ -85,7 +85,10 @@ export function createBalanceService(config: BackendConfig, fetchImpl: FetchLike
       const [risex, extended] = await Promise.all([this.getRisexBalance(), this.getExtendedBalance()]);
       return {
         generatedAt: new Date().toISOString(),
-        balances: [risex, extended]
+        balances: [risex, extended],
+        total: risex.totalEquityUsd && extended.totalEquityUsd
+          ? (parseFloat(risex.totalEquityUsd) + parseFloat(extended.totalEquityUsd)).toFixed(2)
+          : null
       };
     }
   };

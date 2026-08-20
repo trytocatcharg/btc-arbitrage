@@ -11,6 +11,7 @@ export interface PermitParams {
 export interface NonceState {
   nonce_anchor: string;
   current_bitmap_index: number;
+  bitmap?: string;
 }
 
 export interface SignerInfo {

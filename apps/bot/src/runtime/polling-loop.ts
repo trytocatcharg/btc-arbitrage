@@ -6,7 +6,7 @@ import { SignalEngine } from '../signals/signal-engine.js';
 import type { Notifier } from '../notifications/notifier.js';
 import type { getDb } from '@btc-arbitrage/db';
 import { signals, activeTradeStatuses, trades } from '@btc-arbitrage/db';
-import { desc, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 import { monitorTrades } from '../trading/trade-monitor.js';
 import { shouldSuppressSignalForActiveTrades } from '../trading/trade-guards.js';
 
@@ -79,10 +79,12 @@ export async function runPollingLoop(input: { config: BotConfig; registry: Excha
           console.log('Signal suppressed because an active or unhedged trade exists', { tick, activeTradeId: active[0]?.id });
           continue;
         }
-        const created = await input.db.insert(signals).values({ spreadId: signal.spreadId ? Number(signal.spreadId) : null, longExchange: signal.longExchange, shortExchange: signal.shortExchange, source: signal.priceSource, leverage: signal.leverage, thresholdUsd: signal.thresholdUsd, observedDiffUsd: signal.absoluteDiffUsd, reason: signal.reason, status: 'notified', createdAt: signal.createdAt });
-        const signalId = Number((created as { insertId?: number }).insertId ?? 0);
+        const signalRow = { spreadId: signal.spreadId ? Number(signal.spreadId) : null, longExchange: signal.longExchange, shortExchange: signal.shortExchange, source: signal.priceSource, leverage: signal.leverage, thresholdUsd: signal.thresholdUsd, observedDiffUsd: signal.absoluteDiffUsd, reason: signal.reason, status: 'notified', createdAt: signal.createdAt };
+        const created = await input.db.insert(signals).values(signalRow);
+        const signalId = await resolveInsertedSignalId(input.db, created, signalRow);
         console.warn('Trading signal created', {
           tick,
+          signalId,
           symbol: signal.symbol,
           longExchange: signal.longExchange,
           shortExchange: signal.shortExchange,
@@ -102,6 +104,39 @@ export async function runPollingLoop(input: { config: BotConfig; registry: Excha
     if (input.config.botRunOnce) break;
     await sleep(input.config.pricePollIntervalMs);
   }
+}
+
+async function resolveInsertedSignalId(
+  db: Awaited<ReturnType<typeof getDb>>,
+  created: unknown,
+  row: {
+    spreadId: number | null;
+    longExchange: string;
+    shortExchange: string;
+    source: string;
+    leverage: number;
+    thresholdUsd: string;
+    observedDiffUsd: string;
+    reason: string;
+    status: string;
+    createdAt: Date;
+  }
+): Promise<number> {
+  const insertId = Number((created as { insertId?: number }).insertId ?? 0);
+  if (insertId > 0) return insertId;
+
+  const inserted = await db.select({ id: signals.id }).from(signals).where(and(
+    eq(signals.longExchange, row.longExchange),
+    eq(signals.shortExchange, row.shortExchange),
+    eq(signals.source, row.source),
+    eq(signals.leverage, row.leverage),
+    eq(signals.thresholdUsd, row.thresholdUsd),
+    eq(signals.observedDiffUsd, row.observedDiffUsd),
+    eq(signals.reason, row.reason),
+    eq(signals.status, row.status)
+  )).orderBy(desc(signals.id));
+
+  return Number(inserted[0]?.id ?? 0);
 }
 
 let shuttingDown = false;
