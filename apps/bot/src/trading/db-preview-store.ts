@@ -1,7 +1,10 @@
-import { and, eq, gt, inArray } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray } from 'drizzle-orm';
 import { tradePreviews, tradeLegs, trades } from '@btc-arbitrage/db';
 import type { getDb } from '@btc-arbitrage/db';
 import type { OpenTradePreview, OpenTradeState, PreviewStore } from './open-trade.js';
+import { JsonFileLogger } from '../logging/json-file-logger.js';
+
+const dbPreviewLogger = new JsonFileLogger('logs/open-trade.jsonl');
 
 export class DbPreviewStore implements PreviewStore {
   constructor(private readonly db: Awaited<ReturnType<typeof getDb>>) {}
@@ -15,8 +18,43 @@ export class DbPreviewStore implements PreviewStore {
   }
   async startExecution(preview: OpenTradePreview): Promise<void> {
     await this.db.transaction(async (tx) => {
-      const inserted = await tx.insert(trades).values({ signalId: preview.signalId, symbol: preview.symbol, marketType: preview.marketType, priceSource: 'last', mode: 'live', status: 'executing_limit', longExchange: preview.longExchange, shortExchange: preview.shortExchange, leverage: 1, entrySpreadUsd: String(Number(preview.shortPriceUsd) - Number(preview.longPriceUsd)), createdAt: new Date(), updatedAt: new Date() });
-      const tradeId = Number((inserted as unknown as { insertId?: number }).insertId ?? 0); if (!tradeId) throw new Error('Failed to create trade');
+      const createdAt = new Date();
+      const row = {
+        signalId: preview.signalId,
+        symbol: preview.symbol,
+        marketType: preview.marketType,
+        priceSource: 'last' as const,
+        mode: 'live' as const,
+        status: 'executing_limit' as const,
+        longExchange: preview.longExchange,
+        shortExchange: preview.shortExchange,
+        leverage: 1,
+        entrySpreadUsd: String(Number(preview.shortPriceUsd) - Number(preview.longPriceUsd)),
+        createdAt,
+        updatedAt: createdAt
+      };
+      const inserted = await tx.insert(trades).values(row);
+      let tradeId = Number((inserted as unknown as { insertId?: number }).insertId ?? 0);
+      if (!tradeId) {
+        const fallback = await tx.select({ id: trades.id }).from(trades).where(and(
+          eq(trades.signalId, row.signalId),
+          eq(trades.symbol, row.symbol),
+          eq(trades.marketType, row.marketType),
+          eq(trades.priceSource, row.priceSource),
+          eq(trades.mode, row.mode),
+          eq(trades.status, row.status),
+          eq(trades.longExchange, row.longExchange),
+          eq(trades.shortExchange, row.shortExchange),
+          eq(trades.leverage, row.leverage),
+          eq(trades.entrySpreadUsd, row.entrySpreadUsd)
+        )).orderBy(desc(trades.id));
+        tradeId = Number(fallback[0]?.id ?? 0);
+      }
+      if (!tradeId) {
+        await dbPreviewLogger.write({ timestamp: new Date().toISOString(), event: 'open_trade_db_trade_create_failed', token: preview.token, signalId: preview.signalId, symbol: preview.symbol, longExchange: preview.longExchange, shortExchange: preview.shortExchange, entrySpreadUsd: row.entrySpreadUsd });
+        throw new Error('Failed to create trade');
+      }
+      await dbPreviewLogger.write({ timestamp: new Date().toISOString(), event: 'open_trade_db_trade_created', token: preview.token, signalId: preview.signalId, tradeId });
       await tx.insert(tradeLegs).values([{ tradeId, exchangeId: preview.longExchange, side: 'long', status: 'planned', quantityBase: preview.quantityBase }, { tradeId, exchangeId: preview.shortExchange, side: 'short', status: 'planned', quantityBase: preview.quantityBase }]);
       await tx.update(tradePreviews).set({ tradeId, updatedAt: new Date() }).where(eq(tradePreviews.token, preview.token));
     });

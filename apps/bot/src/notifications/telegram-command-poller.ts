@@ -6,6 +6,7 @@ import { buildTradeSummaryMessage, type ExchangeRegistryLike } from './trade-sum
 import { isAllowedTelegramChat, normalizeTelegramChatId, type FetchLike } from './telegram-notifier.js';
 import { DbPreviewStore } from '../trading/db-preview-store.js';
 import { OpenTradeService } from '../trading/open-trade.js';
+import { JsonFileLogger } from '../logging/json-file-logger.js';
 
 export interface TelegramUpdate {
   update_id: number;
@@ -39,6 +40,8 @@ const AVAILABLE_COMMANDS = [
     description: 'Show open trade summary'
   }
 ] as const;
+
+const telegramCommandLogger = new JsonFileLogger('logs/telegram-commands.jsonl');
 
 export class TelegramCommandPoller {
   private offset = 0;
@@ -145,19 +148,23 @@ export class TelegramCommandPoller {
     if (!isAllowedTelegramChat(callback.message?.chat, this.config.telegram.chatId!)) return;
     const data = callback.data ?? '';
     try {
+      await telegramCommandLogger.write({ timestamp: new Date().toISOString(), event: 'telegram_callback_received', callbackId: callback.id, data });
       if (data.startsWith('open:')) {
         const signalId = Number(data.slice(5)); const signal = (await this.db.select().from(signals).where(eq(signals.id, signalId)))[0];
         if (!signal) throw new Error('Signal no longer exists');
         const service = this.openTradeService();
         const preview = await service.createPreview({ signalId, symbol: this.config.btcSymbol, marketType: this.config.marketType, exchanges: [signal.longExchange as BotConfig['exchangeA'], signal.shortExchange as BotConfig['exchangeA']] });
+        await telegramCommandLogger.write({ timestamp: new Date().toISOString(), event: 'telegram_open_preview_sent', callbackId: callback.id, signalId, token: preview.token, longExchange: preview.longExchange, shortExchange: preview.shortExchange, quantityBase: preview.quantityBase });
         await this.sendMessage(`Trade preview\nLong: ${preview.longExchange} @ $${preview.longPriceUsd}\nShort: ${preview.shortExchange} @ $${preview.shortPriceUsd}\nQuantity: ${preview.quantityBase} BTC\nExpires: ${preview.expiresAt.toISOString()}`, { inline_keyboard: [[{ text: 'Confirm', callback_data: `confirm:${preview.token}` }, { text: 'Cancel', callback_data: `cancel:${preview.token}` }]] });
-      } else if (data.startsWith('confirm:')) { await this.openTradeService().confirm(data.slice(8)); await this.sendMessage('Trade execution completed.'); }
+      } else if (data.startsWith('confirm:')) { const token = data.slice(8); await telegramCommandLogger.write({ timestamp: new Date().toISOString(), event: 'telegram_confirm_requested', callbackId: callback.id, token }); await this.openTradeService().confirm(token); await telegramCommandLogger.write({ timestamp: new Date().toISOString(), event: 'telegram_confirm_completed', callbackId: callback.id, token }); await this.sendMessage('Trade execution completed.'); }
       else if (data.startsWith('cancel:')) {
-        await new DbPreviewStore(this.db).transition(data.slice(7), 'cancelled');
+        const token = data.slice(7);
+        await telegramCommandLogger.write({ timestamp: new Date().toISOString(), event: 'telegram_cancel_requested', callbackId: callback.id, token });
+        await new DbPreviewStore(this.db).transition(token, 'cancelled');
         if (typeof callback.message?.message_id === 'number') await this.deleteMessage(callback.message.message_id);
       }
       await this.answerCallback(callback.id);
-    } catch (error) { await this.answerCallback(callback.id, error instanceof Error ? error.message : 'Trade action failed'); }
+    } catch (error) { const message = error instanceof Error ? error.message : 'Trade action failed'; console.error('Telegram callback failed', { callbackId: callback.id, data, message }); await telegramCommandLogger.write({ timestamp: new Date().toISOString(), event: 'telegram_callback_failed', callbackId: callback.id, data, error: message }); await this.answerCallback(callback.id, message); }
   }
 
   private openTradeService(): OpenTradeService {

@@ -24,7 +24,7 @@ export const ExchangeBalanceCard: FC<ExchangeBalanceCardProps> = ({ title, balan
       </div>
 
       <p className="mt-5 text-sm text-slate-400">Total equity</p>
-      <p className="mt-1 text-3xl font-bold text-slate-50">{loading ? 'Loading…' : formatNullableUsd(balance?.totalEquityUsd)}</p>
+      <p className="mt-1 text-lg font-bold text-slate-50">{loading ? 'Loading…' : formatNullableUsd(balance?.totalEquityUsd)}</p>
 
       <p className="mt-5 text-sm text-slate-400">Available</p>
       <p className="mt-1 text-lg font-semibold text-slate-100">{loading ? 'Loading…' : formatNullableUsd(balance?.availableUsd)}</p>

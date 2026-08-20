@@ -70,7 +70,7 @@ export function createRisexExecutionAdapter(config: RisexConfig, http: RisexExec
 export class RisexExecutionAdapter implements ExecutionAdapter {
   private readonly signerAddress?: string;
   private readonly exchangeClient?: ExchangeClient;
-  private readonly exchangeClientReady?: Promise<ExchangeClient>;
+  private exchangeClientReady?: Promise<ExchangeClient>;
   private nonceAnchor?: bigint;
   private nextNonceBitmapIndex = 0;
 
@@ -83,7 +83,6 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
         accountKey: config.accountPrivateKey,
         signerKey: config.sessionSignerPrivateKey
       }, http);
-      this.exchangeClientReady = this.exchangeClient.init();
     }
   }
 
@@ -264,7 +263,13 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
 
   private async getExchangeClient(): Promise<ExchangeClient> {
     this.requireTradingCredentials();
-    if (!this.exchangeClient || !this.exchangeClientReady) throw new Error('RISEx exchange client could not be initialized');
+    if (!this.exchangeClient) throw new Error('RISEx exchange client could not be initialized');
+    if (!this.exchangeClientReady) {
+      this.exchangeClientReady = this.exchangeClient.init().catch((error) => {
+        this.exchangeClientReady = undefined;
+        throw error;
+      });
+    }
     return this.exchangeClientReady;
   }
 

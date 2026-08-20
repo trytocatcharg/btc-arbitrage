@@ -21,7 +21,7 @@ Safe-by-default TypeScript monorepo for monitoring BTC perpetual/futures prices 
 - Sends Telegram alerts with a global cooldown; default is one alert per hour.
 - Registers `/config` as a Telegram command scoped to the configured chat.
 - Shows a web dashboard with open operations and net PnL.
-- Uses dry-run mock operations in the web when `VITE_BOT_EXECUTION_MODE` is not `live`.
+- Uses dry-run mock operations in the web when `BOT_EXECUTION_MODE` is not `live`.
 
 ## Monorepo layout
 
@@ -125,7 +125,7 @@ Current dashboard sections:
 Dry-run behavior:
 
 ```bash
-VITE_BOT_EXECUTION_MODE=dry-run COREPACK_ENABLE_AUTO_PIN=0 corepack yarn@4.5.3 dev:web
+BOT_EXECUTION_MODE=dry-run COREPACK_ENABLE_AUTO_PIN=0 corepack yarn@4.5.3 dev:web
 ```
 
 When dry-run is active, the dashboard uses mock open operations from:

@@ -13,7 +13,7 @@ COREPACK_ENABLE_AUTO_PIN=0 corepack yarn@4.5.3 dev:web
 Dry-run is the default UI mode:
 
 ```bash
-VITE_BOT_EXECUTION_MODE=dry-run COREPACK_ENABLE_AUTO_PIN=0 corepack yarn@4.5.3 dev:web
+BOT_EXECUTION_MODE=dry-run COREPACK_ENABLE_AUTO_PIN=0 corepack yarn@4.5.3 dev:web
 ```
 
 ## Current dashboard
@@ -27,7 +27,7 @@ VITE_BOT_EXECUTION_MODE=dry-run COREPACK_ENABLE_AUTO_PIN=0 corepack yarn@4.5.3 d
 
 ## Dry-run mocks
 
-When `VITE_BOT_EXECUTION_MODE` is not `live`, the dashboard reads mock open operations from:
+When `BOT_EXECUTION_MODE` is not `live`, the dashboard reads mock open operations from:
 
 ```txt
 apps/web/src/features/dashboard/mock-operations.ts

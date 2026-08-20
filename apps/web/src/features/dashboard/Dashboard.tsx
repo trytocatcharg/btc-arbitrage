@@ -125,5 +125,5 @@ export const Dashboard: FC = () => {
 };
 
 function getExecutionMode(): ExecutionMode {
-  return import.meta.env.VITE_BOT_EXECUTION_MODE === ExecutionMode.Live ? ExecutionMode.Live : ExecutionMode.DryRun;
+  return import.meta.env.BOT_EXECUTION_MODE === ExecutionMode.Live ? ExecutionMode.Live : ExecutionMode.DryRun;
 }
