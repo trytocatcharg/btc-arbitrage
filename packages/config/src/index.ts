@@ -23,7 +23,6 @@ export interface BotConfig {
   pricePollIntervalMs: number;
   minPriceDiffUsd: string;
   leverage: number;
-  maxLeverage: number;
   botExecutionMode: ExecutionMode;
   botRunOnce: boolean;
   enableOrderPlacement: boolean;
@@ -34,6 +33,8 @@ export interface BotConfig {
     quoteMaxAgeMs: number;
     limitTimeoutMs: number;
     residualDeltaToleranceBase: string;
+    takeProfitPercent: string;
+    stopLossPercent: string;
     risexMakerFeeBps: string;
     risexTakerFeeBps: string;
     extendedMakerFeeBps: string;
@@ -78,9 +79,7 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   const priceSource = parsePriceSource(env.PRICE_SOURCE ?? 'mark');
   const marketType = parseMarketType(env.MARKET_TYPE ?? 'perpetual');
   const minPriceDiffUsd = parsePositiveDecimalString(env.MIN_PRICE_DIFF_USD ?? '40', 'MIN_PRICE_DIFF_USD');
-  const maxLeverage = parsePositiveInteger(env.MAX_LEVERAGE ?? '3', 'MAX_LEVERAGE');
   const leverage = parsePositiveInteger(env.LEVERAGE ?? '3', 'LEVERAGE');
-  if (leverage > maxLeverage) throw new Error('LEVERAGE must be <= MAX_LEVERAGE');
 
   const executionMode = parseExecutionMode(env.BOT_EXECUTION_MODE ?? ExecutionMode.DryRun);
   const botRunOnce = parseBoolean(env.BOT_RUN_ONCE ?? 'false');
@@ -102,6 +101,11 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   }
 
   const database = loadDatabaseConfig(env);
+  const openTradeTakeProfitPercent = parsePositiveDecimalString(env.OPEN_TRADE_TAKE_PROFIT_PERCENT ?? '3', 'OPEN_TRADE_TAKE_PROFIT_PERCENT');
+  const openTradeStopLossPercent = parsePositiveDecimalString(env.OPEN_TRADE_STOP_LOSS_PERCENT ?? '3', 'OPEN_TRADE_STOP_LOSS_PERCENT');
+  if (Number(openTradeStopLossPercent) >= 100) {
+    throw new Error('OPEN_TRADE_STOP_LOSS_PERCENT must be less than 100');
+  }
 
   return {
     database,
@@ -115,7 +119,6 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     pricePollIntervalMs: parsePositiveInteger(env.PRICE_POLL_INTERVAL_MS ?? '1000', 'PRICE_POLL_INTERVAL_MS'),
     minPriceDiffUsd,
     leverage,
-    maxLeverage,
     botExecutionMode: executionMode,
     botRunOnce,
     enableOrderPlacement,
@@ -126,10 +129,12 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       quoteMaxAgeMs: parsePositiveInteger(env.OPEN_TRADE_QUOTE_MAX_AGE_MS ?? '5000', 'OPEN_TRADE_QUOTE_MAX_AGE_MS'),
       limitTimeoutMs: parsePositiveInteger(env.OPEN_TRADE_LIMIT_TIMEOUT_MS ?? '30000', 'OPEN_TRADE_LIMIT_TIMEOUT_MS'),
       residualDeltaToleranceBase: parsePositiveDecimalString(env.OPEN_TRADE_RESIDUAL_DELTA_BTC ?? '0.00001', 'OPEN_TRADE_RESIDUAL_DELTA_BTC'),
-      risexMakerFeeBps: parseNonNegativeDecimalString(env.RISEX_MAKER_FEE_BPS ?? '0', 'RISEX_MAKER_FEE_BPS'),
-      risexTakerFeeBps: parseNonNegativeDecimalString(env.RISEX_TAKER_FEE_BPS ?? '0', 'RISEX_TAKER_FEE_BPS'),
+      takeProfitPercent: openTradeTakeProfitPercent,
+      stopLossPercent: openTradeStopLossPercent,
+      risexMakerFeeBps: parseNonNegativeDecimalString(env.RISEX_MAKER_FEE_BPS ?? '1', 'RISEX_MAKER_FEE_BPS'),
+      risexTakerFeeBps: parseNonNegativeDecimalString(env.RISEX_TAKER_FEE_BPS ?? '3', 'RISEX_TAKER_FEE_BPS'),
       extendedMakerFeeBps: parseNonNegativeDecimalString(env.EXTENDED_MAKER_FEE_BPS ?? '0', 'EXTENDED_MAKER_FEE_BPS'),
-      extendedTakerFeeBps: parseNonNegativeDecimalString(env.EXTENDED_TAKER_FEE_BPS ?? '0', 'EXTENDED_TAKER_FEE_BPS')
+      extendedTakerFeeBps: parseNonNegativeDecimalString(env.EXTENDED_TAKER_FEE_BPS ?? '2.5', 'EXTENDED_TAKER_FEE_BPS')
     },
     risex: {
       apiBaseUrl: trimTrailingSlash(env.RISEX_API_BASE_URL ?? 'https://api.rise.trade'),

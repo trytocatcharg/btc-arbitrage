@@ -5,7 +5,7 @@ import { EmptyState } from './components/EmptyState.js';
 import { ExchangeBalanceCard } from './components/ExchangeBalanceCard.js';
 import { MetricCard } from './components/MetricCard.js';
 import { OperationCard } from './components/OperationCard.js';
-import { formatSignedUsd } from './dashboard-formatters.js';
+import { formatNullableUsd, formatSignedUsd } from './dashboard-formatters.js';
 import { fetchExchangeBalances, findExchangeBalance, type ExchangeBalancesState } from './exchange-balances.js';
 import { calculateOperationPnl } from './operations.js';
 
@@ -16,7 +16,8 @@ const portfolioPnl = openOperations.reduce((total, operation) => total + calcula
 export const Dashboard: FC = () => {
   const [exchangeBalances, setExchangeBalances] = useState<ExchangeBalancesState>({
     balances: [],
-    loading: true
+    loading: true,
+    total: null
   });
 
   useEffect(() => {
@@ -29,13 +30,15 @@ export const Dashboard: FC = () => {
         setExchangeBalances({
           balances: response.balances,
           generatedAt: response.generatedAt,
-          loading: false
+          loading: false,
+          total: response.total
         });
       } catch (error: unknown) {
         if (!isMounted) return;
         setExchangeBalances({
           balances: [],
           loading: false,
+          total: null,
           error: error instanceof Error ? error.message : 'Could not load exchange balances'
         });
       }
@@ -67,9 +70,9 @@ export const Dashboard: FC = () => {
               </p>
             </div>
             <div className="rounded-2xl border border-panel-border bg-panel-muted/90 p-4 text-sm shadow-inner">
-              <p className="text-slate-400">Execution mode</p>
-              <p className="mt-1 text-xl font-semibold text-cyan-200">{executionMode}</p>
-              {executionMode === ExecutionMode.DryRun ? <p className="mt-2 text-slate-400">Using mock open operations.</p> : null}
+              <p className="text-slate-400">Total</p>
+              <p className="mt-1 text-xl font-semibold text-cyan-200">{formatNullableUsd(exchangeBalances.total)}</p>
+
             </div>
           </div>
         </div>

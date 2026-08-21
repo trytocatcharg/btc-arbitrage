@@ -108,8 +108,14 @@ It determines:
 
 Then it decides execution mechanics:
 
-- **limitExchange** = exchange preferred for maker entry, based on configured maker-fee comparison
-- **marketExchange** = the opposite leg used to hedge fills
+- It evaluates the only two valid entry layouts:
+  - maker on `longExchange`, taker on `shortExchange`
+  - maker on `shortExchange`, taker on `longExchange`
+- It chooses the layout with the **lowest maker fee first**.
+- If maker fees tie, it chooses the layout with the **lowest taker fee**.
+- Therefore:
+  - **limitExchange** = exchange chosen for the maker leg
+  - **marketExchange** = opposite exchange used for the taker hedge
 
 Previews are persisted in `trade_previews`.
 
@@ -124,9 +130,17 @@ When confirmed:
 5. hedge any filled quantity on the opposite exchange with **market**,
 6. if covered quantity exists, place TP/SL protection on both legs.
 
+Protection percentages are configurable from env:
+
+- `OPEN_TRADE_TAKE_PROFIT_PERCENT`
+- `OPEN_TRADE_STOP_LOSS_PERCENT`
+
 ### Important execution rules
 
 - Execution happens **only after Telegram confirmation**.
+- Routing rule is permanent: **maker fee wins first, taker fee breaks ties**.
+- `maker = limit order`
+- `taker = market order`
 - The maker leg no longer uses the stale preview price.
 - At confirm time it recalculates a **fresh passive limit** from live BBO:
   - buy -> current `bid`

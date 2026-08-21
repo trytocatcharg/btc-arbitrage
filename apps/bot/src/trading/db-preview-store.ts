@@ -16,7 +16,7 @@ export class DbPreviewStore implements PreviewStore {
     if (Number((changed as unknown as { affectedRows?: number }).affectedRows ?? 1) !== 1) return null;
     return row.payload as unknown as OpenTradePreview;
   }
-  async startExecution(preview: OpenTradePreview): Promise<void> {
+  async startExecution(preview: OpenTradePreview, leverage: number): Promise<void> {
     await this.db.transaction(async (tx) => {
       const createdAt = new Date();
       const row = {
@@ -28,7 +28,7 @@ export class DbPreviewStore implements PreviewStore {
         status: 'executing_limit' as const,
         longExchange: preview.longExchange,
         shortExchange: preview.shortExchange,
-        leverage: 1,
+        leverage,
         entrySpreadUsd: String(Number(preview.shortPriceUsd) - Number(preview.longPriceUsd)),
         createdAt,
         updatedAt: createdAt

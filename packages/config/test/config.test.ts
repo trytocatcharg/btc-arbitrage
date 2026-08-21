@@ -27,9 +27,12 @@ test('loadBotConfig validates Telegram credentials when enabled', () => {
   assert.throws(() => loadBotConfig({ TELEGRAM_ENABLED: 'true' }), /TELEGRAM_BOT_TOKEN/);
 });
 
-test('loadBotConfig blocks live execution in the monitoring-only slice', () => {
-  assert.throws(() => loadBotConfig({ BOT_EXECUTION_MODE: ExecutionMode.Live }), /Live order placement is not implemented/);
-  assert.throws(() => loadBotConfig({ ENABLE_ORDER_PLACEMENT: 'true' }), /Live order placement is not implemented/);
+test('loadBotConfig enforces consistent live execution gates', () => {
+  assert.throws(() => loadBotConfig({ BOT_EXECUTION_MODE: ExecutionMode.Live }), /ENABLE_ORDER_PLACEMENT must be true/);
+  assert.throws(() => loadBotConfig({ ENABLE_ORDER_PLACEMENT: 'true' }), /BOT_EXECUTION_MODE must be live/);
+  const config = loadBotConfig({ BOT_EXECUTION_MODE: ExecutionMode.Live, ENABLE_ORDER_PLACEMENT: 'true' });
+  assert.equal(config.botExecutionMode, ExecutionMode.Live);
+  assert.equal(config.enableOrderPlacement, true);
 });
 
 test('loadBotConfig accepts exchange trading flags while global order placement stays disabled', () => {
@@ -38,6 +41,12 @@ test('loadBotConfig accepts exchange trading flags while global order placement 
   assert.equal(config.enableOrderPlacement, false);
   assert.equal(config.risex.tradingEnabled, true);
   assert.equal(config.extended.tradingEnabled, true);
+});
+
+test('loadBotConfig parses configurable TP/SL percentages for open-trade protection', () => {
+  const config = loadBotConfig({ OPEN_TRADE_TAKE_PROFIT_PERCENT: '7.5', OPEN_TRADE_STOP_LOSS_PERCENT: '2.5' });
+  assert.equal(config.openTrade.takeProfitPercent, '7.5');
+  assert.equal(config.openTrade.stopLossPercent, '2.5');
 });
 
 test('redactSecrets redacts token-like fields and database passwords', () => {

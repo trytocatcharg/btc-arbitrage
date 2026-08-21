@@ -5,6 +5,7 @@ const DEFAULT_BACKEND_API_BASE_URL = 'http://127.0.0.1:3002';
 export interface ExchangeBalancesState {
   balances: ExchangeBalance[];
   generatedAt?: string;
+  total: string | null;
   loading: boolean;
   error?: string;
 }

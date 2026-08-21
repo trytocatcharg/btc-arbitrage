@@ -168,7 +168,7 @@ export class TelegramCommandPoller {
   }
 
   private openTradeService(): OpenTradeService {
-    return new OpenTradeService(this.registry, new DbPreviewStore(this.db), { notionalUsd: this.config.openTrade.notionalUsd, ttlMs: this.config.openTrade.previewTtlMs, quoteMaxAgeMs: this.config.openTrade.quoteMaxAgeMs, limitTimeoutMs: this.config.openTrade.limitTimeoutMs, residualDeltaToleranceBase: this.config.openTrade.residualDeltaToleranceBase, notifyUrgent: (text) => this.sendMessage(text), fees: { risex: { makerBps: this.config.openTrade.risexMakerFeeBps, takerBps: this.config.openTrade.risexTakerFeeBps }, extended: { makerBps: this.config.openTrade.extendedMakerFeeBps, takerBps: this.config.openTrade.extendedTakerFeeBps }, arcus: { makerBps: '0', takerBps: '0' } } });
+    return new OpenTradeService(this.registry, new DbPreviewStore(this.db), { notionalUsd: this.config.openTrade.notionalUsd, leverage: this.config.leverage, ttlMs: this.config.openTrade.previewTtlMs, quoteMaxAgeMs: this.config.openTrade.quoteMaxAgeMs, limitTimeoutMs: this.config.openTrade.limitTimeoutMs, residualDeltaToleranceBase: this.config.openTrade.residualDeltaToleranceBase, takeProfitPercent: this.config.openTrade.takeProfitPercent, stopLossPercent: this.config.openTrade.stopLossPercent, notifyUrgent: (text) => this.sendMessage(text), fees: { risex: { makerBps: this.config.openTrade.risexMakerFeeBps, takerBps: this.config.openTrade.risexTakerFeeBps }, extended: { makerBps: this.config.openTrade.extendedMakerFeeBps, takerBps: this.config.openTrade.extendedTakerFeeBps }, arcus: { makerBps: '0', takerBps: '0' } } });
   }
 
   private async answerCallback(id: string, text?: string): Promise<void> { await this.fetchImpl(`https://api.telegram.org/bot${this.config.telegram.botToken}/answerCallbackQuery`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ callback_query_id: id, ...(text ? { text, show_alert: true } : {}) }) }); }
@@ -215,6 +215,7 @@ export function formatActiveConfigSummary(config: BotConfig): string {
     `Leverage: ${config.leverage}x`,
     `Mode: ${config.botExecutionMode}`,
     `Order placement: ${config.enableOrderPlacement ? 'enabled' : 'disabled'}`,
+    `Open trade TP/SL: +${config.openTrade.takeProfitPercent}% / -${config.openTrade.stopLossPercent}%`,
     `Telegram cooldown: ${config.telegram.alertCooldownMs} ms`,
     '',
     formatExchangeLine('Exchange A', config.exchangeA, config),
