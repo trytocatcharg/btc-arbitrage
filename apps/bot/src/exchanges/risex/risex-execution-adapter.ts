@@ -192,12 +192,17 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
     const payload = await this.http.get('/v1/account/position', { account, market_id: String(info.marketId) });
     const body = firstRecord(unwrapData(payload));
     if (!body) return { side: input.side, quantityBase: '0', status: 'closed', closeReason: 'unknown' };
+    const id = stringField(body, ['id', 'position_id', 'positionId']);
+    const extras: Pick<ExchangePosition, 'exitPriceUsd' | 'realizedPnlUsd'> = {
+      exitPriceUsd: optionalDecimalDeep(body, ['close_price', 'exit_price', 'exitPrice', 'closePrice']),
+      realizedPnlUsd: optionalDecimalDeep(body, ['realized_pnl', 'realizedPnl', 'pnl', 'realized_pnl_usd', 'realizedPnlUsd']),
+    };
     const signedQuantity = optionalSignedDecimalDeep(body, ['quantity', 'quantity_base', 'quantityBase', 'size', 'size_base', 'sizeBase', 'position_size', 'positionSize']);
-    if (!signedQuantity || parseDecimal(signedQuantity) === 0) return { id: stringField(body, ['id', 'position_id', 'positionId']), side: input.side, quantityBase: '0', status: 'closed', closeReason: normalizeCloseReason(body) };
+    if (!signedQuantity || parseDecimal(signedQuantity) === 0) return { id, side: input.side, quantityBase: '0', status: 'closed', closeReason: normalizeCloseReason(body), ...extras };
     const quantity = parseDecimal(signedQuantity);
     const actualSide = quantity < 0 ? 'short' : 'long';
-    if (actualSide !== input.side) return { id: stringField(body, ['id', 'position_id', 'positionId']), side: input.side, quantityBase: '0', status: 'closed', closeReason: 'unknown' };
-    return { id: stringField(body, ['id', 'position_id', 'positionId']), side: actualSide, quantityBase: formatDecimal(Math.abs(quantity), 10), entryPriceUsd: optionalDecimalDeep(body, ['entry_price', 'entryPrice', 'avg_entry_price', 'averageEntryPrice']), status: 'open' };
+    if (actualSide !== input.side) return { id, side: input.side, quantityBase: '0', status: 'closed', closeReason: 'unknown', ...extras };
+    return { id, side: actualSide, quantityBase: formatDecimal(Math.abs(quantity), 10), entryPriceUsd: optionalDecimalDeep(body, ['entry_price', 'entryPrice', 'avg_entry_price', 'averageEntryPrice']), status: 'open' };
   }
 
   async getOpenOrders(input?: { symbol?: string }): Promise<RisexOpenOrder[]> {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { assertAllowedTelegramChat, formatTelegramSignal, isAllowedTelegramChat, TelegramNotifier } from '../src/notifications/telegram-notifier.js';
+import { assertAllowedTelegramChat, assertAllowedTelegramUser, formatTelegramSignal, isAllowedTelegramChat, isAllowedTelegramUser, TelegramNotifier } from '../src/notifications/telegram-notifier.js';
 import type { TradingSignal } from '@btc-arbitrage/domain';
 
 const signal: TradingSignal = {
@@ -49,6 +49,15 @@ test('Telegram chat guard only allows configured TELEGRAM_CHAT_ID', () => {
   assert.equal(isAllowedTelegramChat(undefined, '123456'), false);
   assert.doesNotThrow(() => assertAllowedTelegramChat({ id: '123456' }, '123456'));
   assert.throws(() => assertAllowedTelegramChat({ id: '999999' }, '123456'), /chat id is not allowed/);
+});
+
+test('Telegram user guard only allows configured TELEGRAM_CHAT_ID as user id', () => {
+  assert.equal(isAllowedTelegramUser({ id: 123456 }, '123456'), true);
+  assert.equal(isAllowedTelegramUser({ id: '123456' }, ' 123456 '), true);
+  assert.equal(isAllowedTelegramUser({ id: 999999 }, '123456'), false);
+  assert.equal(isAllowedTelegramUser(undefined, '123456'), false);
+  assert.doesNotThrow(() => assertAllowedTelegramUser({ id: '123456' }, '123456'));
+  assert.throws(() => assertAllowedTelegramUser({ id: '999999' }, '123456'), /user id is not allowed/);
 });
 
 test('TelegramNotifier suppresses all alerts during the global one-hour cooldown', async () => {

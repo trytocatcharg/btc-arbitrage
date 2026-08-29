@@ -113,7 +113,9 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
       side: input.side,
       quantityBase,
       entryPriceUsd: findDecimal(position, ['openPrice', 'entryPrice', 'averageEntryPrice']),
-      status: 'open'
+      status: 'open',
+      exitPriceUsd: findDecimal(position, ['closePrice', 'exitPrice', 'exit_price', 'close_price']),
+      realizedPnlUsd: findDecimal(position, ['realizedPnl', 'realized_pnl', 'pnl', 'realizedPnlUsd'])
     };
   }
 

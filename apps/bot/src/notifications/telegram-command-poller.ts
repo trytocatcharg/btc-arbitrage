@@ -3,7 +3,7 @@ import type { getDb } from '@btc-arbitrage/db';
 import { signals } from '@btc-arbitrage/db';
 import { eq } from 'drizzle-orm';
 import { buildTradeSummaryMessage, type ExchangeRegistryLike } from './trade-summary.js';
-import { isAllowedTelegramChat, normalizeTelegramChatId, type FetchLike } from './telegram-notifier.js';
+import { isAllowedTelegramChat, isAllowedTelegramUser, normalizeTelegramChatId, type FetchLike } from './telegram-notifier.js';
 import { DbPreviewStore } from '../trading/db-preview-store.js';
 import { OpenTradeService } from '../trading/open-trade.js';
 import { JsonFileLogger } from '../logging/json-file-logger.js';
@@ -13,11 +13,26 @@ export interface TelegramUpdate {
   message?: {
     message_id?: number;
     text?: string;
+    from?: {
+      id?: string | number;
+    };
     chat?: {
       id?: string | number;
     };
   };
-  callback_query?: { id: string; data?: string; message?: { message_id?: number; chat?: { id?: string | number } } };
+  callback_query?: {
+    id: string;
+    data?: string;
+    from?: {
+      id?: string | number;
+    };
+    message?: {
+      message_id?: number;
+      chat?: {
+        id?: string | number;
+      };
+    };
+  };
 }
 
 export interface TelegramUpdatesResponse {
@@ -124,6 +139,14 @@ export class TelegramCommandPoller {
       });
       return;
     }
+    if (!isAllowedTelegramUser(message.from, this.config.telegram.chatId!)) {
+      console.warn('Telegram command ignored from unauthorized user', {
+        updateId: update.update_id,
+        userId: message.from?.id,
+        chatId: message.chat?.id
+      });
+      return;
+    }
 
     try {
       if (isTelegramCommand(text, 'config')) {
@@ -146,6 +169,7 @@ export class TelegramCommandPoller {
 
   private async handleCallback(callback: NonNullable<TelegramUpdate['callback_query']>): Promise<void> {
     if (!isAllowedTelegramChat(callback.message?.chat, this.config.telegram.chatId!)) return;
+    if (!isAllowedTelegramUser(callback.from, this.config.telegram.chatId!)) return;
     const data = callback.data ?? '';
     try {
       await telegramCommandLogger.write({ timestamp: new Date().toISOString(), event: 'telegram_callback_received', callbackId: callback.id, data });

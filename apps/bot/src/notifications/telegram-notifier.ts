@@ -14,6 +14,10 @@ export interface TelegramChatLike {
   id?: string | number;
 }
 
+export interface TelegramUserLike {
+  id?: string | number;
+}
+
 export class TelegramNotifier implements Notifier {
   private lastNotificationAttemptAtMs = 0;
 
@@ -99,5 +103,16 @@ export function isAllowedTelegramChat(chat: TelegramChatLike | undefined, allowe
 export function assertAllowedTelegramChat(chat: TelegramChatLike | undefined, allowedChatId: string | number): void {
   if (!isAllowedTelegramChat(chat, allowedChatId)) {
     throw new Error('Telegram update rejected: chat id is not allowed');
+  }
+}
+
+export function isAllowedTelegramUser(user: TelegramUserLike | undefined, allowedUserId: string | number): boolean {
+  if (!user?.id && user?.id !== 0) return false;
+  return normalizeTelegramChatId(user.id) === normalizeTelegramChatId(allowedUserId);
+}
+
+export function assertAllowedTelegramUser(user: TelegramUserLike | undefined, allowedUserId: string | number): void {
+  if (!isAllowedTelegramUser(user, allowedUserId)) {
+    throw new Error('Telegram update rejected: user id is not allowed');
   }
 }

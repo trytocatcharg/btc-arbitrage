@@ -31,7 +31,7 @@ export interface BestBidOffer { bidUsd: string; askUsd: string; receivedAt: Date
 export interface MarketMetadata { minQuantityBase: string; quantityStepBase: string; maxLeverage?: number; positionMode?: 'one-way' | 'hedge'; }
 export interface ExecutionOrderRequest { clientOrderId: string; symbol: string; side: 'buy' | 'sell'; type: 'limit' | 'market' | 'take-profit-market' | 'stop-market'; quantityBase: string; priceUsd?: string; reduceOnly?: boolean; triggerPriceUsd?: string; }
 export interface ExecutionOrder { id: string; status: 'new' | 'partially_filled' | 'filled' | 'cancelled' | 'rejected'; filledQuantityBase: string; averageFillPriceUsd?: string; }
-export interface ExchangePosition { id?: string; side: 'long' | 'short'; quantityBase: string; entryPriceUsd?: string; status: 'open' | 'closed'; closeReason?: 'tp' | 'sl' | 'manual' | 'liquidation' | 'unknown'; }
+export interface ExchangePosition { id?: string; side: 'long' | 'short'; quantityBase: string; entryPriceUsd?: string; status: 'open' | 'closed'; closeReason?: 'tp' | 'sl' | 'manual' | 'liquidation' | 'unknown'; exitPriceUsd?: string; realizedPnlUsd?: string; }
 export interface ExecutionAdapter {
   getBestBidOffer(input: PriceRequest): Promise<BestBidOffer>;
   getMarketMetadata(input: PriceRequest): Promise<MarketMetadata>;
