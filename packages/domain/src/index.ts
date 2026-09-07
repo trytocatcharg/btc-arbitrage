@@ -1,15 +1,15 @@
-export type ExchangeId = 'risex' | 'extended' | 'arcus';
-export type MarketType = 'perpetual' | 'futures';
-export type PriceSource = 'mark' | 'index' | 'last';
-export type OrderSide = 'long' | 'short';
-export type ExchangeBalanceStatus = 'available' | 'unconfigured' | 'error';
+export type ExchangeId = "risex" | "extended" | "arcus" | "variational";
+export type MarketType = "perpetual" | "futures";
+export type PriceSource = "mark" | "index" | "last";
+export type OrderSide = "long" | "short";
+export type ExchangeBalanceStatus = "available" | "unconfigured" | "error";
 export enum ExecutionMode {
-  DryRun = 'dry-run',
-  Live = 'live'
+  DryRun = "dry-run",
+  Live = "live",
 }
-export type SignalStatus = 'created' | 'notified' | 'failed' | 'ignored';
-export type OperationStatus = 'dry_run' | 'blocked' | 'submitted' | 'failed';
-export type EventLevel = 'debug' | 'info' | 'warn' | 'error';
+export type SignalStatus = "created" | "notified" | "failed" | "ignored";
+export type OperationStatus = "dry_run" | "blocked" | "submitted" | "failed";
+export type EventLevel = "debug" | "info" | "warn" | "error";
 
 export interface PriceSnapshot {
   id?: string;
@@ -37,7 +37,7 @@ export interface SpreadSnapshot {
   exchangeBPriceUsd: string;
   absoluteDiffUsd: string;
   diffBps: string;
-  direction: 'a_above_b' | 'b_above_a' | 'flat';
+  direction: "a_above_b" | "b_above_a" | "flat";
   thresholdUsd: string;
   thresholdMatched: boolean;
   calculatedAt: Date;
@@ -71,7 +71,11 @@ export interface Operation {
   leverage: number;
   status: OperationStatus;
   guardrailReason?: string;
-  legs?: Array<{ exchangeId: ExchangeId; side: OrderSide; plannedPriceUsd?: string }>;
+  legs?: Array<{
+    exchangeId: ExchangeId;
+    side: OrderSide;
+    plannedPriceUsd?: string;
+  }>;
   createdAt: Date;
 }
 
@@ -114,9 +118,9 @@ export interface CalculateSpreadInput {
 }
 
 export function calculateSpread(input: CalculateSpreadInput): SpreadSnapshot {
-  const a = parseDecimal(input.exchangeA.priceUsd, 'exchangeA.priceUsd');
-  const b = parseDecimal(input.exchangeB.priceUsd, 'exchangeB.priceUsd');
-  const threshold = parseDecimal(input.thresholdUsd, 'thresholdUsd');
+  const a = parseDecimal(input.exchangeA.priceUsd, "exchangeA.priceUsd");
+  const b = parseDecimal(input.exchangeB.priceUsd, "exchangeB.priceUsd");
+  const threshold = parseDecimal(input.thresholdUsd, "thresholdUsd");
   const diff = a - b;
   const absoluteDiff = Math.abs(diff);
   const midpoint = (a + b) / 2;
@@ -132,14 +136,14 @@ export function calculateSpread(input: CalculateSpreadInput): SpreadSnapshot {
     exchangeBPriceUsd: formatDecimal(b),
     absoluteDiffUsd: formatDecimal(absoluteDiff),
     diffBps: formatDecimal(diffBps, 4),
-    direction: diff > 0 ? 'a_above_b' : diff < 0 ? 'b_above_a' : 'flat',
+    direction: diff > 0 ? "a_above_b" : diff < 0 ? "b_above_a" : "flat",
     thresholdUsd: formatDecimal(threshold),
     thresholdMatched: absoluteDiff >= threshold,
-    calculatedAt: input.calculatedAt ?? new Date()
+    calculatedAt: input.calculatedAt ?? new Date(),
   };
 }
 
-export function parseDecimal(value: string, fieldName = 'decimal'): number {
+export function parseDecimal(value: string, fieldName = "decimal"): number {
   if (!/^[-+]?\d+(\.\d+)?$/.test(value.trim())) {
     throw new Error(`${fieldName} must be a decimal string`);
   }
@@ -152,8 +156,8 @@ export function parseDecimal(value: string, fieldName = 'decimal'): number {
 
 export function formatDecimal(value: number, fractionDigits = 8): string {
   if (!Number.isFinite(value)) {
-    throw new Error('Cannot format non-finite decimal');
+    throw new Error("Cannot format non-finite decimal");
   }
   const fixed = value.toFixed(fractionDigits);
-  return fixed.replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+  return fixed.replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1");
 }
