@@ -143,3 +143,5 @@ risex-ts-main
 risex-code
 .DS_Store
 .engram-data
+# Local Pi runtime state
+.atl/
