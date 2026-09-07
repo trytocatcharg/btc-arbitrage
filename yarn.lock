@@ -215,6 +215,8 @@ __metadata:
   dependencies:
     "@btc-arbitrage/config": "workspace:*"
     "@btc-arbitrage/domain": "workspace:*"
+    "@noble/curves": "npm:1.7.0"
+    "@noble/hashes": "npm:1.6.0"
     "@types/express": "npm:5.0.3"
     express: "npm:5.1.0"
     tsx: "npm:4.19.2"
@@ -233,6 +235,7 @@ __metadata:
     "@noble/curves": "npm:1.7.0"
     "@noble/hashes": "npm:1.6.0"
     "@x10xchange/stark-crypto-wrapper-wasm": "npm:0.1.6"
+    drizzle-orm: "npm:0.38.4"
     starknet: "npm:8.5.4"
     tsx: "npm:4.19.2"
   languageName: unknown

@@ -85,6 +85,11 @@ export interface BotConfig {
     chatId?: string;
     alertCooldownMs: number;
   };
+  dataRetention: {
+    enabled: boolean;
+    retentionDays: number;
+    batchSize: number;
+  };
   logLevel: string;
 }
 
@@ -142,6 +147,15 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       "TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required when TELEGRAM_ENABLED=true",
     );
   }
+  const dataRetentionEnabled = parseBoolean(env.DATA_RETENTION_ENABLED ?? "true");
+  const dataRetentionDays = parsePositiveInteger(
+    env.DATA_RETENTION_DAYS ?? "30",
+    "DATA_RETENTION_DAYS",
+  );
+  const dataRetentionBatchSize = parsePositiveInteger(
+    env.DATA_RETENTION_BATCH_SIZE ?? "5000",
+    "DATA_RETENTION_BATCH_SIZE",
+  );
 
   const database = loadDatabaseConfig(env);
   const openTradeTakeProfitPercent = parsePositiveDecimalString(
@@ -280,6 +294,11 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       botToken: emptyToUndefined(env.TELEGRAM_BOT_TOKEN),
       chatId: emptyToUndefined(env.TELEGRAM_CHAT_ID),
       alertCooldownMs: telegramAlertCooldownMs,
+    },
+    dataRetention: {
+      enabled: dataRetentionEnabled,
+      retentionDays: dataRetentionDays,
+      batchSize: dataRetentionBatchSize,
     },
     logLevel: env.LOG_LEVEL ?? "info",
   };

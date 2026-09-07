@@ -157,6 +157,9 @@ Copy `.env.example` to `.env` and fill in real values. Never commit `.env` or re
 | `BACKEND_CORS_ORIGINS` | `http://127.0.0.1:5173,http://localhost:5173` | CORS allowlist; `*` supported |
 | `VITE_BACKEND_API_BASE_URL` | same-host port 3002 fallback | Web → backend URL |
 | `LOG_LEVEL` | `info` | Bot log level |
+| `DATA_RETENTION_ENABLED` | `true` | Daily prune of snapshots/signals |
+| `DATA_RETENTION_DAYS` | `30` | Days of history kept (≥1) |
+| `DATA_RETENTION_BATCH_SIZE` | `5000` | Rows per DELETE batch |
 
 ## Execution gates (read carefully — common misconception)
 

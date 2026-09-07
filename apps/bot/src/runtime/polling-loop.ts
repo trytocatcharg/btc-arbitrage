@@ -8,6 +8,7 @@ import type { getDb } from "@btc-arbitrage/db";
 import { signals, activeTradeStatuses, trades } from "@btc-arbitrage/db";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { monitorTrades } from "../trading/trade-monitor.js";
+import { runDataRetention } from "../retention/data-retention.js";
 import { shouldSuppressSignalForActiveTrades } from "../trading/trade-guards.js";
 import { extractInsertId } from "../db-result.js";
 
@@ -63,11 +64,21 @@ export async function runPollingLoop(input: {
             : { tick, error },
         );
       }
-      await monitorTrades({
-        db: input.db,
-        registry: input.registry,
-        notify: (text) => input.notifier.notifyUrgent(text),
-      });
+          await monitorTrades({
+            db: input.db,
+            registry: input.registry,
+            notify: (text) => input.notifier.notifyUrgent(text),
+          });
+          try {
+            await runDataRetention(input.db, input.config);
+          } catch (error) {
+            console.error(
+              "Data retention failed",
+              error instanceof Error
+                ? { tick, message: error.message }
+                : { tick, error },
+            );
+          }
 
       const [priceA, priceB] = await Promise.all([
         exchangeA.getPriceSnapshot({
