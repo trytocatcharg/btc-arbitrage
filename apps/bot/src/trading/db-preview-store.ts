@@ -15,17 +15,15 @@ const dbPreviewLogger = new JsonFileLogger("logs/open-trade.jsonl");
 export class DbPreviewStore implements PreviewStore {
   constructor(private readonly db: Awaited<ReturnType<typeof getDb>>) {}
   async createPreview(preview: OpenTradePreview): Promise<void> {
-    await this.db
-      .insert(tradePreviews)
-      .values({
-        signalId: preview.signalId,
-        token: preview.token,
-        status: "awaiting_confirmation",
-        expiresAt: preview.expiresAt,
-        payload: preview,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      });
+    await this.db.insert(tradePreviews).values({
+      signalId: preview.signalId,
+      token: preview.token,
+      status: "awaiting_confirmation",
+      expiresAt: preview.expiresAt,
+      payload: preview,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
   }
   async consumePreview(
     token: string,
@@ -143,6 +141,52 @@ export class DbPreviewStore implements PreviewStore {
         .update(tradePreviews)
         .set({ tradeId, updatedAt: new Date() })
         .where(eq(tradePreviews.token, preview.token));
+    });
+  }
+  async reactivateExecution(preview: OpenTradePreview): Promise<void> {
+    await this.db.transaction(async (tx) => {
+      const row = (
+        await tx
+          .select({ id: tradePreviews.id, tradeId: tradePreviews.tradeId })
+          .from(tradePreviews)
+          .where(eq(tradePreviews.token, preview.token))
+      )[0];
+      if (!row?.tradeId)
+        throw new Error(
+          `Cannot reactivate execution: preview ${preview.token} has no linked trade`,
+        );
+      const updated = await tx
+        .update(tradePreviews)
+        .set({
+          status: "executing_limit",
+          payload: preview,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(tradePreviews.id, row.id),
+            eq(tradePreviews.status, "cancelled"),
+          ),
+        );
+      if (extractAffectedRows(updated) !== 1)
+        throw new Error(
+          `Cannot reactivate preview ${preview.token}: expected exactly 1 affected row`,
+        );
+      await tx
+        .update(trades)
+        .set({ status: "executing_limit", updatedAt: new Date() })
+        .where(eq(trades.id, row.tradeId));
+      await tx
+        .update(tradeLegs)
+        .set({ quantityBase: preview.quantityBase })
+        .where(eq(tradeLegs.tradeId, row.tradeId));
+      await dbPreviewLogger.write({
+        timestamp: new Date().toISOString(),
+        event: "open_trade_reactivated",
+        token: preview.token,
+        tradeId: row.tradeId,
+        quantityBase: preview.quantityBase,
+      });
     });
   }
   async claimRollback(token: string): Promise<boolean> {

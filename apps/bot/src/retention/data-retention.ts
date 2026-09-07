@@ -54,10 +54,19 @@ export async function runDataRetention(
     .select({ signalId: tradePreviews.signalId })
     .from(tradePreviews)
     .where(isNotNull(tradePreviews.signalId));
-  await pruneTable(db, "signals", signals, signals.id, signals.createdAt, cutoff, batchSize, [
-    notInArray(signals.id, signalTradeRefs),
-    notInArray(signals.id, signalPreviewRefs),
-  ]);
+  await pruneTable(
+    db,
+    "signals",
+    signals,
+    signals.id,
+    signals.createdAt,
+    cutoff,
+    batchSize,
+    [
+      notInArray(signals.id, signalTradeRefs),
+      notInArray(signals.id, signalPreviewRefs),
+    ],
+  );
 
   const spreadSignalRefs = db
     .select({ spreadId: signals.spreadId })
@@ -111,20 +120,21 @@ async function pruneTable(
 
   const baseConditions = [lte(idColumn, watermark), ...preservationClauses];
   const whereClause =
-    preservationClauses.length > 0 ? and(...baseConditions) : lte(idColumn, watermark);
+    preservationClauses.length > 0
+      ? and(...baseConditions)
+      : lte(idColumn, watermark);
 
   let deletedRows = 0;
   for (;;) {
-    const result = await db
-      .delete(table)
-      .where(whereClause!)
-      .limit(batchSize);
+    const result = await db.delete(table).where(whereClause!).limit(batchSize);
     const affected = extractAffectedRows(result);
     deletedRows += affected;
     if (affected === 0 || affected < batchSize) break;
   }
 
-  console.log("Data retention pruned", { table: tableName, deletedRows,
+  console.log("Data retention pruned", {
+    table: tableName,
+    deletedRows,
     durationMs: Date.now() - startedAt,
   });
 }

@@ -1,6 +1,6 @@
 import type { BotConfig } from "@btc-arbitrage/config";
 import type { getDb } from "@btc-arbitrage/db";
-import { signals } from "@btc-arbitrage/db";
+import { signals, tradePreviews } from "@btc-arbitrage/db";
 import { eq } from "drizzle-orm";
 import {
   buildTradeSummaryMessage,
@@ -13,7 +13,10 @@ import {
   type FetchLike,
 } from "./telegram-notifier.js";
 import { DbPreviewStore } from "../trading/db-preview-store.js";
-import { OpenTradeService } from "../trading/open-trade.js";
+import {
+  OpenTradeService,
+  type OpenTradePreview,
+} from "../trading/open-trade.js";
 import { JsonFileLogger } from "../logging/json-file-logger.js";
 
 export interface TelegramUpdate {
@@ -293,6 +296,33 @@ export class TelegramCommandPoller {
         await new DbPreviewStore(this.db).transition(token, "cancelled");
         if (typeof callback.message?.message_id === "number")
           await this.deleteMessage(callback.message.message_id);
+      } else if (data.startsWith("retrade:")) {
+        const token = data.slice(8);
+        await telegramCommandLogger.write({
+          timestamp: new Date().toISOString(),
+          event: "telegram_retrade_requested",
+          callbackId: callback.id,
+          token,
+        });
+        const row = (
+          await this.db
+            .select()
+            .from(tradePreviews)
+            .where(eq(tradePreviews.token, token))
+        )[0];
+        if (!row || row.status !== "cancelled")
+          throw new Error("Trade not available for retry");
+        // SAFETY: the payload JSON column was written by createPreview()
+        // from a verified OpenTradePreview object; shape is invariant.
+        const preview = row.payload as unknown as OpenTradePreview;
+        await this.openTradeService().retryEntry(preview);
+        await telegramCommandLogger.write({
+          timestamp: new Date().toISOString(),
+          event: "telegram_retrade_completed",
+          callbackId: callback.id,
+          token,
+        });
+        await this.sendMessage(`Retry started for limit order ${token}.`);
       }
       await this.answerCallback(callback.id);
     } catch (error) {
@@ -326,6 +356,23 @@ export class TelegramCommandPoller {
       takeProfitPercent: this.config.openTrade.takeProfitPercent,
       stopLossPercent: this.config.openTrade.stopLossPercent,
       notifyUrgent: (text) => this.sendMessage(text),
+      notifyLimitTimeout: async ({ token, message }) => {
+        await this.sendMessage(message, {
+          inline_keyboard: [
+            [
+              {
+                text: "Reintentar orden limit",
+                callback_data: `retrade:${token}`,
+              },
+            ],
+          ],
+        });
+        await telegramCommandLogger.write({
+          timestamp: new Date().toISOString(),
+          event: "telegram_limit_timeout_prompt_sent",
+          token,
+        });
+      },
       fees: {
         risex: {
           makerBps: this.config.openTrade.risexMakerFeeBps,

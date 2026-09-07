@@ -64,21 +64,21 @@ export async function runPollingLoop(input: {
             : { tick, error },
         );
       }
-          await monitorTrades({
-            db: input.db,
-            registry: input.registry,
-            notify: (text) => input.notifier.notifyUrgent(text),
-          });
-          try {
-            await runDataRetention(input.db, input.config);
-          } catch (error) {
-            console.error(
-              "Data retention failed",
-              error instanceof Error
-                ? { tick, message: error.message }
-                : { tick, error },
-            );
-          }
+      await monitorTrades({
+        db: input.db,
+        registry: input.registry,
+        notify: (text) => input.notifier.notifyUrgent(text),
+      });
+      try {
+        await runDataRetention(input.db, input.config);
+      } catch (error) {
+        console.error(
+          "Data retention failed",
+          error instanceof Error
+            ? { tick, message: error.message }
+            : { tick, error },
+        );
+      }
 
       const [priceA, priceB] = await Promise.all([
         exchangeA.getPriceSnapshot({

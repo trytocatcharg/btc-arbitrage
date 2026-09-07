@@ -147,7 +147,9 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       "TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required when TELEGRAM_ENABLED=true",
     );
   }
-  const dataRetentionEnabled = parseBoolean(env.DATA_RETENTION_ENABLED ?? "true");
+  const dataRetentionEnabled = parseBoolean(
+    env.DATA_RETENTION_ENABLED ?? "true",
+  );
   const dataRetentionDays = parsePositiveInteger(
     env.DATA_RETENTION_DAYS ?? "30",
     "DATA_RETENTION_DAYS",
