@@ -1,11 +1,18 @@
 import { and, desc, eq, gt, inArray } from "drizzle-orm";
-import { tradePreviews, tradeLegs, trades } from "@btc-arbitrage/db";
+import {
+  activeTradeStatuses,
+  tradePreviews,
+  tradeLegs,
+  trades,
+  tradeStatusHistory,
+} from "@btc-arbitrage/db";
 import type { getDb } from "@btc-arbitrage/db";
 import { formatDecimal } from "@btc-arbitrage/domain";
 import type {
   OpenTradePreview,
   OpenTradeState,
   PreviewStore,
+  TransitionDetails,
 } from "./open-trade.js";
 import { extractAffectedRows, extractInsertId } from "../db-result.js";
 import { JsonFileLogger } from "../logging/json-file-logger.js";
@@ -15,6 +22,10 @@ const dbPreviewLogger = new JsonFileLogger("logs/open-trade.jsonl");
 export class DbPreviewStore implements PreviewStore {
   constructor(private readonly db: Awaited<ReturnType<typeof getDb>>) {}
   async createPreview(preview: OpenTradePreview): Promise<void> {
+    if (await this.hasBlockingExecution())
+      throw new Error(
+        "Cannot open a new trade: another trade is active or awaiting confirmation",
+      );
     await this.db.insert(tradePreviews).values({
       signalId: preview.signalId,
       token: preview.token,
@@ -205,14 +216,98 @@ export class DbPreviewStore implements PreviewStore {
       );
     return extractAffectedRows(result) === 1;
   }
+  async hasBlockingExecution(): Promise<boolean> {
+    const pendingPreview = await this.db
+      .select({ id: tradePreviews.id })
+      .from(tradePreviews)
+      .where(eq(tradePreviews.status, "awaiting_confirmation"))
+      .limit(1);
+    if (pendingPreview.length > 0) return true;
+    const activeTrade = await this.db
+      .select({ id: trades.id })
+      .from(trades)
+      .where(inArray(trades.status, [...activeTradeStatuses]))
+      .limit(1);
+    return activeTrade.length > 0;
+  }
   async transition(
     token: string,
     state: OpenTradeState,
-    _details?: Record<string, unknown>,
+    details?: TransitionDetails,
   ): Promise<void> {
+    const now = new Date();
     await this.db
       .update(tradePreviews)
-      .set({ status: state, updatedAt: new Date() })
+      .set({ status: state, updatedAt: now })
       .where(eq(tradePreviews.token, token));
+    const previewRows = await this.db
+      .select({ tradeId: tradePreviews.tradeId })
+      .from(tradePreviews)
+      .where(eq(tradePreviews.token, token));
+    const tradeId = previewRows[0]?.tradeId;
+    if (!tradeId) {
+      await dbPreviewLogger.write({
+        timestamp: now.toISOString(),
+        event: "open_trade_transition_without_trade",
+        token,
+        state,
+        details,
+      });
+      return;
+    }
+    await this.db.transaction(async (tx) => {
+      const tradeRows = await tx
+        .select({ status: trades.status, openedAt: trades.openedAt })
+        .from(trades)
+        .where(eq(trades.id, tradeId));
+      const fromStatus = tradeRows[0]?.status;
+      const tradeSet: Partial<typeof trades.$inferInsert> = {
+        status: state,
+        updatedAt: now,
+      };
+      if (state === "open" && !tradeRows[0]?.openedAt) tradeSet.openedAt = now;
+      if (state === "cancelled" || state === "failed") tradeSet.closedAt = now;
+      await tx.update(trades).set(tradeSet).where(eq(trades.id, tradeId));
+      await tx.insert(tradeStatusHistory).values({
+        tradeId,
+        fromStatus,
+        toStatus: state,
+        reason: (details?.error ?? details?.closeReason)?.slice(0, 512) ?? null,
+        metadata: details,
+        changedAt: now,
+      });
+      for (const leg of details?.legs ?? []) {
+        const legSet: Partial<typeof tradeLegs.$inferInsert> = {};
+        if (leg.status !== undefined) {
+          legSet.status = leg.status;
+          if (leg.status === "open") legSet.openedAt = now;
+          if (
+            leg.status === "closed" ||
+            leg.status === "cancelled" ||
+            leg.status === "failed"
+          )
+            legSet.closedAt = now;
+        }
+        if (leg.entryOrderId !== undefined)
+          legSet.entryOrderId = leg.entryOrderId;
+        if (leg.exitOrderId !== undefined) legSet.exitOrderId = leg.exitOrderId;
+        if (leg.entryPriceUsd !== undefined)
+          legSet.entryPriceUsd = leg.entryPriceUsd;
+        if (leg.exitPriceUsd !== undefined)
+          legSet.exitPriceUsd = leg.exitPriceUsd;
+        if (leg.closeReason !== undefined) legSet.closeReason = leg.closeReason;
+        if (leg.raw !== undefined) legSet.raw = leg.raw;
+        await tx
+          .update(tradeLegs)
+          .set(legSet)
+          .where(
+            and(
+              eq(tradeLegs.tradeId, tradeId),
+              eq(tradeLegs.exchangeId, leg.exchangeId),
+              eq(tradeLegs.side, leg.side),
+            ),
+          );
+      }
+    });
   }
 }

@@ -2,7 +2,7 @@
 updatedAt: 2026-08-07T09:38:42.000Z
 ---
 
-Fetch the complete documentation index at: https://developer.rise.trade/llms.txt. Use this file to discover all available pages before exploring further.
+Fetch the complete documentation index at: <https://developer.rise.trade/llms.txt>. Use this file to discover all available pages before exploring further.
 
 # Integration
 
@@ -13,6 +13,7 @@ This guide shows how to trade on RISEx directly over REST, without the `risex-cl
 ## Bot support status
 
 Implemented in `apps/bot/src/exchanges/risex/risex-execution-adapter.ts` and covered by `apps/bot/test/risex-execution-adapter.test.ts`:
+
 - `GET /v1/markets`
 - `GET /v1/auth/eip712-domain`
 - `GET /v1/system/config`
@@ -26,14 +27,18 @@ Implemented in `apps/bot/src/exchanges/risex/risex-execution-adapter.ts` and cov
 
 Known limitation: the official REST documentation mirrored here does **not** document native TP/SL trigger endpoints. The bot refuses to invent them and fails closed for RISEx `take-profit-market` / `stop-market` requests.
 
+Known limitation: there is no REST fill-history endpoint. `POST /v1/orders/place` returns an acknowledgment, not a fill. The adapter confirms market-order fills by polling `GET /v1/account/position` until the signed position quantity moves by the ordered amount (bounded, `MARKET_FILL_TIMEOUT_MS` default 15s), returning the position entry price as the average fill price. On timeout it reports `status: 'new'` so callers fail closed into rollback. Because filled orders disappear from `GET /v1/orders/open`, `getExecutionOrder` can only track resting orders; RISEx must not be used as the limit (maker) leg in live mode until fill-history exists.
+
 ## TP/SL endpoints
 
 Additional official documentation exists for off-chain trigger orders:
+
 - Place TP/SL order: `POST /v1/orders/tpsl`
 - Get TP/SL orders: `GET /v1/orders/tpsl`
 - Cancel TP/SL order: `POST /v1/orders/tpsl/cancel`
 
 Key documented behavior from the official API reference:
+
 - TP/SL orders are stored off-chain and executed on-chain once the stop condition is met.
 - `TAKE_PROFIT` triggers favorably; `STOP_LOSS` triggers unfavorably.
 - `MARK_PRICE` and `LAST_TRADED_PRICE` are supported trigger price sources.
@@ -48,8 +53,8 @@ If you would rather not sign anything yourself, use [`risex-client`](https://dev
 
 RISEx separates the wallet that holds your funds from the key that signs your orders:
 
-* **Account** — your main wallet. Holds collateral and positions. Signs only during setup.
-* **Signer** (session key) — a hot key registered on-chain against your account. Signs every order.
+- **Account** — your main wallet. Holds collateral and positions. Signs only during setup.
+- **Signer** (session key) — a hot key registered on-chain against your account. Signs every order.
 
 There are two ways to authorise a trading action, and they are independent:
 
@@ -117,8 +122,8 @@ GET /v1/auth/eip712-domain
 
 Signatures are replay-protected by an **anchor + bitmap** scheme, not a counter.
 
-* `nonceAnchor` — a `uint48` slot number.
-* `nonceBitmap` — the bit index inside that anchor, **0 to 207 inclusive**.
+- `nonceAnchor` — a `uint48` slot number.
+- `nonceBitmap` — the bit index inside that anchor, **0 to 207 inclusive**.
 
 Each `(anchor, bitIndex)` pair may be consumed once. Read your current state with:
 
@@ -227,8 +232,8 @@ It is ordinary EIP-712 typed data — `signTypedData` in ethers/viem, `eth_accou
 
 `permit.signature` is a protobuf `bytes` field, so over REST/JSON it is **base64**, not hex. Two formats are accepted:
 
-* 64-byte EIP-2098 compact: `r` (32 bytes) `|| yParityAndS` (32 bytes). Set the top bit of `s` when `v == 28`.
-* 65-byte `r || s || v` — converted server-side.
+- 64-byte EIP-2098 compact: `r` (32 bytes) `|| yParityAndS` (32 bytes). Set the top bit of `s` when `v == 28`.
+- 65-byte `r || s || v` — converted server-side.
 
 ```python
 def compact(sig):                      # eth_account SignedMessage
@@ -571,13 +576,13 @@ PERMIT_SINGLE_TYPEHASH()    0x0776297f41046e119f28b9bd380b653a8c632d5700a51311bc
 The rest was proved by having the mainnet contracts recover a throwaway key from a permit
 built purely from the rules on this page:
 
-* The Authorization contract recovered exactly that key when `target` was the router, and
+- The Authorization contract recovered exactly that key when `target` was the router, and
   unrelated addresses for every other `target` — it derives `target` from `msg.sender`.
-* The router recovered exactly that key from a payload packed with the `uint88` layout,
+- The router recovered exactly that key from a payload packed with the `uint88` layout,
   header-flags byte and action hash documented above. Corrupting the action hash or the
   flags byte broke recovery, as it should.
-* `nonceBitmap` 207 passed the index check; 208 and 255 reverted `InvalidNonceIndex`.
-* A used `(anchor, bit)` pair reverted `NonceUsed`, and `anchor + 1` was accepted — which is
+- `nonceBitmap` 207 passed the index check; 208 and 255 reverted `InvalidNonceIndex`.
+- A used `(anchor, bit)` pair reverted `NonceUsed`, and `anchor + 1` was accepted — which is
   why this page tells you to start on a fresh anchor.
 
 If something here does not match what the chain does, that is a bug — please report it and

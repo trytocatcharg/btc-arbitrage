@@ -1,17 +1,21 @@
 # Extended execution integration
 
-Official sources: https://api.docs.extended.exchange/ and https://github.com/x10xchange/examples/tree/main/typescript.
+Official sources: <https://api.docs.extended.exchange/> and <https://github.com/x10xchange/examples/tree/main/typescript>.
 
 ## Credentials
+
 `EXTENDED_API_KEY` authenticates read-only requests using `X-Api-Key`. Mutations additionally require `EXTENDED_STARK_PRIVATE_KEY` and `EXTENDED_VAULT_ID`. `EXTENDED_API_BASE_URL` must point to the chosen official environment. Do not log any credential.
 
 ## Official model
+
 The official TypeScript examples pin `@x10xchange/stark-crypto-wrapper-wasm@0.1.6` and `starknet@8.5.4`; initialise the wrapper before constructing signed orders. Build market/fee/domain context from `/api/v1/info/markets`, `/api/v1/user/fees`, and `/api/v1/info/starknet`; then POST the signed official order JSON to `/api/v1/user/order`. Read-only account/position/order queries use the API key. Cancel uses `DELETE /api/v1/user/order/{id}`.
 
 ## Safety
+
 Execution is default-disabled. Enable only after account, market, BBO, margin, position mode, credentials and signer checks pass. Market orders use IOC/FOK semantics and every emergency close must be reduce-only.
 
 ## Implemented endpoints
+
 - `GET /api/v1/info/markets`
 - `GET /api/v1/info/markets/{market}/orderbook`
 - `GET /api/v1/info/starknet`
@@ -23,18 +27,24 @@ Execution is default-disabled. Enable only after account, market, BBO, margin, p
 - `DELETE /api/v1/user/order/{id}`
 
 ## Current support in the bot
+
 - Read executable BBO from the orderbook.
 - Read market metadata, available margin, order status and positions.
 - Submit signed `LIMIT`, `MARKET`, `TPSL` orders using the official Stark signing model.
 - Cancel orders by id.
 
 ## Verified behavior
+
 `apps/bot/test/extended-execution.test.ts` covers:
+
 - official signing fixture parity,
 - IOC crossing market execution,
 - reduce-only TP/SL trigger signing,
 - order query, cancel and position reads.
 
+Order ids are 19-digit integers returned as JSON numbers (> `Number.MAX_SAFE_INTEGER`). `ExtendedHttpClient.parseResponseBody` quotes integer literals of 16+ digits before `JSON.parse` so ids keep their exact digits; without this, trailing digits are corrupted by double precision and every `GET/DELETE /api/v1/user/orders/{id}` for that order 404s. RISEx ids are strings and do not need this treatment.
+
 ## Known limitations
+
 - The bot still keeps global live placement disabled at config level until the full trade-opening workflow is promoted from guarded slice to production.
 - Balance `404` is normalized as zero because some accounts/environments do not expose `/api/v1/user/balance`; this is an explicit compatibility fallback in the HTTP client.

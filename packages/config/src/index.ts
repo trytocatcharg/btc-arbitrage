@@ -37,6 +37,7 @@ export interface BotConfig {
     previewTtlMs: number;
     quoteMaxAgeMs: number;
     limitTimeoutMs: number;
+    limitRepriceIntervalMs: number;
     residualDeltaToleranceBase: string;
     takeProfitPercent: string;
     stopLossPercent: string;
@@ -211,6 +212,10 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       limitTimeoutMs: parsePositiveInteger(
         env.OPEN_TRADE_LIMIT_TIMEOUT_MS ?? "30000",
         "OPEN_TRADE_LIMIT_TIMEOUT_MS",
+      ),
+      limitRepriceIntervalMs: parseNonNegativeInteger(
+        env.OPEN_TRADE_REPRICE_INTERVAL_MS ?? "2000",
+        "OPEN_TRADE_REPRICE_INTERVAL_MS",
       ),
       residualDeltaToleranceBase: parsePositiveDecimalString(
         env.OPEN_TRADE_RESIDUAL_DELTA_BTC ?? "0.00001",

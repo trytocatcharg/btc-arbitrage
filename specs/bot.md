@@ -146,6 +146,7 @@ Protection percentages are configurable from env:
   - buy -> current `bid`
   - sell -> current `ask`
 - If RISEx rejects with `PostOnlyOrderMatched()`, the bot retries the passive limit automatically.
+- While the maker leg rests, the bot reprices it every `OPEN_TRADE_REPRICE_INTERVAL_MS` (default 2000 ms; 0 disables): if the top of the book moved, the resting order is cancelled and re-submitted post-only at the new best bid (buy) / ask (sell). Partial fills are settled first and the remainder is re-submitted; the TP/SL anchor uses the fill-weighted average price across all resting orders.
 
 ## Exchange execution ownership
 

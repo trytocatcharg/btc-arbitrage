@@ -146,6 +146,7 @@ Copy `.env.example` to `.env` and fill in real values. Never commit `.env` or re
 | `OPEN_TRADE_PREVIEW_TTL_MS` | `120000` | Preview expiry |
 | `OPEN_TRADE_QUOTE_MAX_AGE_MS` | `5000` | BBO freshness assertion |
 | `OPEN_TRADE_LIMIT_TIMEOUT_MS` | `30000` | Passive limit fill wait |
+| `OPEN_TRADE_REPRICE_INTERVAL_MS` | `2000` | Cancel-and-replace the resting limit at the new top of book; `0` disables |
 | `OPEN_TRADE_RESIDUAL_DELTA_BTC` | `0.00001` | Plumbed but not enforced (see landmines) |
 | `OPEN_TRADE_TAKE_PROFIT_PERCENT` / `OPEN_TRADE_STOP_LOSS_PERCENT` | `3` / `3` | TP/SL applied on confirm |
 | `RISEX_MAKER_FEE_BPS` / `RISEX_TAKER_FEE_BPS` | `1` / `3` | Routing fee inputs |
@@ -198,7 +199,7 @@ Copy `.env.example` to `.env` and fill in real values. Never commit `.env` or re
 - Signal engine: `signals/signal-engine.ts` — threshold only; cooldowns live in the notifier, suppression in `trading/trade-guards.ts`.
 - Telegram: `notifications/telegram-notifier.ts` (cooldown + chat restriction + `Open Trade` button), `notifications/telegram-command-poller.ts` (`/config`, `/trade`, `open:`/`confirm:`/`cancel:` callbacks), `notifications/trade-summary.ts`.
 - Trading: `trading/open-trade.ts` (`OpenTradeService` — preview/confirm state machine), `trading/db-preview-store.ts` (atomic preview consumption + tx trade/leg creation + rollback claim), `trading/trade-monitor.ts` (position-based leg closure detection), `trading/trade-guards.ts` (pure guard functions).
-- Open-trade flow on confirm: create `trades` row (mode `live`) + 2 `trade_legs` (`planned`) → preflight + margin checks → passive limit entry (price = bid/ask, post-only; up to 3 retries only on `PostOnlyOrderMatched`) → poll fill every 250 ms up to `OPEN_TRADE_LIMIT_TIMEOUT_MS` → hedge each fill immediately with a market order on the other venue → cancel remainder → place TP (`take-profit-market`) and SL (`stop-market`) reduce-only on both legs → status `open`. Failure mid-way with covered quantity triggers `claimRollback`: cancel orders + emergency reduce-only market closes + urgent notify + status `failed`.
+- Open-trade flow on confirm: create `trades` row (mode `live`) + 2 `trade_legs` (`planned`) → preflight + margin checks → passive limit entry (price = bid/ask, post-only; up to 3 retries only on `PostOnlyOrderMatched`) → poll fill every 250 ms up to `OPEN_TRADE_LIMIT_TIMEOUT_MS`, repricing the resting order at the new best bid/ask every `OPEN_TRADE_REPRICE_INTERVAL_MS` (0 disables) → hedge each fill immediately with a market order on the other venue → cancel remainder → place TP (`take-profit-market`) and SL (`stop-market`) reduce-only on both legs → status `open`. Failure mid-way with covered quantity triggers `claimRollback`: cancel orders + emergency reduce-only market closes + urgent notify + status `failed`.
 - Logging: `logging/json-file-logger.ts` (JSONL append with mkdir, errors swallowed).
 
 ### Backend (`apps/backend/src/`)

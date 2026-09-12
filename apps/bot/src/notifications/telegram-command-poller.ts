@@ -351,6 +351,7 @@ export class TelegramCommandPoller {
       ttlMs: this.config.openTrade.previewTtlMs,
       quoteMaxAgeMs: this.config.openTrade.quoteMaxAgeMs,
       limitTimeoutMs: this.config.openTrade.limitTimeoutMs,
+      limitRepriceIntervalMs: this.config.openTrade.limitRepriceIntervalMs,
       residualDeltaToleranceBase:
         this.config.openTrade.residualDeltaToleranceBase,
       takeProfitPercent: this.config.openTrade.takeProfitPercent,
