@@ -216,9 +216,25 @@ function resolveEntrySpreadUsd(trade: TradeRow, longLeg: TradeLegRow | undefined
 }
 
 function formatTradeSummaryMessage(summaries: ResolvedTradeSummary[]): string {
+  const globalEstimatedPnlUsd = summaries.reduce<number | null>((total, summary) => {
+    if (summary.totalEstimatedPnlUsd == null) return total;
+    return (total ?? 0) + summary.totalEstimatedPnlUsd;
+  }, null);
   const lines: string[] = ['📊 Active trade summary'];
 
+  lines.push(`Open trades: ${summaries.length}`);
+  lines.push(`Global estimated PnL: ${formatSignedUsd(globalEstimatedPnlUsd)}`);
+
   for (const summary of summaries) {
+    const spreadMoveUsd = summary.entrySpreadUsd != null && summary.liveSpreadUsd != null
+      ? summary.liveSpreadUsd - summary.entrySpreadUsd
+      : null;
+    const totalQuantityBase = sumKnown([summary.longLeg.quantityBase, summary.shortLeg.quantityBase]);
+    const totalNotionalUsd = sumKnown([
+      calculateLegNotionalUsd(summary.longLeg),
+      calculateLegNotionalUsd(summary.shortLeg)
+    ]);
+
     lines.push('');
     lines.push(`Trade #${summary.id} · ${summary.symbol} · ${summary.status}`);
     lines.push(`Market: ${summary.marketType} · Source: ${summary.priceSource}`);
@@ -230,8 +246,17 @@ function formatTradeSummaryMessage(summaries: ResolvedTradeSummary[]): string {
     if (summary.liveSpreadUsd != null) {
       lines.push(`Live spread: ${formatSignedUsd(summary.liveSpreadUsd)}`);
     }
+    if (spreadMoveUsd != null) {
+      lines.push(`Spread move: ${formatSignedUsd(spreadMoveUsd)} ${spreadMoveUsd <= 0 ? '(converging)' : '(widening)'}`);
+    }
     if (summary.totalEstimatedPnlUsd != null) {
-      lines.push(`Estimated PnL: ${formatSignedUsd(summary.totalEstimatedPnlUsd)}`);
+      lines.push(`Trade estimated PnL: ${formatSignedUsd(summary.totalEstimatedPnlUsd)}`);
+    }
+    if (totalQuantityBase != null) {
+      lines.push(`Total qty: ${formatQty(totalQuantityBase)} BTC`);
+    }
+    if (totalNotionalUsd != null) {
+      lines.push(`Total notional: ${formatUsd(totalNotionalUsd)}`);
     }
 
     lines.push('');
@@ -251,6 +276,13 @@ function formatTradeSummaryMessage(summaries: ResolvedTradeSummary[]): string {
 
 function formatLegSummary(leg: ResolvedLegSummary): string {
   const label = leg.side.toUpperCase();
+  const priceMoveUsd = leg.entryPriceUsd != null && leg.currentPriceUsd != null
+    ? leg.currentPriceUsd - leg.entryPriceUsd
+    : null;
+  const priceMovePercent = leg.entryPriceUsd != null && priceMoveUsd != null
+    ? (priceMoveUsd / leg.entryPriceUsd) * 100
+    : null;
+  const notionalUsd = calculateLegNotionalUsd(leg);
   const lines = [
     `${label} ${leg.exchangeId}`,
     `Status: ${leg.status}`,
@@ -258,8 +290,14 @@ function formatLegSummary(leg: ResolvedLegSummary): string {
     `Current: ${formatUsd(leg.currentPriceUsd)}`
   ];
 
+  if (priceMoveUsd != null) {
+    lines.push(`Price move: ${formatSignedUsd(priceMoveUsd)} (${formatSignedPercent(priceMovePercent)})`);
+  }
   if (leg.quantityBase != null) {
     lines.push(`Qty: ${formatQty(leg.quantityBase)}`);
+  }
+  if (notionalUsd != null) {
+    lines.push(`Notional: ${formatUsd(notionalUsd)}`);
   }
 
   lines.push(`Leg PnL: ${formatSignedUsd(leg.estimatedPnlUsd)}`);
@@ -287,6 +325,24 @@ function formatSignedUsd(value: number | null): string {
   if (value == null) return 'n/a';
   const prefix = value >= 0 ? '+' : '-';
   return `${prefix}$${Math.abs(value).toFixed(2)}`;
+}
+
+function formatSignedPercent(value: number | null): string {
+  if (value == null) return 'n/a';
+  const prefix = value >= 0 ? '+' : '-';
+  return `${prefix}${Math.abs(value).toFixed(2)}%`;
+}
+
+function calculateLegNotionalUsd(leg: ResolvedLegSummary): number | null {
+  const priceUsd = leg.currentPriceUsd ?? leg.entryPriceUsd;
+  if (priceUsd == null || leg.quantityBase == null) return null;
+  return priceUsd * leg.quantityBase;
+}
+
+function sumKnown(values: Array<number | null>): number | null {
+  const known = values.filter((value): value is number => value != null);
+  if (known.length === 0) return null;
+  return known.reduce((sum, value) => sum + value, 0);
 }
 
 function toNumber(value: string | number | null | undefined): number | null {
