@@ -223,7 +223,7 @@ function formatTradeSummaryMessage(summaries: ResolvedTradeSummary[]): string {
   const lines: string[] = ['📊 Active trade summary'];
 
   lines.push(`Open trades: ${summaries.length}`);
-  lines.push(`Global estimated PnL: ${formatSignedUsd(globalEstimatedPnlUsd)}`);
+  lines.push(`Global estimated PnL: ${formatPnl(globalEstimatedPnlUsd)}`);
 
   for (const summary of summaries) {
     const spreadMoveUsd = summary.entrySpreadUsd != null && summary.liveSpreadUsd != null
@@ -250,7 +250,7 @@ function formatTradeSummaryMessage(summaries: ResolvedTradeSummary[]): string {
       lines.push(`Spread move: ${formatSignedUsd(spreadMoveUsd)} ${spreadMoveUsd <= 0 ? '(converging)' : '(widening)'}`);
     }
     if (summary.totalEstimatedPnlUsd != null) {
-      lines.push(`Trade estimated PnL: ${formatSignedUsd(summary.totalEstimatedPnlUsd)}`);
+      lines.push(`Trade estimated PnL: ${formatPnl(summary.totalEstimatedPnlUsd)}`);
     }
     if (totalQuantityBase != null) {
       lines.push(`Total qty: ${formatQty(totalQuantityBase)} BTC`);
@@ -300,7 +300,7 @@ function formatLegSummary(leg: ResolvedLegSummary): string {
     lines.push(`Notional: ${formatUsd(notionalUsd)}`);
   }
 
-  lines.push(`Leg PnL: ${formatSignedUsd(leg.estimatedPnlUsd)}`);
+  lines.push(`Leg PnL: ${formatPnl(leg.estimatedPnlUsd)}`);
   if (leg.quoteError) {
     lines.push(`Quote error: ${leg.quoteError}`);
   }
@@ -331,6 +331,12 @@ function formatSignedPercent(value: number | null): string {
   if (value == null) return 'n/a';
   const prefix = value >= 0 ? '+' : '-';
   return `${prefix}${Math.abs(value).toFixed(2)}%`;
+}
+
+function formatPnl(value: number | null): string {
+  if (value == null) return 'n/a';
+  const icon = value >= 0 ? '🟢' : '🔴';
+  return `${icon} ${formatSignedUsd(value)}`;
 }
 
 function calculateLegNotionalUsd(leg: ResolvedLegSummary): number | null {
