@@ -1,6 +1,6 @@
 import type { BotConfig } from "@btc-arbitrage/config";
 import type { getDb } from "@btc-arbitrage/db";
-import { signals, tradePreviews } from "@btc-arbitrage/db";
+import { signals, tradeLegs, tradePreviews } from "@btc-arbitrage/db";
 import { eq } from "drizzle-orm";
 import {
   buildTradeSummaryMessage,
@@ -271,20 +271,62 @@ export class TelegramCommandPoller {
         );
       } else if (data.startsWith("confirm:")) {
         const token = data.slice(8);
+        const messageId = callback.message?.message_id;
         await telegramCommandLogger.write({
           timestamp: new Date().toISOString(),
           event: "telegram_confirm_requested",
           callbackId: callback.id,
           token,
         });
-        await this.openTradeService().confirm(token);
+        if (typeof messageId === "number") {
+          await this.editMessageText(
+            messageId,
+            `⏳ Confirming trade ${token.slice(0, 8)}...\n` +
+              "Executing limit entry + hedge + TP/SL. " +
+              `This can take up to ~${Math.round(this.config.openTrade.limitTimeoutMs / 1000)}s.`,
+          ).catch((error: unknown) => {
+            console.warn("Telegram confirming edit failed", {
+              messageId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
+        try {
+          await this.openTradeService().confirm(token);
+        } catch (confirmError) {
+          const confirmMessage =
+            confirmError instanceof Error
+              ? confirmError.message
+              : "Trade execution failed";
+          if (typeof messageId === "number") {
+            await this.editMessageText(
+              messageId,
+              `❌ Trade failed: ${confirmMessage}`,
+            ).catch((error: unknown) => {
+              console.warn("Telegram failure edit failed", {
+                messageId,
+                message: error instanceof Error ? error.message : String(error),
+              });
+            });
+          }
+          throw confirmError;
+        }
         await telegramCommandLogger.write({
           timestamp: new Date().toISOString(),
           event: "telegram_confirm_completed",
           callbackId: callback.id,
           token,
         });
-        await this.sendMessage("Trade execution completed.");
+        const fillSummary = await this.buildFillSummary(token);
+        if (typeof messageId === "number") {
+          await this.deleteMessage(messageId).catch((error: unknown) => {
+            console.warn("Telegram confirm message delete failed", {
+              messageId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
+        await this.sendMessage(fillSummary);
       } else if (data.startsWith("cancel:")) {
         const token = data.slice(7);
         await telegramCommandLogger.write({
@@ -352,6 +394,7 @@ export class TelegramCommandPoller {
       quoteMaxAgeMs: this.config.openTrade.quoteMaxAgeMs,
       limitTimeoutMs: this.config.openTrade.limitTimeoutMs,
       limitRepriceIntervalMs: this.config.openTrade.limitRepriceIntervalMs,
+      entryImproveTicks: this.config.openTrade.entryImproveTicks,
       residualDeltaToleranceBase:
         this.config.openTrade.residualDeltaToleranceBase,
       takeProfitPercent: this.config.openTrade.takeProfitPercent,
@@ -421,6 +464,55 @@ export class TelegramCommandPoller {
       throw new Error(
         `Telegram deleteMessage failed with HTTP ${response.status}`,
       );
+  }
+  private async editMessageText(
+    messageId: number,
+    text: string,
+  ): Promise<void> {
+    const response = await this.fetchImpl(
+      `https://api.telegram.org/bot${this.config.telegram.botToken}/editMessageText`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          chat_id: normalizeTelegramChatId(this.config.telegram.chatId!),
+          message_id: messageId,
+          text,
+          disable_web_page_preview: true,
+        }),
+      },
+    );
+    if (!response.ok)
+      throw new Error(
+        `Telegram editMessageText failed with HTTP ${response.status}`,
+      );
+  }
+  private async buildFillSummary(token: string): Promise<string> {
+    const previewRow = (
+      await this.db
+        .select({ tradeId: tradePreviews.tradeId })
+        .from(tradePreviews)
+        .where(eq(tradePreviews.token, token))
+    )[0];
+    if (!previewRow?.tradeId) return "✅ Trade execution completed.";
+    const legs = await this.db
+      .select()
+      .from(tradeLegs)
+      .where(eq(tradeLegs.tradeId, previewRow.tradeId));
+    const longLeg = legs.find((leg) => leg.side === "long");
+    const shortLeg = legs.find((leg) => leg.side === "short");
+    const lines = [`✅ Trade opened (${token.slice(0, 8)})`];
+    if (longLeg)
+      lines.push(
+        `Long: ${longLeg.exchangeId} @ $${longLeg.entryPriceUsd ?? "?"} ${longLeg.status}`,
+      );
+    if (shortLeg)
+      lines.push(
+        `Short: ${shortLeg.exchangeId} @ $${shortLeg.entryPriceUsd ?? "?"} ${shortLeg.status}`,
+      );
+    if (legs[0]) lines.push(`Quantity: ${legs[0].quantityBase} BTC`);
+    lines.push("TP/SL placed on both legs.");
+    return lines.join("\n");
   }
   private async sendMessage(
     text: string,

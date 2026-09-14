@@ -147,6 +147,7 @@ Copy `.env.example` to `.env` and fill in real values. Never commit `.env` or re
 | `OPEN_TRADE_QUOTE_MAX_AGE_MS` | `5000` | BBO freshness assertion |
 | `OPEN_TRADE_LIMIT_TIMEOUT_MS` | `30000` | Passive limit fill wait |
 | `OPEN_TRADE_REPRICE_INTERVAL_MS` | `2000` | Cancel-and-replace the resting limit at the new top of book; `0` disables |
+| `OPEN_TRADE_ENTRY_IMPROVE_TICKS` | `1` | Ticks to improve the passive limit price beyond best bid/ask (post-only safe); `0` = join best (legacy) |
 | `OPEN_TRADE_RESIDUAL_DELTA_BTC` | `0.00001` | Plumbed but not enforced (see landmines) |
 | `OPEN_TRADE_TAKE_PROFIT_PERCENT` / `OPEN_TRADE_STOP_LOSS_PERCENT` | `3` / `3` | TP/SL applied on confirm |
 | `RISEX_MAKER_FEE_BPS` / `RISEX_TAKER_FEE_BPS` | `1` / `3` | Routing fee inputs |

@@ -85,6 +85,11 @@ export interface OpenTradeOptions {
    * bid (buy) / ask (sell), still post-only. 0 disables repricing.
    * Defaults to DEFAULT_LIMIT_REPRICE_INTERVAL_MS. */
   limitRepriceIntervalMs?: number;
+  /** Number of price ticks to improve the resting limit price beyond the best
+   * bid/ask; keeps the order post-only by falling back to join when improving
+   * would cross the spread. 0 = legacy join behavior.
+   * Defaults to DEFAULT_ENTRY_IMPROVE_TICKS. */
+  entryImproveTicks?: number;
   residualDeltaToleranceBase: string;
   takeProfitPercent: string;
   stopLossPercent: string;
@@ -101,6 +106,7 @@ export interface OpenTradeOptions {
 const openTradeLogger = new JsonFileLogger("logs/open-trade.jsonl");
 const PASSIVE_LIMIT_RETRY_COUNT = 3;
 const DEFAULT_LIMIT_REPRICE_INTERVAL_MS = 2000;
+const DEFAULT_ENTRY_IMPROVE_TICKS = 1;
 // Below this remaining size (BTC) a reprice resubmission is skipped: the
 // venue minimum quantity would reject the replacement order anyway.
 const REPRICE_MIN_REMAINING_BASE = 0.0001;
@@ -508,7 +514,31 @@ export class OpenTradeService {
         )
           break;
         await this.sleep(250);
-        current = await limit.getExecutionOrder(activeLimit.id);
+        // Extended has read-after-write lag: an order created seconds ago
+        // can briefly 404 on GET (observed 2026-09-14, and historical
+        // 404s on 2026-08-20 / 2026-09-08). A transient poll failure must
+        // not kill the trade — keep the last known state and retry.
+        try {
+          current = await limit.getExecutionOrder(activeLimit.id);
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          console.warn("OpenTrade order status poll failed; retrying", {
+            token,
+            orderId: activeLimit.id,
+            message,
+            elapsedMs: this.now().getTime() - started,
+          });
+          await openTradeLogger.write({
+            timestamp: new Date().toISOString(),
+            event: "open_trade_order_poll_failed",
+            token,
+            orderId: activeLimit.id,
+            message,
+            elapsedMs: this.now().getTime() - started,
+          });
+          continue;
+        }
         const repriceIntervalMs =
           this.options.limitRepriceIntervalMs ??
           DEFAULT_LIMIT_REPRICE_INTERVAL_MS;
@@ -519,12 +549,20 @@ export class OpenTradeService {
         ) {
           lastRepriceCheckAt = this.now().getTime();
           let bbo: BestBidOffer;
+          let meta: Awaited<ReturnType<ExecutionAdapter["getMarketMetadata"]>>;
           try {
-            bbo = await limit.getBestBidOffer({
-              symbol: preview.symbol,
-              marketType: "perpetual",
-              priceSource: "last",
-            });
+            [bbo, meta] = await Promise.all([
+              limit.getBestBidOffer({
+                symbol: preview.symbol,
+                marketType: "perpetual",
+                priceSource: "last",
+              }),
+              limit.getMarketMetadata({
+                symbol: preview.symbol,
+                marketType: "perpetual",
+                priceSource: "last",
+              }),
+            ]);
           } catch (error) {
             console.warn(
               "OpenTrade reprice quote fetch failed; keeping resting order",
@@ -536,7 +574,14 @@ export class OpenTradeService {
             );
             continue;
           }
-          const desiredPriceUsd = limitSide === "buy" ? bbo.bidUsd : bbo.askUsd;
+          // Must use the same improve-by-tick pricing as the submit path,
+          // else the resting order would be repriced every interval
+          // (constant queue reset).
+          const desiredPriceUsd = this.passiveLimitPriceFromBbo(
+            bbo,
+            limitSide,
+            meta.priceTickUsd,
+          );
           const remainingBase =
             totalQuantityBase -
             settledFilledBase -
@@ -980,12 +1025,23 @@ export class OpenTradeService {
   }> {
     let lastError: unknown;
     for (let attempt = 1; attempt <= PASSIVE_LIMIT_RETRY_COUNT; attempt += 1) {
-      const bbo = await input.adapter.getBestBidOffer({
-        symbol: input.symbol,
-        marketType: "perpetual",
-        priceSource: "last",
-      });
-      const priceUsd = this.passiveLimitPriceFromBbo(bbo, input.side);
+      const [bbo, meta] = await Promise.all([
+        input.adapter.getBestBidOffer({
+          symbol: input.symbol,
+          marketType: "perpetual",
+          priceSource: "last",
+        }),
+        input.adapter.getMarketMetadata({
+          symbol: input.symbol,
+          marketType: "perpetual",
+          priceSource: "last",
+        }),
+      ]);
+      const priceUsd = this.passiveLimitPriceFromBbo(
+        bbo,
+        input.side,
+        meta.priceTickUsd,
+      );
       try {
         const order = await input.adapter.submitExecutionOrder({
           clientOrderId: `${input.token}-limit${input.orderIdSuffix}`,
@@ -1001,6 +1057,7 @@ export class OpenTradeService {
           side: input.side,
           quantityBase: input.quantityBase,
           priceUsd,
+          priceTickUsd: meta.priceTickUsd,
           orderId: order.id,
           attempt,
         });
@@ -1012,6 +1069,7 @@ export class OpenTradeService {
           side: input.side,
           quantityBase: input.quantityBase,
           priceUsd,
+          priceTickUsd: meta.priceTickUsd,
           orderId: order.id,
           attempt,
         });
@@ -1052,8 +1110,23 @@ export class OpenTradeService {
   private passiveLimitPriceFromBbo(
     bbo: BestBidOffer,
     side: "buy" | "sell",
+    priceTickUsd?: string,
   ): string {
-    return side === "buy" ? bbo.bidUsd : bbo.askUsd;
+    const ticks = this.options.entryImproveTicks ?? DEFAULT_ENTRY_IMPROVE_TICKS;
+    const tick = priceTickUsd?.trim() ?? "";
+    if (ticks === 0 || tick === "")
+      return side === "buy" ? bbo.bidUsd : bbo.askUsd;
+    const shift = multiplyDecimalString(tick, ticks);
+    if (side === "buy") {
+      const candidate = addDecimalStrings(bbo.bidUsd, shift);
+      // Strictly below the ask keeps the order post-only.
+      if (compareDecimalStrings(candidate, bbo.askUsd) < 0) return candidate;
+      return bbo.bidUsd;
+    }
+    const candidate = subtractDecimalStrings(bbo.askUsd, shift);
+    // Strictly above the bid keeps the order post-only.
+    if (compareDecimalStrings(candidate, bbo.bidUsd) > 0) return candidate;
+    return bbo.askUsd;
   }
   private async protect(
     adapter: ExecutionAdapter,
@@ -1145,6 +1218,75 @@ function applyPercentChange(
   if (multiplier <= 0)
     throw new Error("Stop loss percent must keep trigger price above zero");
   return formatDecimal(parseDecimal(value) * multiplier);
+}
+
+// Exact decimal-string arithmetic (BigInt-scaled, no float math): prices like
+// 94200.3 + 0.1 must stay exact. Results keep the input scale with trailing
+// zeros trimmed.
+function decimalScaleOf(value: string): number {
+  const dot = value.indexOf(".");
+  return dot === -1 ? 0 : value.length - dot - 1;
+}
+
+function toScaledBigInt(value: string): { scaled: bigint; scale: number } {
+  const trimmed = value.trim();
+  const negative = trimmed.startsWith("-");
+  const unsigned = negative ? trimmed.slice(1) : trimmed;
+  const digits = unsigned.replace(".", "");
+  if (digits !== "" && !/^\d+$/.test(digits))
+    throw new Error(`Invalid decimal price: ${value}`);
+  return {
+    scaled: BigInt((negative ? "-" : "") + (digits === "" ? "0" : digits)),
+    scale: decimalScaleOf(trimmed),
+  };
+}
+
+function alignScales(
+  left: { scaled: bigint; scale: number },
+  right: { scaled: bigint; scale: number },
+): { left: bigint; right: bigint; scale: number } {
+  const scale = Math.max(left.scale, right.scale);
+  return {
+    left: left.scaled * 10n ** BigInt(scale - left.scale),
+    right: right.scaled * 10n ** BigInt(scale - right.scale),
+    scale,
+  };
+}
+
+function formatScaledBigInt(scaled: bigint, scale: number): string {
+  const negative = scaled < 0n;
+  const digits = (negative ? -scaled : scaled)
+    .toString()
+    .padStart(scale + 1, "0");
+  const sign = negative ? "-" : "";
+  if (scale === 0) return sign + digits;
+  const intPart = digits.slice(0, -scale);
+  const fracPart = digits.slice(-scale).replace(/0+$/, "");
+  return fracPart === "" ? sign + intPart : `${sign}${intPart}.${fracPart}`;
+}
+
+function addDecimalStrings(left: string, right: string): string {
+  const aligned = alignScales(toScaledBigInt(left), toScaledBigInt(right));
+  return formatScaledBigInt(aligned.left + aligned.right, aligned.scale);
+}
+
+function subtractDecimalStrings(left: string, right: string): string {
+  const aligned = alignScales(toScaledBigInt(left), toScaledBigInt(right));
+  return formatScaledBigInt(aligned.left - aligned.right, aligned.scale);
+}
+
+function multiplyDecimalString(value: string, factor: number): string {
+  const scaled = toScaledBigInt(value);
+  if (!Number.isInteger(factor) || factor < 0)
+    throw new Error(`Invalid tick factor: ${factor}`);
+  return formatScaledBigInt(scaled.scaled * BigInt(factor), scaled.scale);
+}
+
+function compareDecimalStrings(left: string, right: string): number {
+  const aligned = alignScales(toScaledBigInt(left), toScaledBigInt(right));
+  if (aligned.left < aligned.right) return -1;
+  if (aligned.left > aligned.right) return 1;
+  return 0;
 }
 
 function selectEntryExecutionExchanges(input: {

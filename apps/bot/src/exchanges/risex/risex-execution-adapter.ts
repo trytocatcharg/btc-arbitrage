@@ -122,6 +122,7 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
     return {
       minQuantityBase: info.minQuantityBase,
       quantityStepBase: info.quantityStepBase,
+      priceTickUsd: info.priceStepUsd,
       maxLeverage: info.maxLeverage,
       positionMode: "one-way",
     };
@@ -275,6 +276,16 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
     });
 
     const submitted = normalizeSubmittedOrder(response, info);
+    if (input.type === "market") {
+      const ack = firstRecord(unwrapData(response));
+      console.log("RISEx market order acknowledgment", {
+        orderId: submitted.id,
+        status: submitted.status,
+        filledQuantityBase: submitted.filledQuantityBase,
+        averageFillPriceUsd: submitted.averageFillPriceUsd,
+        ackKeys: ack ? Object.keys(ack).join(",") : undefined,
+      });
+    }
     if (input.type !== "market" || !marketFillWatch) return submitted;
     if (submitted.status === "filled" && submitted.averageFillPriceUsd)
       return submitted;
@@ -461,12 +472,39 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
     const tolerance = Math.max(parseDecimal(input.quantityStepBase) / 2, 1e-10);
     const direction = input.side === "buy" ? 1 : -1;
     const deadline = this.now().getTime() + this.marketFillTimeoutMs;
+    let pollCount = 0;
     for (;;) {
+      pollCount += 1;
       const signed = await this.readSignedPositionQuantity(input.marketId);
-      if (direction * (signed - input.baseline) >= targetDelta - tolerance) {
-        return this.readPositionEntryPrice(input.marketId);
+      const delta = direction * (signed - input.baseline);
+      console.log("RISEx market fill poll", {
+        marketId: input.marketId,
+        poll: pollCount,
+        side: input.side,
+        baseline: input.baseline,
+        signed,
+        delta,
+        targetDelta,
+      });
+      if (delta >= targetDelta - tolerance) {
+        const entryPrice = await this.readPositionEntryPrice(input.marketId);
+        console.log("RISEx market fill detected", {
+          marketId: input.marketId,
+          polls: pollCount,
+          entryPriceUsd: entryPrice,
+        });
+        return entryPrice;
       }
-      if (this.now().getTime() >= deadline) return undefined;
+      if (this.now().getTime() >= deadline) {
+        console.warn("RISEx market fill timed out", {
+          marketId: input.marketId,
+          polls: pollCount,
+          baseline: input.baseline,
+          lastSigned: signed,
+          timeoutMs: this.marketFillTimeoutMs,
+        });
+        return undefined;
+      }
       await this.sleep(MARKET_FILL_POLL_MS);
     }
   }
@@ -481,12 +519,58 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
     });
     const body = firstRecord(unwrapData(payload));
     if (!body) return undefined;
-    return optionalDecimalDeep(body, [
+    const explicit = optionalDecimalDeep(body, [
       "entry_price",
       "entryPrice",
       "avg_entry_price",
       "averageEntryPrice",
     ]);
+    if (explicit) {
+      console.log("RISEx position entry price (explicit field)", {
+        marketId,
+        entryPriceUsd: explicit,
+      });
+      return explicit;
+    }
+    // Some RISEx position payloads report avg_entry_price: "" even on an open
+    // position (observed 2026-09-14 right after a market fill). Derive the
+    // average entry from position notional instead: quote_amount / |size|.
+    // NOTE: size must be read with the SIGNED deep helper — a short position
+    // reports size "-0.00384", which primitiveDecimal (unsigned regex)
+    // rejects; that silently killed this fallback on 2026-09-14.
+    const size = optionalSignedDecimalDeep(body, [
+      "size",
+      "position_size",
+      "positionSize",
+      "quantity",
+    ]);
+    const quote = optionalDecimalDeep(body, [
+      "quote_amount",
+      "quoteAmount",
+      "notional",
+      "position_notional",
+      "positionNotional",
+    ]);
+    if (!size || !quote) {
+      console.warn("RISEx position entry price unavailable", {
+        marketId,
+        positionKeys: Object.keys(body).join(","),
+      });
+      return undefined;
+    }
+    const sizeNumber = parseDecimal(size);
+    if (sizeNumber === 0) return undefined;
+    const derived = formatDecimal(
+      parseDecimal(quote) / Math.abs(sizeNumber),
+      8,
+    );
+    console.log("RISEx position entry price (derived quote/size)", {
+      marketId,
+      size,
+      quoteAmount: quote,
+      entryPriceUsd: derived,
+    });
+    return derived;
   }
 
   private async getMarketPriceBound(
@@ -792,11 +876,22 @@ function normalizeFilledQuantity(
 }
 
 function isFilledStatus(record: Record<string, unknown>): boolean {
-  return (
+  if (
     normalizeOrderStatus(
       stringField(record, ["status", "order_status", "orderStatus"]) ?? "",
     ) === "filled"
-  );
+  )
+    return true;
+  // The place-order acknowledgment for a market order may omit the status
+  // field entirely and instead report the fill via filled_percent / message
+  // (observed 2026-09-14: "Order fully filled", filled_percent "100.00").
+  const percent = optionalDecimalDeep(record, [
+    "filled_percent",
+    "filledPercent",
+  ]);
+  if (percent !== undefined && parseDecimal(percent) >= 100) return true;
+  const message = stringField(record, ["message"])?.toLowerCase() ?? "";
+  return message.includes("fully filled");
 }
 
 function extractRestingOrderId(record: Record<string, unknown>): bigint {
