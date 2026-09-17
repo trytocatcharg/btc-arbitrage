@@ -1,5 +1,3 @@
-import { JsonFileLogger } from "../../logging/json-file-logger.js";
-
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
 export interface ExtendedHttpRequestOptions {
@@ -22,7 +20,6 @@ export class ExtendedHttpClient {
     private readonly userAgent: string,
     private readonly apiKey?: string,
     private readonly fetchImpl: FetchLike = fetch,
-    private readonly logger = new JsonFileLogger("logs/extended-http.jsonl"),
   ) {}
 
   async get(
@@ -72,17 +69,6 @@ export class ExtendedHttpClient {
     });
     const text = response.status === 204 ? "" : await response.text();
     const payload = parseResponseBody(text);
-    await this.logger.write({
-      timestamp: new Date().toISOString(),
-      event: "extended_http_response",
-      method,
-      path,
-      query: options.query,
-      private: options.private === true,
-      status: response.status,
-      ok: response.ok,
-      body: payload,
-    });
     if (
       response.status === 404 &&
       method === "GET" &&

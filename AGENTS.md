@@ -16,7 +16,6 @@ Current capabilities:
 - Open trade execution (bot-only, Telegram-confirmed): passive maker-limit entry with retry, immediate market hedge per fill increment, then automatic TP/SL reduce-only orders on both legs.
 - Trade monitoring detects leg closure via position polling and notifies `closed` or `unhedged` states.
 - Persists price snapshots, spread snapshots, signals, trades, trade legs, trade previews, status history, Telegram command logs, operations, and events in MariaDB.
-- Append-only JSONL audit logs for trade execution and Telegram callbacks (`logs/open-trade.jsonl`, `logs/telegram-commands.jsonl`).
 
 Guardrails (non-goals):
 
@@ -150,6 +149,10 @@ Copy `.env.example` to `.env` and fill in real values. Never commit `.env` or re
 | `OPEN_TRADE_ENTRY_IMPROVE_TICKS` | `1` | Ticks to improve the passive limit price beyond best bid/ask (post-only safe); `0` = join best (legacy) |
 | `OPEN_TRADE_RESIDUAL_DELTA_BTC` | `0.00001` | Plumbed but not enforced (see landmines) |
 | `OPEN_TRADE_TAKE_PROFIT_PERCENT` / `OPEN_TRADE_STOP_LOSS_PERCENT` | `3` / `3` | TP/SL applied on confirm |
+| `OPEN_TRADE_SPREAD_TP_USD` | `60` | Spread exit: close both legs when live spread improves on captured spread by this many USD |
+| `OPEN_TRADE_SPREAD_SL_USD` | `25` | Spread exit: close both legs when live spread degrades from captured spread by this many USD |
+| `OPEN_TRADE_SPREAD_EXIT_TIMEOUT_MINUTES` | `30` | Time-stop: close an open trade after this many minutes regardless of spread |
+| `OPEN_TRADE_EDGE_MIN_PROFIT_USD` | `10` | Edge validation: minimum remaining spread convergence (beyond exit cost = taker fees + 2bps slippage) required to keep a trade right after fills; below it both legs close immediately |
 | `RISEX_MAKER_FEE_BPS` / `RISEX_TAKER_FEE_BPS` | `1` / `3` | Routing fee inputs |
 | `EXTENDED_MAKER_FEE_BPS` / `EXTENDED_TAKER_FEE_BPS` | `0` / `2.5` | Routing fee inputs |
 | `TELEGRAM_ENABLED` / `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | `false` / — / — | Bot enablement; token+chat required when enabled |
@@ -201,7 +204,6 @@ Copy `.env.example` to `.env` and fill in real values. Never commit `.env` or re
 - Telegram: `notifications/telegram-notifier.ts` (cooldown + chat restriction + `Open Trade` button), `notifications/telegram-command-poller.ts` (`/config`, `/trade`, `open:`/`confirm:`/`cancel:` callbacks), `notifications/trade-summary.ts`.
 - Trading: `trading/open-trade.ts` (`OpenTradeService` — preview/confirm state machine), `trading/db-preview-store.ts` (atomic preview consumption + tx trade/leg creation + rollback claim), `trading/trade-monitor.ts` (position-based leg closure detection), `trading/trade-guards.ts` (pure guard functions).
 - Open-trade flow on confirm: create `trades` row (mode `live`) + 2 `trade_legs` (`planned`) → preflight + margin checks → passive limit entry (price = bid/ask, post-only; up to 3 retries only on `PostOnlyOrderMatched`) → poll fill every 250 ms up to `OPEN_TRADE_LIMIT_TIMEOUT_MS`, repricing the resting order at the new best bid/ask every `OPEN_TRADE_REPRICE_INTERVAL_MS` (0 disables) → hedge each fill immediately with a market order on the other venue → cancel remainder → place TP (`take-profit-market`) and SL (`stop-market`) reduce-only on both legs → status `open`. Failure mid-way with covered quantity triggers `claimRollback`: cancel orders + emergency reduce-only market closes + urgent notify + status `failed`.
-- Logging: `logging/json-file-logger.ts` (JSONL append with mkdir, errors swallowed).
 
 ### Backend (`apps/backend/src/`)
 

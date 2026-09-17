@@ -10,7 +10,6 @@ import type {
   ExchangeAdapter,
   ExecutionAdapter,
 } from "@btc-arbitrage/exchange-core";
-import { JsonFileLogger } from "../logging/json-file-logger.js";
 
 export type OpenTradeState =
   | "awaiting_confirmation"
@@ -18,9 +17,26 @@ export type OpenTradeState =
   | "hedging"
   | "protecting"
   | "open"
+  | "closing"
   | "unhedged"
+  | "closed"
   | "cancelled"
   | "failed";
+
+/** Result of a confirmed execution. `edge_closed` means both fills completed
+ * but the captured spread no longer covered exit cost + minimum profit, so
+ * the legs were closed immediately at market instead of holding. `cancelled`
+ * means the passive limit entry never filled and the trade was cancelled
+ * without opening any position. */
+export type ConfirmOutcome =
+  | { outcome: "opened" }
+  | {
+      outcome: "edge_closed";
+      realizedPnlUsd: string | null;
+      capturedSpreadUsd: number;
+      minEdgeUsd: number;
+    }
+  | { outcome: "cancelled" };
 export interface OpenTradePreview {
   token: string;
   signalId: number;
@@ -52,6 +68,7 @@ export interface TradeLegUpdate {
   exitOrderId?: string;
   entryPriceUsd?: string;
   exitPriceUsd?: string;
+  realizedPnlUsd?: string;
   closeReason?: string;
   raw?: Record<string, unknown>;
 }
@@ -93,6 +110,12 @@ export interface OpenTradeOptions {
   residualDeltaToleranceBase: string;
   takeProfitPercent: string;
   stopLossPercent: string;
+  /** Minimum remaining edge (USD of spread convergence still left at the
+   * captured fills) required to KEEP a trade after both fills complete.
+   * Below exit cost (taker fees + slippage) + this buffer, both legs are
+   * closed immediately at market instead of placing TP/SL.
+   * Defaults to DEFAULT_EDGE_MIN_PROFIT_USD. */
+  edgeMinProfitUsd?: string;
   fees: Record<ExchangeId, { makerBps: string; takerBps: string }>;
   notifyUrgent?: (text: string) => Promise<void>;
   notifyLimitTimeout?: (input: {
@@ -103,10 +126,13 @@ export interface OpenTradeOptions {
   sleep?: (ms: number) => Promise<void>;
 }
 
-const openTradeLogger = new JsonFileLogger("logs/open-trade.jsonl");
 const PASSIVE_LIMIT_RETRY_COUNT = 3;
 const DEFAULT_LIMIT_REPRICE_INTERVAL_MS = 2000;
 const DEFAULT_ENTRY_IMPROVE_TICKS = 1;
+const DEFAULT_EDGE_MIN_PROFIT_USD = "10";
+// Assumed combined slippage (both legs) when estimating the cost of a market
+// exit, on top of the configured taker fees.
+const EXIT_SLIPPAGE_BPS = 2;
 // Below this remaining size (BTC) a reprice resubmission is skipped: the
 // venue minimum quantity would reject the replacement order anyway.
 const REPRICE_MIN_REMAINING_BASE = 0.0001;
@@ -200,21 +226,6 @@ export class OpenTradeService {
       longPriceUsd: preview.longPriceUsd,
       shortPriceUsd: preview.shortPriceUsd,
     });
-    await openTradeLogger.write({
-      timestamp: new Date().toISOString(),
-      event: "open_trade_preview_created",
-      token: preview.token,
-      signalId: preview.signalId,
-      symbol: preview.symbol,
-      longExchange: preview.longExchange,
-      shortExchange: preview.shortExchange,
-      limitExchange: preview.limitExchange,
-      marketExchange: preview.marketExchange,
-      quantityBase: preview.quantityBase,
-      longPriceUsd: preview.longPriceUsd,
-      shortPriceUsd: preview.shortPriceUsd,
-      expiresAt: preview.expiresAt.toISOString(),
-    });
     await this.store.createPreview(preview);
     return preview;
   }
@@ -254,7 +265,9 @@ export class OpenTradeService {
    * quote freshness, quantity and market minimums against live BBO, then
    * re-runs the entry phase. The preview must not be expired.
    */
-  async retryEntry(preview: OpenTradePreview): Promise<void> {
+  async retryEntry(
+    preview: OpenTradePreview,
+  ): Promise<ConfirmOutcome | undefined> {
     if (preview.expiresAt.getTime() <= this.now().getTime())
       throw new Error("Preview expired; open a new trade from a fresh signal");
     const longExecution = this.execution(
@@ -306,31 +319,14 @@ export class OpenTradeService {
       longPriceUsd: preview.longPriceUsd,
       shortPriceUsd: preview.shortPriceUsd,
     });
-    await this.runEntry(preview, "-retry");
+    return await this.runEntry(preview, "-retry");
   }
 
-  async confirm(token: string): Promise<void> {
+  async confirm(token: string): Promise<ConfirmOutcome | undefined> {
     console.log("OpenTrade confirm started", { token });
-    await openTradeLogger.write({
-      timestamp: new Date().toISOString(),
-      event: "open_trade_confirm_started",
-      token,
-    });
     const preview = await this.store.consumePreview(token, this.now());
     if (!preview)
       throw new Error("Preview was already consumed, cancelled or expired");
-    await openTradeLogger.write({
-      timestamp: new Date().toISOString(),
-      event: "open_trade_preview_consumed",
-      token,
-      signalId: preview.signalId,
-      symbol: preview.symbol,
-      longExchange: preview.longExchange,
-      shortExchange: preview.shortExchange,
-      limitExchange: preview.limitExchange,
-      marketExchange: preview.marketExchange,
-      quantityBase: preview.quantityBase,
-    });
     if (await this.store.hasBlockingExecution()) {
       await this.store.transition(token, "cancelled", {
         error: "blocked_by_active_trade",
@@ -348,13 +344,13 @@ export class OpenTradeService {
       marketExchange: preview.marketExchange,
       quantityBase: preview.quantityBase,
     });
-    await this.runEntry(preview, "");
+    return await this.runEntry(preview, "");
   }
 
   private async runEntry(
     preview: OpenTradePreview,
     orderIdSuffix: string,
-  ): Promise<void> {
+  ): Promise<ConfirmOutcome | undefined> {
     const token = preview.token;
     const limit = this.execution(this.registry.get(preview.limitExchange));
     const market = this.execution(this.registry.get(preview.marketExchange));
@@ -381,14 +377,6 @@ export class OpenTradeService {
         marketExchange: preview.marketExchange,
         limitMarginUsd,
         marketMarginUsd,
-      });
-      await openTradeLogger.write({
-        timestamp: new Date().toISOString(),
-        event: "open_trade_preflight_ok",
-        token,
-        symbol: preview.symbol,
-        limitExchange: preview.limitExchange,
-        marketExchange: preview.marketExchange,
       });
       const limitSide =
         preview.limitExchange === preview.shortExchange ? "sell" : "buy";
@@ -469,18 +457,6 @@ export class OpenTradeService {
             status: hedge.status,
             averageFillPriceUsd: hedge.averageFillPriceUsd,
           });
-          await openTradeLogger.write({
-            timestamp: new Date().toISOString(),
-            event: "open_trade_hedge_submitted",
-            token,
-            exchange: preview.marketExchange,
-            side: marketSide,
-            quantityBase: formatDecimal(diff, 10),
-            orderId: hedge.id,
-            status: hedge.status,
-            averageFillPriceUsd: hedge.averageFillPriceUsd,
-            coveredQuantityBase: formatDecimal(covered, 10),
-          });
           if (hedge.status !== "filled" || !hedge.averageFillPriceUsd)
             throw new Error("Market hedge was not immediately filled");
           marketFillPrice = hedge.averageFillPriceUsd;
@@ -524,14 +500,6 @@ export class OpenTradeService {
           const message =
             error instanceof Error ? error.message : String(error);
           console.warn("OpenTrade order status poll failed; retrying", {
-            token,
-            orderId: activeLimit.id,
-            message,
-            elapsedMs: this.now().getTime() - started,
-          });
-          await openTradeLogger.write({
-            timestamp: new Date().toISOString(),
-            event: "open_trade_order_poll_failed",
             token,
             orderId: activeLimit.id,
             message,
@@ -648,15 +616,6 @@ export class OpenTradeService {
               quantityBase: formatDecimal(settledRemainingBase, 10),
               repriceCount,
             });
-            await openTradeLogger.write({
-              timestamp: new Date().toISOString(),
-              event: "open_trade_limit_repriced",
-              token,
-              orderId: activeLimit.id,
-              priceUsd: activeLimitPriceUsd,
-              quantityBase: formatDecimal(settledRemainingBase, 10),
-              repriceCount,
-            });
           } catch (error) {
             // The previous order is already cancelled: settle as a soft
             // timeout so covered quantity is still protected downstream.
@@ -666,13 +625,6 @@ export class OpenTradeService {
               "OpenTrade reprice resubmit failed; settling as timeout",
               { token, message, repriceCount },
             );
-            await openTradeLogger.write({
-              timestamp: new Date().toISOString(),
-              event: "open_trade_limit_reprice_failed",
-              token,
-              message,
-              repriceCount,
-            });
             current = settled;
           }
         }
@@ -694,14 +646,6 @@ export class OpenTradeService {
           finalStatus: current.status,
           filledQuantityBase: current.filledQuantityBase,
           elapsedMs: this.now().getTime() - started,
-        });
-        await openTradeLogger.write({
-          timestamp: new Date().toISOString(),
-          event: "open_trade_limit_cancelled",
-          token,
-          orderId: activeLimit.id,
-          finalStatus: current.status,
-          filledQuantityBase: current.filledQuantityBase,
         });
       }
       if (covered <= 0) {
@@ -728,13 +672,6 @@ export class OpenTradeService {
           orderId: activeLimit.id,
           finalStatus: current.status,
         });
-        await openTradeLogger.write({
-          timestamp: new Date().toISOString(),
-          event: "open_trade_cancelled_without_fill",
-          token,
-          orderId: activeLimit.id,
-          finalStatus: current.status,
-        });
         const limitSideForNotice =
           preview.limitExchange === preview.shortExchange ? "sell" : "buy";
         await this.options.notifyLimitTimeout?.({
@@ -744,21 +681,60 @@ export class OpenTradeService {
             `${preview.quantityBase} ${preview.symbol}) no se llenó en ` +
             `${this.options.limitTimeoutMs}ms y fue cancelada. ¿Reintentar?`,
         });
-        await openTradeLogger.write({
-          timestamp: new Date().toISOString(),
-          event: "open_trade_limit_timeout_notified",
-          token,
-          orderId: activeLimit.id,
-          finalStatus: current.status,
-        });
-        return;
+        return { outcome: "cancelled" as const };
       }
       const limitFillPrice =
         covered > 0
           ? formatDecimal(settledNotionalUsd / covered, 8)
           : undefined;
-      if (!limitFillPrice || !marketFillPrice)
+      const longEntry =
+        preview.limitExchange === preview.longExchange
+          ? limitFillPrice
+          : marketFillPrice;
+      const shortEntry =
+        preview.limitExchange === preview.shortExchange
+          ? limitFillPrice
+          : marketFillPrice;
+      if (!longEntry || !shortEntry)
         throw new Error("Cannot protect trade without confirmed fill prices");
+
+      // Edge evaluation (informational only, operator decision
+      // 2026-09-16): when the convergence left in the captured spread
+      // does not cover the cost of exiting (taker fees + slippage) plus
+      // the configured minimum profit, the trade has negative expectancy
+      // on paper. The trade is kept open with TP/SL anyway; the venue
+      // TP/SL backstop and the spread-exit monitor still manage risk.
+      const edge = evaluateCapturedEdge({
+        longEntryUsd: longEntry,
+        shortEntryUsd: shortEntry,
+        longTakerFeeBps:
+          this.options.fees[preview.longExchange]?.takerBps ?? "0",
+        shortTakerFeeBps:
+          this.options.fees[preview.shortExchange]?.takerBps ?? "0",
+        minProfitUsd:
+          this.options.edgeMinProfitUsd ?? DEFAULT_EDGE_MIN_PROFIT_USD,
+      });
+      console.log("OpenTrade captured edge evaluated", {
+        token,
+        capturedSpreadUsd: edge.capturedSpreadUsd,
+        remainingEdgeUsd: edge.remainingEdgeUsd,
+        exitCostUsd: edge.exitCostUsd,
+        minEdgeUsd: edge.minEdgeUsd,
+        keepOpen: edge.keepOpen,
+      });
+      if (!edge.keepOpen) {
+        console.warn(
+          "OpenTrade edge below cost; keeping trade open with TP/SL anyway",
+          {
+            token,
+            capturedSpreadUsd: edge.capturedSpreadUsd,
+            remainingEdgeUsd: edge.remainingEdgeUsd,
+            exitCostUsd: edge.exitCostUsd,
+            minEdgeUsd: edge.minEdgeUsd,
+          },
+        );
+      }
+
       await this.store.transition(token, "protecting", {
         legs: [
           {
@@ -770,10 +746,6 @@ export class OpenTradeService {
           },
         ],
       });
-      const longEntry =
-        preview.limitExchange === preview.longExchange
-          ? limitFillPrice
-          : marketFillPrice;
       const longTp = applyPercentChange(
         longEntry,
         this.options.takeProfitPercent,
@@ -806,15 +778,6 @@ export class OpenTradeService {
         longTp,
         protectionOrderIds,
       );
-      await openTradeLogger.write({
-        timestamp: new Date().toISOString(),
-        event: "open_trade_protection_submitted",
-        token,
-        coveredQuantityBase: formatDecimal(covered, 10),
-        longTp,
-        longSl,
-        protectionOrderIds: protectionOrderIds.map((item) => item.id),
-      });
       console.log("OpenTrade protection submitted", {
         token,
         coveredQuantityBase: formatDecimal(covered, 10),
@@ -855,14 +818,7 @@ export class OpenTradeService {
         longTp,
         longSl,
       });
-      await openTradeLogger.write({
-        timestamp: new Date().toISOString(),
-        event: "open_trade_confirm_completed",
-        token,
-        coveredQuantityBase: formatDecimal(covered, 10),
-        longTp,
-        longSl,
-      });
+      return { outcome: "opened" };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.error("OpenTrade confirm failed", {
@@ -870,15 +826,6 @@ export class OpenTradeService {
         coveredQuantityBase: formatDecimal(covered, 10),
         limitOrder,
         message,
-      });
-      await openTradeLogger.write({
-        timestamp: new Date().toISOString(),
-        event: "open_trade_confirm_failed",
-        token,
-        coveredQuantityBase: formatDecimal(covered, 10),
-        limitOrder,
-        protectionOrderIds: protectionOrderIds.map((item) => item.id),
-        error: message,
       });
       const outcomes: string[] = [];
       // Cancel any still-working orders regardless of hedge progress; a
@@ -958,13 +905,6 @@ export class OpenTradeService {
           }
         }
       }
-      await openTradeLogger.write({
-        timestamp: new Date().toISOString(),
-        event: "open_trade_rollback_attempted",
-        token,
-        outcomes,
-        residual,
-      });
       const finalState: OpenTradeState =
         residual.length > 0 ? "unhedged" : "failed";
       await this.store.transition(token, finalState, {
@@ -1061,18 +1001,6 @@ export class OpenTradeService {
           orderId: order.id,
           attempt,
         });
-        await openTradeLogger.write({
-          timestamp: new Date().toISOString(),
-          event: "open_trade_limit_submitted",
-          token: input.token,
-          exchange: input.exchangeId,
-          side: input.side,
-          quantityBase: input.quantityBase,
-          priceUsd,
-          priceTickUsd: meta.priceTickUsd,
-          orderId: order.id,
-          attempt,
-        });
         return { order, priceUsd };
       } catch (error) {
         lastError = error;
@@ -1084,17 +1012,6 @@ export class OpenTradeService {
           priceUsd,
           attempt,
           message,
-        });
-        await openTradeLogger.write({
-          timestamp: new Date().toISOString(),
-          event: "open_trade_limit_submit_failed",
-          token: input.token,
-          exchange: input.exchangeId,
-          side: input.side,
-          quantityBase: input.quantityBase,
-          priceUsd,
-          attempt,
-          error: message,
         });
         if (
           !message.includes("PostOnlyOrderMatched()") ||
@@ -1204,6 +1121,44 @@ export class OpenTradeService {
     if (this.now().getTime() - at.getTime() > this.options.quoteMaxAgeMs)
       throw new Error("Executable BBO quote is stale");
   }
+}
+
+export function evaluateCapturedEdge(input: {
+  longEntryUsd: string;
+  shortEntryUsd: string;
+  longTakerFeeBps: string;
+  shortTakerFeeBps: string;
+  minProfitUsd: string;
+}): {
+  capturedSpreadUsd: number;
+  remainingEdgeUsd: number;
+  exitCostUsd: number;
+  minEdgeUsd: number;
+  keepOpen: boolean;
+} {
+  const longEntry = parseDecimal(input.longEntryUsd);
+  const shortEntry = parseDecimal(input.shortEntryUsd);
+  const capturedSpreadUsd = longEntry - shortEntry;
+  // The strategy is long-the-cheap-venue / short-the-expensive-venue, so a
+  // NEGATIVE captured spread still has |spread| of convergence left to
+  // capture; a positive captured spread means the move already happened at
+  // our fills (inverted entry, no edge left).
+  const remainingEdgeUsd = Math.max(0, -capturedSpreadUsd);
+  const refPriceUsd = (longEntry + shortEntry) / 2;
+  const exitCostUsd =
+    (refPriceUsd *
+      (parseDecimal(input.longTakerFeeBps) +
+        parseDecimal(input.shortTakerFeeBps) +
+        EXIT_SLIPPAGE_BPS)) /
+    10_000;
+  const minEdgeUsd = exitCostUsd + parseDecimal(input.minProfitUsd);
+  return {
+    capturedSpreadUsd,
+    remainingEdgeUsd,
+    exitCostUsd,
+    minEdgeUsd,
+    keepOpen: remainingEdgeUsd >= minEdgeUsd,
+  };
 }
 
 function applyPercentChange(

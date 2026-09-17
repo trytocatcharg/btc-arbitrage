@@ -1,6 +1,11 @@
 -- SQL schema for a fresh MariaDB database.
 -- Select/create the target database before running this script.
 -- Safe to re-run for existing tables/indexes, but it does not patch schema drift.
+-- NOTE: MariaDB (explicit_defaults_for_timestamp=OFF) silently coerces bare
+-- `timestamp` columns: the first per table gets DEFAULT CURRENT_TIMESTAMP ON
+-- UPDATE CURRENT_TIMESTAMP, and later NOT NULL ones get a zero-date default.
+-- Every timestamp column below is declared explicitly so a fresh database
+-- matches packages/db/src/schema.ts and the 0002 drift fix.
 
 CREATE TABLE IF NOT EXISTS `events` (
 	`id` int AUTO_INCREMENT NOT NULL,
@@ -9,7 +14,7 @@ CREATE TABLE IF NOT EXISTS `events` (
 	`message` varchar(1024) NOT NULL,
 	`related_entity_id` varchar(128),
 	`metadata` json,
-	`created_at` timestamp NOT NULL,
+	`created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	CONSTRAINT `events_id` PRIMARY KEY(`id`)
 );
 
@@ -23,8 +28,8 @@ CREATE TABLE IF NOT EXISTS `price_snapshots` (
 	`price_usd` decimal(24,8) NOT NULL,
 	`bid_usd` decimal(24,8),
 	`ask_usd` decimal(24,8),
-	`exchange_timestamp` timestamp NOT NULL,
-	`received_at` timestamp NOT NULL,
+	`exchange_timestamp` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	`received_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	`raw` json,
 	CONSTRAINT `price_snapshots_id` PRIMARY KEY(`id`)
 );
@@ -43,7 +48,7 @@ CREATE TABLE IF NOT EXISTS `spread_snapshots` (
 	`direction` varchar(32) NOT NULL,
 	`threshold_usd` decimal(24,8) NOT NULL,
 	`threshold_matched` boolean NOT NULL,
-	`calculated_at` timestamp NOT NULL,
+	`calculated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	CONSTRAINT `spread_snapshots_id` PRIMARY KEY(`id`)
 );
 
@@ -58,7 +63,7 @@ CREATE TABLE IF NOT EXISTS `signals` (
 	`observed_diff_usd` decimal(24,8) NOT NULL,
 	`reason` varchar(512) NOT NULL,
 	`status` varchar(32) NOT NULL,
-	`created_at` timestamp NOT NULL,
+	`created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	CONSTRAINT `signals_id` PRIMARY KEY(`id`),
 	CONSTRAINT `signals_spread_id_spread_snapshots_id_fk` FOREIGN KEY (`spread_id`) REFERENCES `spread_snapshots`(`id`) ON DELETE no action ON UPDATE no action
 );
@@ -79,10 +84,10 @@ CREATE TABLE IF NOT EXISTS `trades` (
 	`realized_pnl_usd` decimal(24,8),
 	`unrealized_pnl_usd` decimal(24,8),
 	`total_fees_usd` decimal(24,8),
-	`opened_at` timestamp,
-	`closed_at` timestamp,
-	`created_at` timestamp NOT NULL,
-	`updated_at` timestamp NOT NULL,
+	`opened_at` timestamp NULL,
+	`closed_at` timestamp NULL,
+	`created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	`updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	CONSTRAINT `trades_id` PRIMARY KEY(`id`),
 	CONSTRAINT `trades_signal_id_signals_id_fk` FOREIGN KEY (`signal_id`) REFERENCES `signals`(`id`) ON DELETE no action ON UPDATE no action
 );
@@ -105,9 +110,9 @@ CREATE TABLE IF NOT EXISTS `trade_legs` (
 	`entry_order_id` varchar(128),
 	`exit_order_id` varchar(128),
 	`close_reason` varchar(32),
-	`closure_notified_at` timestamp,
-	`opened_at` timestamp,
-	`closed_at` timestamp,
+	`closure_notified_at` timestamp NULL,
+	`opened_at` timestamp NULL,
+	`closed_at` timestamp NULL,
 	`raw` json,
 	CONSTRAINT `trade_legs_id` PRIMARY KEY(`id`),
 	CONSTRAINT `trade_legs_trade_id_trades_id_fk` FOREIGN KEY (`trade_id`) REFERENCES `trades`(`id`) ON DELETE no action ON UPDATE no action
@@ -119,11 +124,11 @@ CREATE TABLE IF NOT EXISTS `trade_previews` (
 	`trade_id` int,
 	`token` varchar(96) NOT NULL,
 	`status` varchar(32) NOT NULL,
-	`expires_at` timestamp NOT NULL,
-	`consumed_at` timestamp,
+	`expires_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	`consumed_at` timestamp NULL,
 	`payload` json NOT NULL,
-	`created_at` timestamp NOT NULL,
-	`updated_at` timestamp NOT NULL,
+	`created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	`updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	CONSTRAINT `trade_previews_id` PRIMARY KEY(`id`),
 	CONSTRAINT `trade_previews_signal_id_signals_id_fk` FOREIGN KEY (`signal_id`) REFERENCES `signals`(`id`) ON DELETE no action ON UPDATE no action,
 	CONSTRAINT `trade_previews_trade_id_trades_id_fk` FOREIGN KEY (`trade_id`) REFERENCES `trades`(`id`) ON DELETE no action ON UPDATE no action
@@ -136,7 +141,7 @@ CREATE TABLE IF NOT EXISTS `trade_status_history` (
 	`to_status` enum('planned','open','closing','closed','cancelled','failed') NOT NULL,
 	`reason` varchar(512),
 	`metadata` json,
-	`changed_at` timestamp NOT NULL,
+	`changed_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	CONSTRAINT `trade_status_history_id` PRIMARY KEY(`id`),
 	CONSTRAINT `trade_status_history_trade_id_trades_id_fk` FOREIGN KEY (`trade_id`) REFERENCES `trades`(`id`) ON DELETE no action ON UPDATE no action
 );
@@ -147,7 +152,7 @@ CREATE TABLE IF NOT EXISTS `telegram_command_logs` (
 	`command` varchar(64) NOT NULL,
 	`allowed` boolean NOT NULL,
 	`response_summary` varchar(512),
-	`created_at` timestamp NOT NULL,
+	`created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	CONSTRAINT `telegram_command_logs_id` PRIMARY KEY(`id`)
 );
 
@@ -161,7 +166,7 @@ CREATE TABLE IF NOT EXISTS `operations` (
 	`status` varchar(32) NOT NULL,
 	`guardrail_reason` varchar(512),
 	`legs` json,
-	`created_at` timestamp NOT NULL,
+	`created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	CONSTRAINT `operations_id` PRIMARY KEY(`id`),
 	CONSTRAINT `operations_signal_id_signals_id_fk` FOREIGN KEY (`signal_id`) REFERENCES `signals`(`id`) ON DELETE no action ON UPDATE no action,
 	CONSTRAINT `operations_trade_id_trades_id_fk` FOREIGN KEY (`trade_id`) REFERENCES `trades`(`id`) ON DELETE no action ON UPDATE no action

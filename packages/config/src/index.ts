@@ -42,6 +42,22 @@ export interface BotConfig {
     residualDeltaToleranceBase: string;
     takeProfitPercent: string;
     stopLossPercent: string;
+    /** Exit when the live spread (long venue price − short venue price)
+     * improves on the captured spread by at least this many USD.
+     * Spread-based exits replace the ±3% price-based venue TP/SL as the
+     * primary take-profit (those remain as catastrophic backstop only). */
+    spreadTpUsd: string;
+    /** Exit when the live spread degrades from the captured spread by at
+     * least this many USD (stop loss in spread terms). */
+    spreadSlUsd: string;
+    /** Exit an open trade after this many minutes regardless of spread
+     * (time-stop for a convergence thesis that stopped converging). */
+    spreadExitTimeoutMinutes: number;
+    /** Minimum additional edge (USD of remaining spread convergence)
+     * required to KEEP a trade right after both fills complete. If the
+     * remaining edge is below exit cost (taker fees + slippage) plus this
+     * buffer, both legs are closed immediately at market. */
+    edgeMinProfitUsd: string;
     risexMakerFeeBps: string;
     risexTakerFeeBps: string;
     extendedMakerFeeBps: string;
@@ -173,6 +189,22 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   if (Number(openTradeStopLossPercent) >= 100) {
     throw new Error("OPEN_TRADE_STOP_LOSS_PERCENT must be less than 100");
   }
+  const spreadTpUsd = parsePositiveDecimalString(
+    env.OPEN_TRADE_SPREAD_TP_USD ?? "60",
+    "OPEN_TRADE_SPREAD_TP_USD",
+  );
+  const spreadSlUsd = parsePositiveDecimalString(
+    env.OPEN_TRADE_SPREAD_SL_USD ?? "25",
+    "OPEN_TRADE_SPREAD_SL_USD",
+  );
+  const spreadExitTimeoutMinutes = parsePositiveInteger(
+    env.OPEN_TRADE_SPREAD_EXIT_TIMEOUT_MINUTES ?? "30",
+    "OPEN_TRADE_SPREAD_EXIT_TIMEOUT_MINUTES",
+  );
+  const edgeMinProfitUsd = parseNonNegativeDecimalString(
+    env.OPEN_TRADE_EDGE_MIN_PROFIT_USD ?? "10",
+    "OPEN_TRADE_EDGE_MIN_PROFIT_USD",
+  );
 
   return {
     database,
@@ -228,6 +260,10 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       ),
       takeProfitPercent: openTradeTakeProfitPercent,
       stopLossPercent: openTradeStopLossPercent,
+      spreadTpUsd,
+      spreadSlUsd,
+      spreadExitTimeoutMinutes,
+      edgeMinProfitUsd,
       risexMakerFeeBps: parseNonNegativeDecimalString(
         env.RISEX_MAKER_FEE_BPS ?? "1",
         "RISEX_MAKER_FEE_BPS",

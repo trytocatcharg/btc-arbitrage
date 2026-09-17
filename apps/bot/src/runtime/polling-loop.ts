@@ -8,6 +8,7 @@ import type { getDb } from "@btc-arbitrage/db";
 import { signals, activeTradeStatuses, trades } from "@btc-arbitrage/db";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { monitorTrades } from "../trading/trade-monitor.js";
+import { monitorSpreadExits } from "../trading/spread-exit-monitor.js";
 import { runDataRetention } from "../retention/data-retention.js";
 import { shouldSuppressSignalForActiveTrades } from "../trading/trade-guards.js";
 import { extractInsertId } from "../db-result.js";
@@ -100,6 +101,35 @@ export async function runPollingLoop(input: {
         exchangeBPriceUsd: priceB.priceUsd,
         priceSource: input.config.priceSource,
       });
+
+      try {
+        await monitorSpreadExits({
+          db: input.db,
+          registry: input.registry,
+          notifier: input.notifier,
+          priceByExchange: new Map([
+            [priceA.exchangeId, priceA.priceUsd],
+            [priceB.exchangeId, priceB.priceUsd],
+          ]),
+          spreadTpUsd: input.config.openTrade.spreadTpUsd,
+          spreadSlUsd: input.config.openTrade.spreadSlUsd,
+          timeoutMinutes: input.config.openTrade.spreadExitTimeoutMinutes,
+          takerFeesBps: {
+            risex: input.config.openTrade.risexTakerFeeBps,
+            extended: input.config.openTrade.extendedTakerFeeBps,
+            arcus: "0",
+            variational: input.config.openTrade.variationalTakerFeeBps,
+          },
+          edgeMinProfitUsd: input.config.openTrade.edgeMinProfitUsd,
+        });
+      } catch (error) {
+        console.error(
+          "Spread exit monitoring failed",
+          error instanceof Error
+            ? { tick, message: error.message }
+            : { tick, error },
+        );
+      }
 
       const spread = calculateSpread({
         exchangeA: priceA,

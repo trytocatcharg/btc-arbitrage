@@ -23,6 +23,7 @@ See `docs/exchanges/risex-integration.md` and `docs/exchanges/extended-execution
 ## Support matrix
 
 ### RISEx
+
 - Implemented:
   - market metadata
   - executable BBO from orderbook
@@ -50,15 +51,16 @@ See `docs/exchanges/risex-integration.md` and `docs/exchanges/extended-execution
   - RISEx permit payload uses `permit`
   - permit nonce uses the current `nonce_anchor` from nonce-state for trading permits
   - non-numeric bot `clientOrderId` values must be normalized before signing because RISEx order encoding expects a numeric `client_order_id`
-- Newly documented but not yet implemented: TP/SL endpoints `POST /v1/orders/tpsl`, `GET /v1/orders/tpsl`, `POST /v1/orders/tpsl/cancel`.
-- TP/SL blocker: the public docs describe request body enums as strings but the EIP-712 signature fields as `uint8`, without publishing the canonical enum encodings. We must not ship TP/SL signing until that mapping is verified against official code or a testnet fixture.
+- Implemented and live-verified 2026-09-15: TP/SL endpoints `POST /v1/orders/tpsl`, `GET /v1/orders/tpsl`, `POST /v1/orders/tpsl/cancel`. The former enum-encoding blocker was resolved by verifying against the official `risex` Python SDK (0.10.0, PyPI): the `PlaceTpslOrder`/`CancelTpslOrder` EIP-712 type strings match the local SDK copy, and the endpoint requires a **65-byte `r||s||v` base64 signature** (the 64-byte EIP-2098 compact form used inside permits is rejected with `invalid signature length: expected 65 bytes`) — see `signDigestToStandardBase64` in `apps/bot/src/exchanges/risex/sdk/signing/helpers.ts`.
 
 ### Extended
+
 - Implemented: market metadata, executable BBO, available margin, fees, Stark domain, signed `LIMIT` / `MARKET` / `TPSL`, order lookup, cancel, position lookup.
 - Verified by: `apps/bot/test/extended-execution.test.ts`.
 - Compatibility fallback: `/api/v1/user/balance` HTTP 404 is normalized to zero balance.
 
 ## Guardrails
+
 - Both integrations stay exchange-flag disabled by default.
 - No code may invent undocumented exchange mutation endpoints.
 - Any new mutation path must be backed by official docs or official reference code plus mocked signature/HTTP tests.

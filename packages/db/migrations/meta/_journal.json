@@ -15,6 +15,13 @@
       "when": 1785826877575,
       "tag": "0001_open_trade_execution",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1785826877576,
+      "tag": "0002_fix_timestamp_defaults",
+      "breakpoints": true
     }
   ]
 }

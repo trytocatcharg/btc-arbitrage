@@ -15,9 +15,9 @@ import {
 import { DbPreviewStore } from "../trading/db-preview-store.js";
 import {
   OpenTradeService,
+  type ConfirmOutcome,
   type OpenTradePreview,
 } from "../trading/open-trade.js";
-import { JsonFileLogger } from "../logging/json-file-logger.js";
 
 export interface TelegramUpdate {
   update_id: number;
@@ -66,10 +66,6 @@ const AVAILABLE_COMMANDS = [
     description: "Show open trade summary",
   },
 ] as const;
-
-const telegramCommandLogger = new JsonFileLogger(
-  "logs/telegram-commands.jsonl",
-);
 
 export class TelegramCommandPoller {
   private offset = 0;
@@ -226,12 +222,6 @@ export class TelegramCommandPoller {
       return;
     const data = callback.data ?? "";
     try {
-      await telegramCommandLogger.write({
-        timestamp: new Date().toISOString(),
-        event: "telegram_callback_received",
-        callbackId: callback.id,
-        data,
-      });
       if (data.startsWith("open:")) {
         const signalId = Number(data.slice(5));
         const signal = (
@@ -239,6 +229,9 @@ export class TelegramCommandPoller {
         )[0];
         if (!signal) throw new Error("Signal no longer exists");
         const service = this.openTradeService();
+        // One-click open: the preview is created and immediately confirmed.
+        // There is no operator confirmation step anymore (see the commented
+        // "confirm:" branch below for the old two-step flow).
         const preview = await service.createPreview({
           signalId,
           symbol: this.config.btcSymbol,
@@ -248,51 +241,23 @@ export class TelegramCommandPoller {
             signal.shortExchange as BotConfig["exchangeA"],
           ],
         });
-        await telegramCommandLogger.write({
-          timestamp: new Date().toISOString(),
-          event: "telegram_open_preview_sent",
-          callbackId: callback.id,
-          signalId,
-          token: preview.token,
-          longExchange: preview.longExchange,
-          shortExchange: preview.shortExchange,
-          quantityBase: preview.quantityBase,
-        });
-        await this.sendMessage(
-          `Trade preview\nLong: ${preview.longExchange} @ $${preview.longPriceUsd}\nShort: ${preview.shortExchange} @ $${preview.shortPriceUsd}\nQuantity: ${preview.quantityBase} BTC\nExpires: ${preview.expiresAt.toISOString()}`,
-          {
-            inline_keyboard: [
-              [
-                { text: "Confirm", callback_data: `confirm:${preview.token}` },
-                { text: "Cancel", callback_data: `cancel:${preview.token}` },
-              ],
-            ],
-          },
-        );
-      } else if (data.startsWith("confirm:")) {
-        const token = data.slice(8);
         const messageId = callback.message?.message_id;
-        await telegramCommandLogger.write({
-          timestamp: new Date().toISOString(),
-          event: "telegram_confirm_requested",
-          callbackId: callback.id,
-          token,
-        });
         if (typeof messageId === "number") {
           await this.editMessageText(
             messageId,
-            `⏳ Confirming trade ${token.slice(0, 8)}...\n` +
+            `⏳ Opening trade ${preview.token.slice(0, 8)}...\n` +
               "Executing limit entry + hedge + TP/SL. " +
               `This can take up to ~${Math.round(this.config.openTrade.limitTimeoutMs / 1000)}s.`,
           ).catch((error: unknown) => {
-            console.warn("Telegram confirming edit failed", {
+            console.warn("Telegram opening edit failed", {
               messageId,
               message: error instanceof Error ? error.message : String(error),
             });
           });
         }
+        let confirmOutcome;
         try {
-          await this.openTradeService().confirm(token);
+          confirmOutcome = await service.confirm(preview.token);
         } catch (confirmError) {
           const confirmMessage =
             confirmError instanceof Error
@@ -311,41 +276,68 @@ export class TelegramCommandPoller {
           }
           throw confirmError;
         }
-        await telegramCommandLogger.write({
-          timestamp: new Date().toISOString(),
-          event: "telegram_confirm_completed",
-          callbackId: callback.id,
-          token,
-        });
-        const fillSummary = await this.buildFillSummary(token);
+        await this.reportTradeOutcome(preview.token, messageId, confirmOutcome);
+      } else if (data.startsWith("confirm:")) {
+        /*
+         * CONFIRMATION STEP DISABLED (requested 2026-09-16): trades now open
+         * directly from the "Open Trade" button — the preview created in the
+         * "open:" branch is confirmed immediately, and the outcome is
+         * reported by reportTradeOutcome(). This branch is kept commented
+         * for an easy revert to the two-step flow. Note: Confirm buttons on
+         * messages sent before this change become no-ops.
+         *
+        const token = data.slice(8);
+        const messageId = callback.message?.message_id;
         if (typeof messageId === "number") {
-          await this.deleteMessage(messageId).catch((error: unknown) => {
-            console.warn("Telegram confirm message delete failed", {
+          await this.editMessageText(
+            messageId,
+            `⏳ Confirming trade ${token.slice(0, 8)}...\n` +
+              "Executing limit entry + hedge + TP/SL. " +
+              `This can take up to ~${Math.round(this.config.openTrade.limitTimeoutMs / 1000)}s.`,
+          ).catch((error: unknown) => {
+            console.warn("Telegram confirming edit failed", {
               messageId,
               message: error instanceof Error ? error.message : String(error),
             });
           });
         }
-        await this.sendMessage(fillSummary);
+        let confirmOutcome;
+        try {
+          confirmOutcome = await this.openTradeService().confirm(token);
+        } catch (confirmError) {
+          const confirmMessage =
+            confirmError instanceof Error
+              ? confirmError.message
+              : "Trade execution failed";
+          if (typeof messageId === "number") {
+            await this.editMessageText(
+              messageId,
+              `❌ Trade failed: ${confirmMessage}`,
+            ).catch((error: unknown) => {
+              console.warn("Telegram failure edit failed", {
+                messageId,
+                message: error instanceof Error ? error.message : String(error),
+              });
+            });
+          }
+          throw confirmError;
+        }
+        await this.reportTradeOutcome(token, messageId, confirmOutcome);
+        */
       } else if (data.startsWith("cancel:")) {
+        /*
+         * CANCEL STEP DISABLED together with the confirmation preview: there
+         * is no preview message with Confirm/Cancel buttons anymore, so
+         * there is nothing to cancel at this point. Kept commented for an
+         * easy revert together with the "confirm:" branch above.
+         *
         const token = data.slice(7);
-        await telegramCommandLogger.write({
-          timestamp: new Date().toISOString(),
-          event: "telegram_cancel_requested",
-          callbackId: callback.id,
-          token,
-        });
         await new DbPreviewStore(this.db).transition(token, "cancelled");
         if (typeof callback.message?.message_id === "number")
           await this.deleteMessage(callback.message.message_id);
+        */
       } else if (data.startsWith("retrade:")) {
         const token = data.slice(8);
-        await telegramCommandLogger.write({
-          timestamp: new Date().toISOString(),
-          event: "telegram_retrade_requested",
-          callbackId: callback.id,
-          token,
-        });
         const row = (
           await this.db
             .select()
@@ -357,14 +349,22 @@ export class TelegramCommandPoller {
         // SAFETY: the payload JSON column was written by createPreview()
         // from a verified OpenTradePreview object; shape is invariant.
         const preview = row.payload as unknown as OpenTradePreview;
-        await this.openTradeService().retryEntry(preview);
-        await telegramCommandLogger.write({
-          timestamp: new Date().toISOString(),
-          event: "telegram_retrade_completed",
-          callbackId: callback.id,
-          token,
-        });
-        await this.sendMessage(`Retry started for limit order ${token}.`);
+        const retryOutcome = await this.openTradeService().retryEntry(preview);
+        if (retryOutcome?.outcome === "opened") {
+          // The retried limit entry filled; report the open exactly like a
+          // first-attempt confirm would.
+          await this.sendMessage(await this.buildFillSummary(token));
+        } else if (retryOutcome?.outcome === "edge_closed") {
+          await this.sendMessage(this.formatEdgeClosedNotice(retryOutcome));
+        } else if (retryOutcome?.outcome === "cancelled") {
+          // The repeated timeout prompt (with a fresh retry button) was
+          // already sent by notifyLimitTimeout; nothing else to report.
+        } else {
+          await this.sendMessage(
+            `❌ Retry ${token.slice(0, 8)} terminó sin un resultado ` +
+              `definido. Revisá los logs antes de asumir que abrió.`,
+          );
+        }
       }
       await this.answerCallback(callback.id);
     } catch (error) {
@@ -374,13 +374,6 @@ export class TelegramCommandPoller {
         callbackId: callback.id,
         data,
         message,
-      });
-      await telegramCommandLogger.write({
-        timestamp: new Date().toISOString(),
-        event: "telegram_callback_failed",
-        callbackId: callback.id,
-        data,
-        error: message,
       });
       await this.answerCallback(callback.id, message);
     }
@@ -399,6 +392,7 @@ export class TelegramCommandPoller {
         this.config.openTrade.residualDeltaToleranceBase,
       takeProfitPercent: this.config.openTrade.takeProfitPercent,
       stopLossPercent: this.config.openTrade.stopLossPercent,
+      edgeMinProfitUsd: this.config.openTrade.edgeMinProfitUsd,
       notifyUrgent: (text) => this.sendMessage(text),
       notifyLimitTimeout: async ({ token, message }) => {
         await this.sendMessage(message, {
@@ -410,11 +404,6 @@ export class TelegramCommandPoller {
               },
             ],
           ],
-        });
-        await telegramCommandLogger.write({
-          timestamp: new Date().toISOString(),
-          event: "telegram_limit_timeout_prompt_sent",
-          token,
         });
       },
       fees: {
@@ -487,6 +476,88 @@ export class TelegramCommandPoller {
         `Telegram editMessageText failed with HTTP ${response.status}`,
       );
   }
+  private async reportTradeOutcome(
+    token: string,
+    messageId: number | undefined,
+    confirmOutcome: ConfirmOutcome | undefined,
+  ): Promise<void> {
+    if (confirmOutcome?.outcome === "edge_closed") {
+      // Both fills completed but the captured spread no longer covered
+      // exit cost + minimum profit; the legs were closed at market.
+      if (typeof messageId === "number") {
+        await this.editMessageText(
+          messageId,
+          this.formatEdgeClosedNotice(confirmOutcome),
+        ).catch((error: unknown) => {
+          console.warn("Telegram edge-close edit failed", {
+            messageId,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }
+    } else if (confirmOutcome?.outcome === "cancelled") {
+      // The passive limit entry never filled and the trade was
+      // cancelled without opening any position. The retry prompt with
+      // the "Reintentar orden limit" button was already sent by
+      // notifyLimitTimeout; reflect the real state on the trigger
+      // message instead of reporting a successful open.
+      if (typeof messageId === "number") {
+        await this.editMessageText(
+          messageId,
+          `⏱ Trade no abierto (${token.slice(0, 8)}): la orden ` +
+            `límite expiró sin fill y el trade quedó cancelado. ` +
+            `Usá "Reintentar orden limit" para intentarlo de nuevo.`,
+        ).catch((error: unknown) => {
+          console.warn("Telegram cancel-timeout edit failed", {
+            messageId,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }
+    } else if (confirmOutcome?.outcome === "opened") {
+      const fillSummary = await this.buildFillSummary(token);
+      if (typeof messageId === "number") {
+        await this.deleteMessage(messageId).catch((error: unknown) => {
+          console.warn("Telegram confirm message delete failed", {
+            messageId,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }
+      await this.sendMessage(fillSummary);
+    } else if (typeof messageId === "number") {
+      // confirm() resolved without an outcome; never report success
+      // without an explicit opened result.
+      await this.editMessageText(
+        messageId,
+        `❌ Trade ${token.slice(0, 8)} terminó sin un resultado ` +
+          `definido. Revisá los logs antes de asumir que abrió.`,
+      ).catch((error: unknown) => {
+        console.warn("Telegram unknown-outcome edit failed", {
+          messageId,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
+  }
+
+  private formatEdgeClosedNotice(confirmOutcome: {
+    realizedPnlUsd: string | null;
+    capturedSpreadUsd: number;
+    minEdgeUsd: number;
+  }): string {
+    const pnlText =
+      confirmOutcome.realizedPnlUsd == null
+        ? "n/a"
+        : `$${Number(confirmOutcome.realizedPnlUsd).toFixed(2)}`;
+    return (
+      `⚖️ Edge insuficiente al llenar: spread capturado ` +
+      `$${confirmOutcome.capturedSpreadUsd.toFixed(2)} vs mínimo ` +
+      `$${confirmOutcome.minEdgeUsd.toFixed(2)}. Ambas patas ` +
+      `cerradas al momento. PnL realizado: ${pnlText}.`
+    );
+  }
+
   private async buildFillSummary(token: string): Promise<string> {
     const previewRow = (
       await this.db
@@ -554,7 +625,9 @@ export function formatActiveConfigSummary(config: BotConfig): string {
     `Leverage: ${config.leverage}x`,
     `Mode: ${config.botExecutionMode}`,
     `Order placement: ${config.enableOrderPlacement ? "enabled" : "disabled"}`,
-    `Open trade TP/SL: +${config.openTrade.takeProfitPercent}% / -${config.openTrade.stopLossPercent}%`,
+    `Open trade TP/SL (venue backstop): +${config.openTrade.takeProfitPercent}% / -${config.openTrade.stopLossPercent}%`,
+    `Spread exit: TP +$${config.openTrade.spreadTpUsd} / SL -$${config.openTrade.spreadSlUsd} / timeout ${config.openTrade.spreadExitTimeoutMinutes}m`,
+    `Min edge to keep trade: exit cost + $${config.openTrade.edgeMinProfitUsd}`,
     `Telegram cooldown: ${config.telegram.alertCooldownMs} ms`,
     "",
     formatExchangeLine("Exchange A", config.exchangeA, config),

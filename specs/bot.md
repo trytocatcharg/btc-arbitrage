@@ -128,7 +128,11 @@ When confirmed:
 3. run preflight on both exchanges,
 4. place the maker leg as **limit**,
 5. hedge any filled quantity on the opposite exchange with **market**,
-6. if covered quantity exists, place TP/SL protection on both legs.
+6. evaluate the captured edge (see below); if the remaining convergence does
+   not cover exit cost + minimum profit, close both legs immediately at market
+   and stop (Telegram shows an `⚖️ Edge insuficiente` message),
+7. if covered quantity exists and the edge is kept, place TP/SL protection on
+   both legs (venue-side backstop).
 
 Protection percentages are configurable from env:
 
@@ -143,8 +147,9 @@ Protection percentages are configurable from env:
 - `taker = market order`
 - The maker leg no longer uses the stale preview price.
 - At confirm time it recalculates a **fresh passive limit** from live BBO:
-  - buy -> current `bid`
-  - sell -> current `ask`
+  - buy -> `best bid + OPEN_TRADE_ENTRY_IMPROVE_TICKS × tick` (only while strictly below the ask, else join best bid)
+  - sell -> `best ask − OPEN_TRADE_ENTRY_IMPROVE_TICKS × tick` (only while strictly above the bid, else join best ask)
+- `OPEN_TRADE_ENTRY_IMPROVE_TICKS=0` restores the legacy join-best behavior. The same improved pricing is used when repricing, so the resting order is not needlessly cancelled.
 - If RISEx rejects with `PostOnlyOrderMatched()`, the bot retries the passive limit automatically.
 - While the maker leg rests, the bot reprices it every `OPEN_TRADE_REPRICE_INTERVAL_MS` (default 2000 ms; 0 disables): if the top of the book moved, the resting order is cancelled and re-submitted post-only at the new best bid (buy) / ask (sell). Partial fills are settled first and the remainder is re-submitted; the TP/SL anchor uses the fill-weighted average price across all resting orders.
 
@@ -180,6 +185,43 @@ Implemented live capabilities include:
 - available margin,
 - Stark signing context loading.
 
+## Spread-based exits and edge validation
+
+Implemented in:
+
+- `apps/bot/src/trading/spread-exit-monitor.ts`
+- `apps/bot/src/trading/trade-close.ts`
+
+The venue-side ±3% TP/SL orders are a **catastrophic backstop only**. The
+primary exit expresses the actual strategy (spread convergence) in spread
+terms:
+
+- Every tick, for each `open` trade, the bot computes the live spread
+  (long venue price − short venue price, same price source as the signal
+  engine) and compares it to the spread captured at the fills
+  (long leg `entry_price_usd` − short leg `entry_price_usd`).
+- `move = liveSpread − capturedSpread`; position PnL is `qty × move`.
+- Closes both legs (reduce-only market, venue TP/SL cancelled first) when:
+  - `move ≥ OPEN_TRADE_SPREAD_TP_USD` (default 60) — `spread_tp`,
+  - `move ≤ −OPEN_TRADE_SPREAD_SL_USD` (default 25) — `spread_sl`,
+  - the trade has been open for `OPEN_TRADE_SPREAD_EXIT_TIMEOUT_MINUTES`
+    (default 30) — `spread_timeout`.
+- Closure persists per-leg exit prices and realized PnL, the trade-level
+  realized PnL, and the exit spread; Telegram gets a `📕 Trade #N closed
+  (reason)` message with the PnL.
+
+Right after both fills complete (before protection is placed), the captured
+edge is validated:
+
+- `remainingEdge = max(0, −capturedSpread)` (the convergence still left).
+- `exitCost = refPrice × (takerLong + takerShort + 2bps slippage) / 10⁴`.
+- The trade is kept only if `remainingEdge ≥ exitCost + OPEN_TRADE_EDGE_MIN_PROFIT_USD`
+  (default 10). Otherwise both legs close immediately (`edge_below_cost`).
+
+Note: with RISEx taker 3bps + Extended taker 2.5bps, exit cost is ≈ $43 per
+BTC of spread at $78k, so the edge minimum exceeds `MIN_PRICE_DIFF_USD=40` —
+most trades are edge-closed at fill until the signal threshold is raised.
+
 ## Trade monitoring
 
 Implemented in:
@@ -192,25 +234,11 @@ Close reasons are best-effort and depend on each exchange adapter.
 
 ## Logging and observability
 
-Important JSONL logs:
+The bot does not write JSONL log files. Observability is provided by:
 
-- `apps/bot/logs/risex-http.jsonl`
-- `apps/bot/logs/extended-http.jsonl`
-- `apps/bot/logs/open-trade.jsonl`
-- `apps/bot/logs/telegram-commands.jsonl`
-
-These logs trace:
-
-- exchange HTTP traffic,
-- Telegram callbacks,
-- preview creation,
-- confirm flow,
-- preflight,
-- maker submission,
-- hedge submission,
-- protection submission,
-- rollback attempts,
-- confirmation failures.
+- structured `console` output (bot log level via `LOG_LEVEL`),
+- the `events` table in MariaDB (persisted bot events),
+- Telegram notifications for operator-facing trade state changes.
 
 ## Guardrails
 

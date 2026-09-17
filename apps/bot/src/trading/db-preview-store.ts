@@ -15,9 +15,6 @@ import type {
   TransitionDetails,
 } from "./open-trade.js";
 import { extractAffectedRows, extractInsertId } from "../db-result.js";
-import { JsonFileLogger } from "../logging/json-file-logger.js";
-
-const dbPreviewLogger = new JsonFileLogger("logs/open-trade.jsonl");
 
 export class DbPreviewStore implements PreviewStore {
   constructor(private readonly db: Awaited<ReturnType<typeof getDb>>) {}
@@ -113,25 +110,8 @@ export class DbPreviewStore implements PreviewStore {
         tradeId = Number(fallback[0]?.id ?? 0);
       }
       if (!tradeId) {
-        await dbPreviewLogger.write({
-          timestamp: new Date().toISOString(),
-          event: "open_trade_db_trade_create_failed",
-          token: preview.token,
-          signalId: preview.signalId,
-          symbol: preview.symbol,
-          longExchange: preview.longExchange,
-          shortExchange: preview.shortExchange,
-          entrySpreadUsd: row.entrySpreadUsd,
-        });
         throw new Error("Failed to create trade");
       }
-      await dbPreviewLogger.write({
-        timestamp: new Date().toISOString(),
-        event: "open_trade_db_trade_created",
-        token: preview.token,
-        signalId: preview.signalId,
-        tradeId,
-      });
       await tx.insert(tradeLegs).values([
         {
           tradeId,
@@ -191,13 +171,6 @@ export class DbPreviewStore implements PreviewStore {
         .update(tradeLegs)
         .set({ quantityBase: preview.quantityBase })
         .where(eq(tradeLegs.tradeId, row.tradeId));
-      await dbPreviewLogger.write({
-        timestamp: new Date().toISOString(),
-        event: "open_trade_reactivated",
-        token: preview.token,
-        tradeId: row.tradeId,
-        quantityBase: preview.quantityBase,
-      });
     });
   }
   async claimRollback(token: string): Promise<boolean> {
@@ -246,13 +219,6 @@ export class DbPreviewStore implements PreviewStore {
       .where(eq(tradePreviews.token, token));
     const tradeId = previewRows[0]?.tradeId;
     if (!tradeId) {
-      await dbPreviewLogger.write({
-        timestamp: now.toISOString(),
-        event: "open_trade_transition_without_trade",
-        token,
-        state,
-        details,
-      });
       return;
     }
     await this.db.transaction(async (tx) => {
@@ -266,7 +232,12 @@ export class DbPreviewStore implements PreviewStore {
         updatedAt: now,
       };
       if (state === "open" && !tradeRows[0]?.openedAt) tradeSet.openedAt = now;
-      if (state === "cancelled" || state === "failed") tradeSet.closedAt = now;
+      if (state === "cancelled" || state === "failed" || state === "closed")
+        tradeSet.closedAt = now;
+      if (typeof details?.realizedPnlUsd === "string")
+        tradeSet.realizedPnlUsd = details.realizedPnlUsd;
+      if (typeof details?.exitSpreadUsd === "string")
+        tradeSet.exitSpreadUsd = details.exitSpreadUsd;
       await tx.update(trades).set(tradeSet).where(eq(trades.id, tradeId));
       await tx.insert(tradeStatusHistory).values({
         tradeId,
@@ -295,6 +266,8 @@ export class DbPreviewStore implements PreviewStore {
           legSet.entryPriceUsd = leg.entryPriceUsd;
         if (leg.exitPriceUsd !== undefined)
           legSet.exitPriceUsd = leg.exitPriceUsd;
+        if (leg.realizedPnlUsd !== undefined)
+          legSet.realizedPnlUsd = leg.realizedPnlUsd;
         if (leg.closeReason !== undefined) legSet.closeReason = leg.closeReason;
         if (leg.raw !== undefined) legSet.raw = leg.raw;
         await tx
