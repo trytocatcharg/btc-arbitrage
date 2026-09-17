@@ -197,3 +197,15 @@ Environment side effects (all reverted/completed): `.env` temporarily stripped o
 
 PR2 authored ≈ 800 net lines across 10 source files + 2 docs — the user-accepted size exception for the PR2 group
 (single branch, one merge). No commit made (parent commits after verification).
+
+---
+
+## PR3 — Backend volume-stats endpoint + web panel (implementation complete; runtime evidence pending DB server recovery)
+
+- Applied by: sdd-apply (stalled mid-run after typecheck+build green; parent completed audit, checkbox marking, and evidence collection).
+- Code audit (parent-verified, file:line): `server.ts:35` GET-only route with constructor-injected `VolumeStatsService` (no mutation routes in the file); `volume-stats-normalizers.ts` emits design-D7 DTO (ISO `generatedAt`, `formatDecimal` string decimals, 24h/7d/30d windows); `apps/web/src/features/dashboard/volume-stats.ts` reuses `getBackendApiBaseUrl()`; `FarmedVolumePanel.tsx` renders explicit "$0.00 farmed" empty state with MetricCard lifetime/24h/7d/30d; `Dashboard.tsx` integrates via `Promise.allSettled` with independent loading/error state.
+- Tasks marked: 3.1, 3.2, 3.3, 3.5, 3.6, 3.7 (code-complete). Open: 3.4, 3.8 (require seeded-DB endpoint evidence).
+- Verification so far: `yarn typecheck` green; root `yarn build` green (all workspaces incl. web bundle).
+- 🔴 pi-lens rootDir diagnostics on `volume-stats-service.ts` marked FALSE-POSITIVE: the repo's authoritative `tsc -b` build passes (project references to composite `packages/db`, identical to the `apps/bot` pattern); the LSP checker does not model build-mode project-reference redirection.
+- Incident: the dev MariaDB server (192.168.1.133) is wedged — a `DROP DATABASE` from the stalled apply subagent has been stuck in "closing tables" >40 min, serializing everything behind the query cache lock. KILL flags are registered but the thread cannot unwind. Server restart required on the host; leftover scratch DBs to clean post-restart: `btc_arbitrage_pr3_verify`, `btc_arbitrage_pr3_empty`, `scratch_vol_stats_pr3`.
+- Evidence pending after DB recovery: seeded lifetime/per-venue/24h/7d/30d sums + empty-state zeros (script ready, uses a fresh scratch DB, then dropped).

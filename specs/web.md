@@ -11,6 +11,8 @@ It visualizes balances and open-operation style information, but it does **not**
 - Entry point: `apps/web/src/main.tsx`
 - Main screen: `apps/web/src/features/dashboard/Dashboard.tsx`
 - Balance fetcher: `apps/web/src/features/dashboard/exchange-balances.ts`
+- Farmed-volume fetcher: `apps/web/src/features/dashboard/volume-stats.ts`
+- Farmed-volume panel: `apps/web/src/features/dashboard/components/FarmedVolumePanel.tsx`
 
 The web app is a Vite + React application with Tailwind CSS v4.
 
@@ -41,6 +43,18 @@ It renders cards for:
 
 If the backend call fails, the UI shows a visible error state.
 
+### 2b. Show farmed volume
+
+The dashboard polls `GET /api/trades/volume-stats` on the same 30-second
+refresh as balances (one effect, `Promise.allSettled`, independent
+loading/error state), so a backend outage degrades to balances-only.
+
+The farmed-volume panel (`FarmedVolumePanel`) shows the lifetime total, the
+trailing 24h / 7d / 30d totals, and the per-venue breakdown. When the
+database holds zeros (dry-run / pre-fill) the panel renders an explicit
+"$0.00 farmed" empty state — never an error. The panel is read-only: no
+exchange signing, no credential handling, no mutating calls.
+
 ### 3. Show open operations section
 
 Current behavior:
@@ -59,6 +73,7 @@ Implemented:
 - execution-mode header,
 - RISEx balance card,
 - Extended balance card,
+- farmed-volume panel,
 - open operations,
 - net open PnL summary,
 - placeholder historical operations section.

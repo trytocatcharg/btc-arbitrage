@@ -1,8 +1,14 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
 import type { BackendConfig } from './config.js';
 import type { BalanceService } from './exchanges/balance-service.js';
+import { createVolumeStatsService, type VolumeStatsService } from './exchanges/volume-stats-service.js';
+import { normalizeVolumeStats } from './exchanges/volume-stats-normalizers.js';
 
-export function createBackendApp(config: BackendConfig, balances: BalanceService) {
+export function createBackendApp(
+  config: BackendConfig,
+  balances: BalanceService,
+  volumeStats: VolumeStatsService = createVolumeStatsService()
+) {
   const app = express();
   app.disable('x-powered-by');
 
@@ -23,6 +29,11 @@ export function createBackendApp(config: BackendConfig, balances: BalanceService
 
   app.get('/api/exchanges/extended/balance', asyncHandler(async (_request, response) => {
     response.json(await balances.getExtendedBalance());
+  }));
+
+  // Read-only farmed-volume aggregation over the bot database (volume-stats-api spec).
+  app.get('/api/trades/volume-stats', asyncHandler(async (_request, response) => {
+    response.json(normalizeVolumeStats(await volumeStats.getVolumeStats()));
   }));
 
   app.use((_request, response) => {

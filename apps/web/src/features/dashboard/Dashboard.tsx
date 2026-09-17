@@ -7,6 +7,8 @@ import { MetricCard } from './components/MetricCard.js';
 import { OperationCard } from './components/OperationCard.js';
 import { formatNullableUsd, formatSignedUsd } from './dashboard-formatters.js';
 import { fetchExchangeBalances, findExchangeBalance, type ExchangeBalancesState } from './exchange-balances.js';
+import { fetchVolumeStats, type VolumeStatsState } from './volume-stats.js';
+import { FarmedVolumePanel } from './components/FarmedVolumePanel.js';
 import { calculateOperationPnl } from './operations.js';
 
 const executionMode = getExecutionMode();
@@ -20,32 +22,57 @@ export const Dashboard: FC = () => {
     total: null
   });
 
+  const [volumeStats, setVolumeStats] = useState<VolumeStatsState>({
+    loading: true
+  });
+
   useEffect(() => {
     let isMounted = true;
 
-    const refreshBalances = async () => {
-      try {
-        const response = await fetchExchangeBalances();
-        if (!isMounted) return;
+    const refreshDashboard = async () => {
+      const [balancesResult, volumeStatsResult] = await Promise.allSettled([
+        fetchExchangeBalances(),
+        fetchVolumeStats()
+      ]);
+      if (!isMounted) return;
+
+      if (balancesResult.status === 'fulfilled') {
         setExchangeBalances({
-          balances: response.balances,
-          generatedAt: response.generatedAt,
+          balances: balancesResult.value.balances,
+          generatedAt: balancesResult.value.generatedAt,
           loading: false,
-          total: response.total
+          total: balancesResult.value.total
         });
-      } catch (error: unknown) {
-        if (!isMounted) return;
+      } else {
         setExchangeBalances({
           balances: [],
           loading: false,
           total: null,
-          error: error instanceof Error ? error.message : 'Could not load exchange balances'
+          error: balancesResult.reason instanceof Error
+            ? balancesResult.reason.message
+            : 'Could not load exchange balances'
+        });
+      }
+
+      if (volumeStatsResult.status === 'fulfilled') {
+        setVolumeStats({
+          stats: volumeStatsResult.value,
+          loading: false
+        });
+      } else {
+        // Backend outage degrades to balances-only: the volume panel shows a
+        // muted note instead of failing the whole dashboard.
+        setVolumeStats({
+          loading: false,
+          error: volumeStatsResult.reason instanceof Error
+            ? volumeStatsResult.reason.message
+            : 'Could not load farmed volume'
         });
       }
     };
 
-    void refreshBalances();
-    const intervalId = window.setInterval(refreshBalances, 30_000);
+    void refreshDashboard();
+    const intervalId = window.setInterval(refreshDashboard, 30_000);
 
     return () => {
       isMounted = false;
@@ -87,7 +114,11 @@ export const Dashboard: FC = () => {
         </section>
       ) : null}
 
-      <section className="mt-6 grid gap-4 md:grid-cols-3">
+          <section className="mt-6">
+            <FarmedVolumePanel volumeStats={volumeStats} />
+          </section>
+
+          <section className="mt-6 grid gap-4 md:grid-cols-3">
         <MetricCard label="Open operations" value={String(openOperations.length)} />
         <MetricCard label="Net open PnL" value={formatSignedUsd(portfolioPnl)} tone={portfolioPnl >= 0 ? 'positive' : 'negative'} emphasis />
         <MetricCard label="History" value="Coming soon" />

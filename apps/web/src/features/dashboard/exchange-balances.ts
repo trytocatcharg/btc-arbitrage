@@ -28,7 +28,7 @@ export function findExchangeBalance(balances: ExchangeBalance[], exchangeId: Exc
   return balances.find((balance) => balance.exchangeId === exchangeId);
 }
 
-function getBackendApiBaseUrl(): string {
+export function getBackendApiBaseUrl(): string {
   const configuredBaseUrl = import.meta.env.VITE_BACKEND_API_BASE_URL?.trim();
   if (configuredBaseUrl) return configuredBaseUrl.replace(/\/$/, '');
 

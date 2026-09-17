@@ -27,6 +27,7 @@ Implemented routes:
 - `GET /api/exchanges/balances`
 - `GET /api/exchanges/risex/balance`
 - `GET /api/exchanges/extended/balance`
+- `GET /api/trades/volume-stats`
 
 There are no write endpoints.
 
@@ -45,7 +46,24 @@ The backend currently reads balances for:
 
 and returns normalized `ExchangeBalance` / `ExchangeBalancesResponse` payloads from `@btc-arbitrage/domain`.
 
-### 3. Error normalization
+### 3. Farmed-volume stats (read-only)
+
+`GET /api/trades/volume-stats` returns the DB-backed farmed trading volume
+(`volume-farming` / `volume-stats-api` specs):
+
+- lifetime total `sum(trades.filled_notional_usd)`,
+- per-venue lifetime totals `sum(trade_legs.filled_notional_usd) group by exchange_id`,
+- the same two aggregates for the trailing 24h / 7d / 30d windows, filtered on
+  `trades.updated_at` (a trade last written inside the window contributes its
+  cumulative volume to that window).
+
+The aggregation lives in `exchanges/volume-stats-service.ts` over the shared
+read-only DB handle (`getDb()`), with response normalization in
+`exchanges/volume-stats-normalizers.ts` (decimals as strings per the
+`formatDecimal` convention). The route performs no order placement and no
+exchange signing.
+
+### 4. Error normalization
 
 The backend converts exchange failures into safe public responses instead of leaking raw exchange internals to the UI.
 
@@ -87,3 +105,6 @@ The backend currently does **not**:
 - confirm Telegram trade previews,
 - mutate trade state,
 - expose historical trade APIs yet.
+
+The volume-stats endpoint is the only trade-data API; historical trade listing
+remains a non-goal.
