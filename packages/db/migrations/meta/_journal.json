@@ -22,6 +22,13 @@
       "when": 1785826877576,
       "tag": "0002_fix_timestamp_defaults",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "5",
+      "when": 1789648707392,
+      "tag": "0003_filled_notional_volume",
+      "breakpoints": true
     }
   ]
 }

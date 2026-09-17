@@ -111,16 +111,7 @@ export async function runPollingLoop(input: {
             [priceA.exchangeId, priceA.priceUsd],
             [priceB.exchangeId, priceB.priceUsd],
           ]),
-          spreadTpUsd: input.config.openTrade.spreadTpUsd,
-          spreadSlUsd: input.config.openTrade.spreadSlUsd,
           timeoutMinutes: input.config.openTrade.spreadExitTimeoutMinutes,
-          takerFeesBps: {
-            risex: input.config.openTrade.risexTakerFeeBps,
-            extended: input.config.openTrade.extendedTakerFeeBps,
-            arcus: "0",
-            variational: input.config.openTrade.variationalTakerFeeBps,
-          },
-          edgeMinProfitUsd: input.config.openTrade.edgeMinProfitUsd,
         });
       } catch (error) {
         console.error(

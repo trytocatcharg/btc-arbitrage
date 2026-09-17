@@ -392,7 +392,9 @@ export class TelegramCommandPoller {
         this.config.openTrade.residualDeltaToleranceBase,
       takeProfitPercent: this.config.openTrade.takeProfitPercent,
       stopLossPercent: this.config.openTrade.stopLossPercent,
-      edgeMinProfitUsd: this.config.openTrade.edgeMinProfitUsd,
+      minProfitUsd: this.config.openTrade.minProfitUsd,
+      maxLossUsd: this.config.openTrade.maxLossUsd,
+      slippageBps: this.config.openTrade.slippageBps,
       notifyUrgent: (text) => this.sendMessage(text),
       notifyLimitTimeout: async ({ token, message }) => {
         await this.sendMessage(message, {
@@ -626,8 +628,10 @@ export function formatActiveConfigSummary(config: BotConfig): string {
     `Mode: ${config.botExecutionMode}`,
     `Order placement: ${config.enableOrderPlacement ? "enabled" : "disabled"}`,
     `Open trade TP/SL (venue backstop): +${config.openTrade.takeProfitPercent}% / -${config.openTrade.stopLossPercent}%`,
-    `Spread exit: TP +$${config.openTrade.spreadTpUsd} / SL -$${config.openTrade.spreadSlUsd} / timeout ${config.openTrade.spreadExitTimeoutMinutes}m`,
-    `Min edge to keep trade: exit cost + $${config.openTrade.edgeMinProfitUsd}`,
+    `Time-stop: close open trades after ${config.openTrade.spreadExitTimeoutMinutes}m`,
+    `Edge band: keep trade if convergence ≥ exit cost + $${formatUsd(config.openTrade.minProfitUsd)}`,
+    `Edge abort max loss: $${formatUsd(config.openTrade.maxLossUsd)}`,
+    `Exit slippage: ${config.openTrade.slippageBps} bps`,
     `Telegram cooldown: ${config.telegram.alertCooldownMs} ms`,
     "",
     formatExchangeLine("Exchange A", config.exchangeA, config),

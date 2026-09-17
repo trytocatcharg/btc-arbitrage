@@ -116,6 +116,18 @@ export interface OpenTradeOptions {
    * closed immediately at market instead of placing TP/SL.
    * Defaults to DEFAULT_EDGE_MIN_PROFIT_USD. */
   edgeMinProfitUsd?: string;
+  /** Minimum expected convergence profit (USD) required to KEEP a trade
+   * right after both fills complete (OPEN_TRADE_MIN_PROFIT_USD, default
+   * "0.05"). Wired from config since adjust-tpsl-volume-farming PR1; consumed
+   * by the fee-aware edge band in PR2. */
+  minProfitUsd?: string;
+  /** Runtime assertion bound (USD) on the edge-abort path
+   * (OPEN_TRADE_MAX_LOSS_USD, default "0.25"); wired from config since PR1,
+   * consumed in PR2. */
+  maxLossUsd?: string;
+  /** Assumed exit slippage in basis points (OPEN_TRADE_SLIPPAGE_BPS,
+   * default "2"); wired from config since PR1, consumed in PR2. */
+  slippageBps?: string;
   fees: Record<ExchangeId, { makerBps: string; takerBps: string }>;
   notifyUrgent?: (text: string) => Promise<void>;
   notifyLimitTimeout?: (input: {

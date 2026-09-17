@@ -9,38 +9,24 @@ import type { ExchangeAdapter } from "@btc-arbitrage/exchange-core";
 import { parseDecimal } from "@btc-arbitrage/domain";
 import { closeTradeBothLegs } from "./trade-close.js";
 import { DbPreviewStore } from "./db-preview-store.js";
-import { evaluateCapturedEdge } from "./open-trade.js";
 import { extractAffectedRows } from "../db-result.js";
 
-/** Spread-based exit monitor (the primary take-profit/stop for open trades).
+/** Time-stop and recovery monitor for open trades.
  *
- * For every fully-open trade it compares the live spread (long venue price −
- * short venue price, same price source as the signal engine) against the
- * spread captured at the fills:
- *
- *   move = liveSpread − capturedSpread
- *
- * and closes both legs when move ≥ tpUsd (convergence captured), move ≤ −slUsd
- * (thesis broken), or the trade has been open longer than the time-stop. The
- * ±3% venue-side TP/SL orders remain as a catastrophic backstop only; this
- * monitor is what actually expresses the strategy.
- */
+ * Spread-USD exits were deleted by adjust-tpsl-volume-farming (PR1/1.5): the
+ * spread-USD comparisons and the per-tick captured-edge gate are gone. What
+ * remains: the stale-'closing' recovery sweep (close_recovery) and the
+ * time-stop (spread_timeout, OPEN_TRADE_SPREAD_EXIT_TIMEOUT_MINUTES,
+ * default 30 min). Live prices are still fetched per tick only to record the
+ * exit spread on a time-stop close. */
 export async function monitorSpreadExits(input: {
   db: Awaited<ReturnType<typeof getDb>>;
   registry: { get(id: string): ExchangeAdapter };
   notifier: { notifyUrgent: (text: string) => Promise<void> };
-  /** Latest price per exchange id (from the polling loop's snapshots). */
+  /** Latest price per exchange id (from the polling loop's snapshots), used
+   * only to record exitSpreadUsd on a time-stop close. */
   priceByExchange: Map<string, string>;
-  spreadTpUsd: string;
-  spreadSlUsd: string;
   timeoutMinutes: number;
-  /** Taker fee per exchange id (bps as string), used to re-evaluate the
-   * captured edge of open trades. */
-  takerFeesBps: Record<string, string>;
-  /** OPEN_TRADE_EDGE_MIN_PROFIT_USD. Trades whose captured edge does not
-   * cover exit cost + this minimum are held on the venue TP/SL backstop
-   * only: spread-based exits assume a healthy captured convergence. */
-  edgeMinProfitUsd: string;
   /** How long a trade may sit in 'closing' before the recovery sweep
    * re-runs its close. Defaults to 120 s (a close takes at most ~20 s). */
   closingStaleAfterMs?: number;
@@ -145,8 +131,6 @@ export async function monitorSpreadExits(input: {
     .where(eq(trades.status, "open"));
   if (openTrades.length === 0) return;
 
-  const tpUsd = parseDecimal(input.spreadTpUsd);
-  const slUsd = parseDecimal(input.spreadSlUsd);
   const timeoutMs = input.timeoutMinutes * 60_000;
   const now = Date.now();
 
@@ -162,74 +146,40 @@ export async function monitorSpreadExits(input: {
           ),
         );
       const longLeg = legs.find((leg) => leg.side === "long");
-      const shortLeg = legs.find((leg) => leg.side === "short");
-      if (
-        legs.length !== 2 ||
-        !longLeg?.entryPriceUsd ||
-        !shortLeg?.entryPriceUsd ||
-        !longLeg.quantityBase
-      )
-        continue;
+          const shortLeg = legs.find((leg) => leg.side === "short");
+          if (
+            legs.length !== 2 ||
+            !longLeg?.entryPriceUsd ||
+            !shortLeg?.entryPriceUsd ||
+            !longLeg.quantityBase
+          )
+            continue;
 
-      // Trades whose captured edge does not cover exit cost + minimum
-      // profit have no convergence thesis to defend (operator decision:
-      // they are held on the venue TP/SL backstop only). Spread-based
-      // exits reference the captured spread and would kill such trades
-      // almost immediately.
-      const edge = evaluateCapturedEdge({
-        longEntryUsd: longLeg.entryPriceUsd,
-        shortEntryUsd: shortLeg.entryPriceUsd,
-        longTakerFeeBps: input.takerFeesBps[trade.longExchange] ?? "0",
-        shortTakerFeeBps: input.takerFeesBps[trade.shortExchange] ?? "0",
-        minProfitUsd: input.edgeMinProfitUsd,
-      });
-      if (!edge.keepOpen) {
-        console.log(
-          "Spread exit skipped: edge below cost; venue TP/SL backstop only",
-          {
-            tradeId: trade.id,
-            capturedSpreadUsd: edge.capturedSpreadUsd,
-            remainingEdgeUsd: edge.remainingEdgeUsd,
-            exitCostUsd: edge.exitCostUsd,
-            minEdgeUsd: edge.minEdgeUsd,
-          },
-        );
-        continue;
-      }
+          const liveLong = input.priceByExchange.get(trade.longExchange);
+          const liveShort = input.priceByExchange.get(trade.shortExchange);
+          if (liveLong == null || liveShort == null) {
+            console.warn("Time-stop skipped: live price unavailable", {
+              tradeId: trade.id,
+              longExchange: trade.longExchange,
+              shortExchange: trade.shortExchange,
+            });
+            continue;
+          }
 
-      const liveLong = input.priceByExchange.get(trade.longExchange);
-      const liveShort = input.priceByExchange.get(trade.shortExchange);
-      if (liveLong == null || liveShort == null) {
-        console.warn("Spread exit skipped: live price unavailable", {
-          tradeId: trade.id,
-          longExchange: trade.longExchange,
-          shortExchange: trade.shortExchange,
-        });
-        continue;
-      }
+          const liveSpread = parseDecimal(liveLong) - parseDecimal(liveShort);
 
-      const capturedSpread =
-        parseDecimal(longLeg.entryPriceUsd) -
-        parseDecimal(shortLeg.entryPriceUsd);
-      const liveSpread = parseDecimal(liveLong) - parseDecimal(liveShort);
-      const move = liveSpread - capturedSpread;
-
-      let reason: "spread_tp" | "spread_sl" | "spread_timeout" | null = null;
-      if (move >= tpUsd) reason = "spread_tp";
-      else if (move <= -slUsd) reason = "spread_sl";
-      else if (trade.openedAt && now - trade.openedAt.getTime() >= timeoutMs)
-        reason = "spread_timeout";
-      if (!reason) {
-        console.log("Spread exit evaluated", {
-          tradeId: trade.id,
-          capturedSpreadUsd: capturedSpread,
-          liveSpreadUsd: liveSpread,
-          moveUsd: move,
-          tpUsd,
-          slUsd,
-        });
-        continue;
-      }
+          const timedOut =
+            trade.openedAt && now - trade.openedAt.getTime() >= timeoutMs;
+          if (!timedOut) {
+            console.log("Time-stop evaluated", {
+              tradeId: trade.id,
+              liveSpreadUsd: liveSpread,
+              openedAt: trade.openedAt,
+              timeoutMinutes: input.timeoutMinutes,
+            });
+            continue;
+          }
+          const reason: "spread_timeout" = "spread_timeout";
 
       // Claim the trade synchronously so a concurrent close (second bot
       // process, or a re-entrant tick) cannot double-fire the exit orders.
@@ -256,12 +206,10 @@ export async function monitorSpreadExits(input: {
         continue;
       }
 
-      console.warn("Spread exit triggered", {
+      console.warn("Time-stop triggered", {
         tradeId: trade.id,
         reason,
-        capturedSpreadUsd: capturedSpread,
         liveSpreadUsd: liveSpread,
-        moveUsd: move,
       });
       const longQty = longLeg.quantityBase;
       await closeTradeBothLegs({

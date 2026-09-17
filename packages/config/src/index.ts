@@ -42,22 +42,21 @@ export interface BotConfig {
     residualDeltaToleranceBase: string;
     takeProfitPercent: string;
     stopLossPercent: string;
-    /** Exit when the live spread (long venue price − short venue price)
-     * improves on the captured spread by at least this many USD.
-     * Spread-based exits replace the ±3% price-based venue TP/SL as the
-     * primary take-profit (those remain as catastrophic backstop only). */
-    spreadTpUsd: string;
-    /** Exit when the live spread degrades from the captured spread by at
-     * least this many USD (stop loss in spread terms). */
-    spreadSlUsd: string;
     /** Exit an open trade after this many minutes regardless of spread
      * (time-stop for a convergence thesis that stopped converging). */
     spreadExitTimeoutMinutes: number;
-    /** Minimum additional edge (USD of remaining spread convergence)
-     * required to KEEP a trade right after both fills complete. If the
-     * remaining edge is below exit cost (taker fees + slippage) plus this
-     * buffer, both legs are closed immediately at market. */
-    edgeMinProfitUsd: string;
+    /** Minimum expected convergence profit (USD) required to KEEP a trade
+     * right after both fills complete: keep iff expected convergence ≥
+     * round-trip breakeven (fees + slippage) + this buffer; otherwise both
+     * legs are closed immediately at market (`edge_below_cost`). */
+    minProfitUsd: string;
+    /** Runtime assertion bound (USD) for the edge-abort path: after an
+     * `edge_below_cost` close, |realizedPnlUsd| must not exceed this;
+     * exceedance logs an urgent fee-model-drift alert. */
+    maxLossUsd: string;
+    /** Assumed exit slippage (basis points) for the fill-time edge band
+     * computation. */
+    slippageBps: string;
     risexMakerFeeBps: string;
     risexTakerFeeBps: string;
     extendedMakerFeeBps: string;
@@ -112,6 +111,22 @@ export interface BotConfig {
 }
 
 export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
+  // Spread-USD exits were deleted by adjust-tpsl-volume-farming: these vars
+  // are rejected explicitly (there is no general unknown-var allowlist —
+  // containers inject arbitrary env). See .env.example for the replacement
+  // knobs (OPEN_TRADE_MIN_PROFIT_USD et al.).
+  const REMOVED_ENV_VARS = [
+    "OPEN_TRADE_SPREAD_TP_USD",
+    "OPEN_TRADE_SPREAD_SL_USD",
+    "OPEN_TRADE_EDGE_MIN_PROFIT_USD",
+  ] as const;
+  for (const key of REMOVED_ENV_VARS) {
+    if (env[key] !== undefined)
+      throw new Error(
+        `${key} was removed by adjust-tpsl-volume-farming; see .env.example (spread exits deleted / replaced by OPEN_TRADE_MIN_PROFIT_USD)`,
+      );
+  }
+
   const exchangeA = parseExchange(env.EXCHANGE_A ?? "risex", "EXCHANGE_A");
   const exchangeB = parseExchange(env.EXCHANGE_B ?? "extended", "EXCHANGE_B");
   if (exchangeA === exchangeB)
@@ -183,27 +198,27 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     "OPEN_TRADE_TAKE_PROFIT_PERCENT",
   );
   const openTradeStopLossPercent = parsePositiveDecimalString(
-    env.OPEN_TRADE_STOP_LOSS_PERCENT ?? "3",
+    env.OPEN_TRADE_STOP_LOSS_PERCENT ?? "2.5",
     "OPEN_TRADE_STOP_LOSS_PERCENT",
   );
   if (Number(openTradeStopLossPercent) >= 100) {
     throw new Error("OPEN_TRADE_STOP_LOSS_PERCENT must be less than 100");
   }
-  const spreadTpUsd = parsePositiveDecimalString(
-    env.OPEN_TRADE_SPREAD_TP_USD ?? "60",
-    "OPEN_TRADE_SPREAD_TP_USD",
-  );
-  const spreadSlUsd = parsePositiveDecimalString(
-    env.OPEN_TRADE_SPREAD_SL_USD ?? "25",
-    "OPEN_TRADE_SPREAD_SL_USD",
-  );
   const spreadExitTimeoutMinutes = parsePositiveInteger(
     env.OPEN_TRADE_SPREAD_EXIT_TIMEOUT_MINUTES ?? "30",
     "OPEN_TRADE_SPREAD_EXIT_TIMEOUT_MINUTES",
   );
-  const edgeMinProfitUsd = parseNonNegativeDecimalString(
-    env.OPEN_TRADE_EDGE_MIN_PROFIT_USD ?? "10",
-    "OPEN_TRADE_EDGE_MIN_PROFIT_USD",
+  const minProfitUsd = parseNonNegativeDecimalString(
+    env.OPEN_TRADE_MIN_PROFIT_USD ?? "0.05",
+    "OPEN_TRADE_MIN_PROFIT_USD",
+  );
+  const maxLossUsd = parsePositiveDecimalString(
+    env.OPEN_TRADE_MAX_LOSS_USD ?? "0.25",
+    "OPEN_TRADE_MAX_LOSS_USD",
+  );
+  const slippageBps = parseNonNegativeDecimalString(
+    env.OPEN_TRADE_SLIPPAGE_BPS ?? "2",
+    "OPEN_TRADE_SLIPPAGE_BPS",
   );
 
   return {
@@ -260,10 +275,10 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       ),
       takeProfitPercent: openTradeTakeProfitPercent,
       stopLossPercent: openTradeStopLossPercent,
-      spreadTpUsd,
-      spreadSlUsd,
       spreadExitTimeoutMinutes,
-      edgeMinProfitUsd,
+      minProfitUsd,
+      maxLossUsd,
+      slippageBps,
       risexMakerFeeBps: parseNonNegativeDecimalString(
         env.RISEX_MAKER_FEE_BPS ?? "1",
         "RISEX_MAKER_FEE_BPS",
