@@ -152,6 +152,11 @@ export async function closeTradeBothLegs(
   const legUpdates: TradeLegUpdate[] = [];
   let totalRealizedUsd = 0;
   let realizedKnown = true;
+  // Farmed-volume deltas (design D6): each leg's close fill increments
+  // filled_notional_usd by qty × exit price (ack fill price, else the
+  // position-derived exit price); unknown exit prices skip the increment.
+  let totalCloseVolumeUsd = 0;
+  let closeVolumeKnownLegs = 0;
   for (const close of closes) {
     const adapter = input.registry.get(close.leg.exchangeId).execution;
     let flat = false;
@@ -213,13 +218,21 @@ export async function closeTradeBothLegs(
     }
     if (!flat) outcomes.push(`${close.leg.exchangeId} NOT flat within timeout`);
 
-    const exit = exitPriceUsd ?? close.averageFillPriceUsd ?? null;
-    if (
-      !realizedPnlUsd &&
-      exit &&
-      close.leg.entryPriceUsd &&
-      close.leg.entryPriceUsd !== "0"
-    ) {
+        const exit = exitPriceUsd ?? close.averageFillPriceUsd ?? null;
+        const closeVolumeDeltaUsd =
+          exit != null
+            ? formatDecimal(parseDecimal(quantityBase) * parseDecimal(exit), 8)
+            : undefined;
+        if (closeVolumeDeltaUsd !== undefined) {
+          totalCloseVolumeUsd += parseDecimal(closeVolumeDeltaUsd);
+          closeVolumeKnownLegs += 1;
+        }
+        if (
+          !realizedPnlUsd &&
+          exit &&
+          close.leg.entryPriceUsd &&
+          close.leg.entryPriceUsd !== "0"
+        ) {
       const qty = parseDecimal(quantityBase);
       const sideMul = close.leg.side === "long" ? 1 : -1;
       const pnl =
@@ -241,6 +254,7 @@ export async function closeTradeBothLegs(
       exitOrderId: close.orderId,
       exitPriceUsd: exit ?? undefined,
       realizedPnlUsd: realizedPnlUsd ?? undefined,
+      filledNotionalUsdDelta: closeVolumeDeltaUsd,
     });
   }
 
@@ -248,21 +262,31 @@ export async function closeTradeBothLegs(
   //    keeps watching it; the position monitor still notifies on closure.
   //    A persist failure must not lose the close outcome: the pre-persisted
   //    'unhedged' legs + the stale-'closing' recovery sweep finish the job.
-  const residual = legUpdates.some((leg) => leg.status === "unhedged");
-  try {
-    await input.store.transition(
-      input.token,
-      residual ? "unhedged" : "closed",
-      {
-        closeReason: input.reason,
-        realizedPnlUsd: realizedKnown
-          ? formatDecimal(totalRealizedUsd, 8)
-          : undefined,
-        exitSpreadUsd: input.exitSpreadUsd,
-        legs: legUpdates,
-      },
-    );
-  } catch (error) {
+      const residual = legUpdates.some((leg) => leg.status === "unhedged");
+      let farmedVolumeUsd: string | null = null;
+      try {
+        await input.store.transition(
+          input.token,
+          residual ? "unhedged" : "closed",
+          {
+            closeReason: input.reason,
+            realizedPnlUsd: realizedKnown
+              ? formatDecimal(totalRealizedUsd, 8)
+              : undefined,
+            exitSpreadUsd: input.exitSpreadUsd,
+            filledNotionalUsdDelta:
+              closeVolumeKnownLegs > 0
+                ? formatDecimal(totalCloseVolumeUsd, 8)
+                : undefined,
+            legs: legUpdates,
+          },
+        );
+        // Cumulative farmed volume for the close notice (best-effort read
+        // after the increment committed).
+        farmedVolumeUsd = input.store.readFarmedVolumeUsd
+          ? await input.store.readFarmedVolumeUsd(input.token)
+          : null;
+      } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error("Trade close final persist failed", {
       token: input.token,
@@ -289,9 +313,13 @@ export async function closeTradeBothLegs(
   const pnlText = realizedKnown
     ? `${totalRealizedUsd >= 0 ? "+" : ""}$${totalRealizedUsd.toFixed(2)}`
     : "n/a (exit price unavailable)";
+  const farmedText =
+    farmedVolumeUsd != null
+      ? ` Farmed volume (cumulative): $${parseDecimal(farmedVolumeUsd).toFixed(2)}.`
+      : "";
   await input.notify(
     `📕 Trade ${label} closed (${input.reason}): ${outcomes.join("; ")}. ` +
-      `Realized PnL: ${pnlText}.`,
+      `Realized PnL: ${pnlText}.${farmedText}`,
   );
   return {
     realizedPnlUsd: realizedKnown ? formatDecimal(totalRealizedUsd, 8) : null,

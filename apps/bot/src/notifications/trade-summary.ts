@@ -1,4 +1,4 @@
-import { desc, inArray } from 'drizzle-orm';
+import { desc, inArray, sql } from 'drizzle-orm';
 import { getDb, tradeLegs, trades, openTradeStatuses } from '@btc-arbitrage/db';
 import type { ExchangeAdapter } from '@btc-arbitrage/exchange-core';
 import type { MarketType, PriceSource } from '@btc-arbitrage/domain';
@@ -49,9 +49,14 @@ interface QuoteSnapshot {
 }
 
 export async function buildTradeSummaryMessage(deps: TradeSummaryDependencies): Promise<string> {
+  const farmedVolume = await loadFarmedVolumeUsd(deps.db);
+  const farmedLines = [
+    `Farmed volume (DB, lifetime): ${formatUsd(farmedVolume.lifetimeUsd)}`,
+    `Farmed volume (DB, 24h): ${formatUsd(farmedVolume.last24hUsd)}`,
+  ];
   const activeTrades = await loadActiveTrades(deps.db);
   if (activeTrades.length === 0) {
-    return '📭 No active trades found.';
+    return ['📭 No active trades found.', ...farmedLines].join('\n');
   }
 
   const legsByTradeId = await loadTradeLegsByTradeId(deps.db, activeTrades.map((trade) => trade.id));
@@ -64,7 +69,23 @@ export async function buildTradeSummaryMessage(deps: TradeSummaryDependencies): 
     })
   );
 
-  return formatTradeSummaryMessage(summaries);
+  return formatTradeSummaryMessage(summaries, farmedLines);
+}
+
+/** DB-backed farmed volume (volume-farming spec): lifetime total plus the
+ * 24h trailing window pinned to trades.updatedAt (last fill activity). */
+async function loadFarmedVolumeUsd(db: BotDatabase): Promise<{ lifetimeUsd: number | null; last24hUsd: number | null }> {
+  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const rows = await db
+    .select({
+      lifetimeUsd: sql<string>`coalesce(sum(${trades.filledNotionalUsd}), 0)`,
+      last24hUsd: sql<string>`coalesce(sum(case when ${trades.updatedAt} >= ${cutoff} then ${trades.filledNotionalUsd} else 0 end), 0)`,
+    })
+    .from(trades);
+  return {
+    lifetimeUsd: toNumber(rows[0]?.lifetimeUsd),
+    last24hUsd: toNumber(rows[0]?.last24hUsd),
+  };
 }
 
 async function loadActiveTrades(db: BotDatabase): Promise<TradeRow[]> {
@@ -215,7 +236,7 @@ function resolveEntrySpreadUsd(trade: TradeRow, longLeg: TradeLegRow | undefined
   return shortEntry - longEntry;
 }
 
-function formatTradeSummaryMessage(summaries: ResolvedTradeSummary[]): string {
+function formatTradeSummaryMessage(summaries: ResolvedTradeSummary[], farmedLines: string[]): string {
   const globalEstimatedPnlUsd = summaries.reduce<number | null>((total, summary) => {
     if (summary.totalEstimatedPnlUsd == null) return total;
     return (total ?? 0) + summary.totalEstimatedPnlUsd;
@@ -224,6 +245,7 @@ function formatTradeSummaryMessage(summaries: ResolvedTradeSummary[]): string {
 
   lines.push(`Open trades: ${summaries.length}`);
   lines.push(`Global estimated PnL: ${formatPnl(globalEstimatedPnlUsd)}`);
+  lines.push(...farmedLines);
 
   for (const summary of summaries) {
     const spreadMoveUsd = summary.entrySpreadUsd != null && summary.liveSpreadUsd != null
@@ -256,7 +278,10 @@ function formatTradeSummaryMessage(summaries: ResolvedTradeSummary[]): string {
       lines.push(`Total qty: ${formatQty(totalQuantityBase)} BTC`);
     }
     if (totalNotionalUsd != null) {
-      lines.push(`Total notional: ${formatUsd(totalNotionalUsd)}`);
+      // Live-price estimate — explicitly labeled so it is never confused
+      // with the persisted farmed-volume lines above (Open Question 3:
+      // both are kept, labeled distinctly).
+      lines.push(`Total notional (live-price estimate): ${formatUsd(totalNotionalUsd)}`);
     }
 
     lines.push('');

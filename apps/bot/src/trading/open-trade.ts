@@ -10,6 +10,7 @@ import type {
   ExchangeAdapter,
   ExecutionAdapter,
 } from "@btc-arbitrage/exchange-core";
+import { closeTradeBothLegs } from "./trade-close.js";
 
 export type OpenTradeState =
   | "awaiting_confirmation"
@@ -69,12 +70,20 @@ export interface TradeLegUpdate {
   entryPriceUsd?: string;
   exitPriceUsd?: string;
   realizedPnlUsd?: string;
+  /** Monotonic farmed-volume increment (USD notional) applied with
+   * `coalesce(filled_notional_usd, 0) + delta` inside the transition's
+   * transaction. */
+  filledNotionalUsdDelta?: string;
   closeReason?: string;
   raw?: Record<string, unknown>;
 }
 export interface TransitionDetails {
   error?: string;
   closeReason?: string;
+  /** Trade-level farmed-volume increment (USD notional), applied with
+   * `coalesce(filled_notional_usd, 0) + delta` inside the transition's
+   * transaction. */
+  filledNotionalUsdDelta?: string;
   legs?: TradeLegUpdate[];
   [key: string]: unknown;
 }
@@ -89,6 +98,9 @@ export interface PreviewStore {
     state: OpenTradeState,
     details?: TransitionDetails,
   ): Promise<void>;
+  /** Reads the trade's cumulative farmed volume (trades.filled_notional_usd)
+   * for close notices. Optional: stores without a DB back it out. */
+  readFarmedVolumeUsd?(token: string): Promise<string | null>;
   hasBlockingExecution(): Promise<boolean>;
 }
 export interface OpenTradeOptions {
@@ -110,16 +122,9 @@ export interface OpenTradeOptions {
   residualDeltaToleranceBase: string;
   takeProfitPercent: string;
   stopLossPercent: string;
-  /** Minimum remaining edge (USD of spread convergence still left at the
-   * captured fills) required to KEEP a trade after both fills complete.
-   * Below exit cost (taker fees + slippage) + this buffer, both legs are
-   * closed immediately at market instead of placing TP/SL.
-   * Defaults to DEFAULT_EDGE_MIN_PROFIT_USD. */
-  edgeMinProfitUsd?: string;
   /** Minimum expected convergence profit (USD) required to KEEP a trade
    * right after both fills complete (OPEN_TRADE_MIN_PROFIT_USD, default
-   * "0.05"). Wired from config since adjust-tpsl-volume-farming PR1; consumed
-   * by the fee-aware edge band in PR2. */
+   * "0.05"); wired from config since adjust-tpsl-volume-farming PR1. */
   minProfitUsd?: string;
   /** Runtime assertion bound (USD) on the edge-abort path
    * (OPEN_TRADE_MAX_LOSS_USD, default "0.25"); wired from config since PR1,
@@ -141,13 +146,105 @@ export interface OpenTradeOptions {
 const PASSIVE_LIMIT_RETRY_COUNT = 3;
 const DEFAULT_LIMIT_REPRICE_INTERVAL_MS = 2000;
 const DEFAULT_ENTRY_IMPROVE_TICKS = 1;
-const DEFAULT_EDGE_MIN_PROFIT_USD = "10";
-// Assumed combined slippage (both legs) when estimating the cost of a market
-// exit, on top of the configured taker fees.
-const EXIT_SLIPPAGE_BPS = 2;
+/** Defaults for the PR2 knobs (config wires real values since PR1). */
+const DEFAULT_MIN_PROFIT_USD = "0.05";
+const DEFAULT_MAX_LOSS_USD = "0.25";
+const DEFAULT_SLIPPAGE_BPS = "2";
+/** Maximum allowed deviation (basis points) between a protection trigger and
+ * its expected fill-anchored level, and between the two legs' cross-symmetry
+ * levels. A breach fails the protection step loudly (no orders placed). */
+export const PROTECTION_TOLERANCE_BPS = 100;
 // Below this remaining size (BTC) a reprice resubmission is skipped: the
 // venue minimum quantity would reject the replacement order anyway.
 const REPRICE_MIN_REMAINING_BASE = 0.0001;
+
+/** Loud failure of the protection step: thrown when a trigger cannot be
+ * trusted to be anchored to a leg's true fill price (tolerance breach,
+ * cross-symmetry breach, or corrupt/blended fill provenance). Rides the
+ * existing runEntry catch: working orders are cancelled, the trade rolls
+ * back, emergency reduce-only closes run, and the operator is notified. */
+export class ProtectionAnchorError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProtectionAnchorError";
+  }
+}
+
+/** Verifies the full protection anchor set immediately before protection
+ * orders are placed (adjust-tpsl-volume-farming design D1): each trigger must
+ * sit within PROTECTION_TOLERANCE_BPS of its leg's `fill × (1 ± percent)`
+ * level, and the cross-symmetry property must hold — the short leg's SL ≈
+ * the long leg's TP and the short leg's TP ≈ the long leg's SL (both venues
+ * track the same BTC). Logs the full anchor set on pass; throws
+ * ProtectionAnchorError on breach. */
+export function assertProtectionAnchors(input: {
+  longEntryUsd: string;
+  shortEntryUsd: string;
+  longTpUsd: string;
+  longSlUsd: string;
+  shortTpUsd: string;
+  shortSlUsd: string;
+  takeProfitPercent: string;
+  stopLossPercent: string;
+}): void {
+  const tpFactor = 1 + parseDecimal(input.takeProfitPercent, "percent") / 100;
+  const slFactor = 1 - parseDecimal(input.stopLossPercent, "percent") / 100;
+  const checks: Array<{ label: string; actual: string; expected: number }> = [
+    { label: "longTp", actual: input.longTpUsd, expected: parseDecimal(input.longEntryUsd) * tpFactor },
+    { label: "longSl", actual: input.longSlUsd, expected: parseDecimal(input.longEntryUsd) * slFactor },
+    // Short profits when price falls: its TP trigger sits BELOW its fill and
+    // its SL trigger sits ABOVE it.
+    { label: "shortTp", actual: input.shortTpUsd, expected: parseDecimal(input.shortEntryUsd) * slFactor },
+    { label: "shortSl", actual: input.shortSlUsd, expected: parseDecimal(input.shortEntryUsd) * tpFactor },
+  ];
+  const breaches: string[] = [];
+  for (const check of checks) {
+    const actual = parseDecimal(check.actual);
+    if (!(check.expected > 0) || !(actual > 0)) {
+      breaches.push(`${check.label}: non-positive actual/expected`);
+      continue;
+    }
+    const deviationBps = (Math.abs(actual - check.expected) / check.expected) * 10_000;
+    if (deviationBps > PROTECTION_TOLERANCE_BPS)
+      breaches.push(
+        `${check.label}: ${check.actual} deviates ${deviationBps.toFixed(1)} bps from expected ${check.expected} (> ${PROTECTION_TOLERANCE_BPS} bps)`,
+      );
+  }
+  const longTp = parseDecimal(input.longTpUsd);
+  const longSl = parseDecimal(input.longSlUsd);
+  const shortTp = parseDecimal(input.shortTpUsd);
+  const shortSl = parseDecimal(input.shortSlUsd);
+  const crossChecks: Array<{ label: string; left: number; right: number; rightExpected: number }> = [
+    { label: "shortSl≈longTp", left: shortSl, right: longTp, rightExpected: longTp },
+    { label: "shortTp≈longSl", left: shortTp, right: longSl, rightExpected: longSl },
+  ];
+  for (const check of crossChecks) {
+    if (!(check.rightExpected > 0)) {
+      breaches.push(`${check.label}: non-positive reference level`);
+      continue;
+    }
+    const deviationBps = (Math.abs(check.left - check.right) / check.rightExpected) * 10_000;
+    if (deviationBps > PROTECTION_TOLERANCE_BPS)
+      breaches.push(
+        `${check.label}: ${check.left} vs ${check.right} deviates ${deviationBps.toFixed(1)} bps (> ${PROTECTION_TOLERANCE_BPS} bps)`,
+      );
+  }
+  if (breaches.length > 0)
+    throw new ProtectionAnchorError(
+      `Protection anchors failed tolerance check: ${breaches.join("; ")}`,
+    );
+  console.log("Protection anchors verified", {
+    longEntryUsd: input.longEntryUsd,
+    shortEntryUsd: input.shortEntryUsd,
+    longTpUsd: input.longTpUsd,
+    longSlUsd: input.longSlUsd,
+    shortTpUsd: input.shortTpUsd,
+    shortSlUsd: input.shortSlUsd,
+    takeProfitPercent: input.takeProfitPercent,
+    stopLossPercent: input.stopLossPercent,
+    toleranceBps: PROTECTION_TOLERANCE_BPS,
+  });
+}
 
 export class OpenTradeService {
   private readonly now: () => Date;
@@ -417,8 +514,20 @@ export class OpenTradeService {
           },
         ],
       });
-      let marketFillPrice: string | undefined;
-      const started = this.now().getTime();
+          let marketFillPrice: string | undefined;
+          // Provenance of the market (hedge) leg fill price, when the adapter
+          // reports it (RISEx). Undefined means the ack is authoritative
+          // (order_ack semantics).
+          let hedgeFillSource:
+            | "order_ack"
+            | "order_history"
+            | "position_average"
+            | undefined;
+          let hedgeFillDerived = false;
+          let hedgeNotionalUsd = 0;
+          const marketSide =
+            preview.marketExchange === preview.shortExchange ? "sell" : "buy";
+          const started = this.now().getTime();
       let current = activeLimit;
       let lastLoggedStatus = current.status;
       // Fill accounting must survive repricing: fills of cancelled orders
@@ -451,8 +560,6 @@ export class OpenTradeService {
             parseDecimal(current.averageFillPriceUsd);
           settledNotionalUsd += activeNotional - activeNotionalUsd;
           activeNotionalUsd = activeNotional;
-          const marketSide =
-            preview.marketExchange === preview.shortExchange ? "sell" : "buy";
           const hedge = await market.submitExecutionOrder({
             clientOrderId: `${token}-hedge-${filled - diff}`,
             symbol: preview.symbol,
@@ -460,6 +567,15 @@ export class OpenTradeService {
             type: "market",
             quantityBase: formatDecimal(diff, 10),
           });
+          hedgeNotionalUsd += diff * parseDecimal(hedge.averageFillPriceUsd ?? "0");
+          const hedgeAck = hedge as {
+            fillPriceSource?: string;
+            fillPriceDerived?: boolean;
+          };
+          hedgeFillSource =
+            (hedgeAck.fillPriceSource as typeof hedgeFillSource) ??
+            "order_ack";
+          hedgeFillDerived = hedgeAck.fillPriceDerived === true;
           console.log("OpenTrade hedge submitted", {
             token,
             marketExchange: preview.marketExchange,
@@ -707,68 +823,239 @@ export class OpenTradeService {
         preview.limitExchange === preview.shortExchange
           ? limitFillPrice
           : marketFillPrice;
-      if (!longEntry || !shortEntry)
-        throw new Error("Cannot protect trade without confirmed fill prices");
+          if (!longEntry || !shortEntry)
+            throw new Error("Cannot protect trade without confirmed fill prices");
 
-      // Edge evaluation (informational only, operator decision
-      // 2026-09-16): when the convergence left in the captured spread
-      // does not cover the cost of exiting (taker fees + slippage) plus
-      // the configured minimum profit, the trade has negative expectancy
-      // on paper. The trade is kept open with TP/SL anyway; the venue
-      // TP/SL backstop and the spread-exit monitor still manage risk.
-      const edge = evaluateCapturedEdge({
-        longEntryUsd: longEntry,
-        shortEntryUsd: shortEntry,
-        longTakerFeeBps:
-          this.options.fees[preview.longExchange]?.takerBps ?? "0",
-        shortTakerFeeBps:
-          this.options.fees[preview.shortExchange]?.takerBps ?? "0",
-        minProfitUsd:
-          this.options.edgeMinProfitUsd ?? DEFAULT_EDGE_MIN_PROFIT_USD,
-      });
-      console.log("OpenTrade captured edge evaluated", {
-        token,
-        capturedSpreadUsd: edge.capturedSpreadUsd,
-        remainingEdgeUsd: edge.remainingEdgeUsd,
-        exitCostUsd: edge.exitCostUsd,
-        minEdgeUsd: edge.minEdgeUsd,
-        keepOpen: edge.keepOpen,
-      });
-      if (!edge.keepOpen) {
-        console.warn(
-          "OpenTrade edge below cost; keeping trade open with TP/SL anyway",
-          {
+          // Fill-price integrity (design D2): the order ack / order-history
+          // provenance is authoritative and used directly. The whole-position
+          // average is a documented fallback only — a blank, non-positive,
+          // signed-size-derived (blended), or same-BTC-sanity-failing value
+          // fails the protection step loudly instead of anchoring mis-priced
+          // TP/SL orders.
+          if (hedgeFillSource === "position_average") {
+            const limitPriceUsd = limitFillPrice
+              ? parseDecimal(limitFillPrice)
+              : NaN;
+            const hedgePriceUsd = marketFillPrice
+              ? parseDecimal(marketFillPrice)
+              : NaN;
+            const corrupt =
+              hedgeFillDerived ||
+              !marketFillPrice ||
+              marketFillPrice.trim() === "" ||
+              !(hedgePriceUsd > 0);
+            const sanityDeviationBps =
+              !corrupt && limitPriceUsd > 0
+                ? (Math.abs(hedgePriceUsd - limitPriceUsd) / limitPriceUsd) *
+                  10_000
+                : 0;
+            if (
+              corrupt ||
+              sanityDeviationBps > PROTECTION_TOLERANCE_BPS
+            ) {
+              throw new ProtectionAnchorError(
+                `Hedge fill price failed integrity check ` +
+                  `(source=position_average, derived=${hedgeFillDerived}, ` +
+                  `price=${marketFillPrice ?? "n/a"}, ` +
+                  `limitFill=${limitFillPrice}, ` +
+                  `deviationBps=${sanityDeviationBps.toFixed(1)}); ` +
+                  `refusing to anchor protection orders`,
+              );
+            }
+          }
+
+          // Farmed volume (design D6): both entry fills land in one
+          // transition — the limit leg's settled notional (exact across
+          // reprices), the hedge leg's qty × fill price, and the trade-level
+          // sum — via monotonic coalesce+delta inside the transaction.
+          await this.store.transition(token, "hedging", {
+            filledNotionalUsdDelta: formatDecimal(
+              settledNotionalUsd + hedgeNotionalUsd,
+              8,
+            ),
+            legs: [
+              {
+                exchangeId: preview.limitExchange,
+                side: limitSide === "buy" ? "long" : "short",
+                filledNotionalUsdDelta: formatDecimal(settledNotionalUsd, 8),
+              },
+              {
+                exchangeId: preview.marketExchange,
+                side: marketSide === "buy" ? "long" : "short",
+                filledNotionalUsdDelta: formatDecimal(hedgeNotionalUsd, 8),
+              },
+            ],
+          });
+
+          // Per-leg protection anchors (design D1): each leg's TP/SL is
+          // anchored to ITS OWN fill price — long TP = longFill × (1+TP%),
+          // long SL = longFill × (1−SL%); the short leg profits when price
+          // falls, so its TP trigger sits BELOW its fill (×(1−SL%)) and its
+          // SL trigger ABOVE it (×(1+TP%)). This replaces the old cross-anchor
+          // where the short leg inherited the long leg's trigger levels.
+          const longTp = applyPercentChange(
+            longEntry,
+            this.options.takeProfitPercent,
+            "up",
+          );
+          const longSl = applyPercentChange(
+            longEntry,
+            this.options.stopLossPercent,
+            "down",
+          );
+          const shortTp = applyPercentChange(
+            shortEntry,
+            this.options.stopLossPercent,
+            "down",
+          );
+          const shortSl = applyPercentChange(
+            shortEntry,
+            this.options.takeProfitPercent,
+            "up",
+          );
+          assertProtectionAnchors({
+            longEntryUsd: longEntry,
+            shortEntryUsd: shortEntry,
+            longTpUsd: longTp,
+            longSlUsd: longSl,
+            shortTpUsd: shortTp,
+            shortSlUsd: shortSl,
+            takeProfitPercent: this.options.takeProfitPercent,
+            stopLossPercent: this.options.stopLossPercent,
+          });
+
+          // Fee-aware fill-time edge band (design D4): the band's inputs are
+          // knowable exactly once, at fill. Keep the trade iff the expected
+          // convergence still left in the captured spread covers the
+          // round-trip breakeven (entry fees + exit fees + slippage) plus the
+          // configured minimum profit; otherwise abort immediately.
+          const limitFees = this.options.fees[preview.limitExchange];
+          const marketFees = this.options.fees[preview.marketExchange];
+          const limitNotionalUsd = settledNotionalUsd;
+          const exitNotionalUsd = limitNotionalUsd + hedgeNotionalUsd;
+          const entryFeesUsd =
+            (limitNotionalUsd * parseDecimal(limitFees.makerBps) +
+              hedgeNotionalUsd * parseDecimal(marketFees.takerBps)) /
+            10_000;
+          const exitFeesUsd =
+            (limitNotionalUsd * parseDecimal(limitFees.takerBps) +
+              hedgeNotionalUsd * parseDecimal(marketFees.takerBps)) /
+            10_000;
+          const slippageUsd =
+            (exitNotionalUsd *
+              parseDecimal(this.options.slippageBps ?? DEFAULT_SLIPPAGE_BPS)) /
+            10_000;
+          const breakevenUsd = entryFeesUsd + exitFeesUsd + slippageUsd;
+          // Convergence still capturable at fills: the strategy is
+          // long-the-cheap-venue / short-the-expensive-venue, so both legs
+          // profit as the prices meet: (P − longEntry) + (shortEntry − P) =
+          // shortEntry − longEntry. (Design D4 wrote max(0, longEntry −
+          // shortEntry); that sign aborts every normally-filled trade and
+          // contradicts the spec's keep scenario — see apply-progress
+          // deviation #1.)
+          const expectedConvergenceUsd = Math.max(
+            0,
+            parseDecimal(shortEntry) - parseDecimal(longEntry),
+          );
+          const capturedSpreadUsd = expectedConvergenceUsd;
+          const minProfitUsd = parseDecimal(
+            this.options.minProfitUsd ?? DEFAULT_MIN_PROFIT_USD,
+          );
+          const minEdgeUsd = breakevenUsd + minProfitUsd;
+          const keepOpen = expectedConvergenceUsd >= minEdgeUsd;
+          console.log("OpenTrade edge band evaluated", {
             token,
-            capturedSpreadUsd: edge.capturedSpreadUsd,
-            remainingEdgeUsd: edge.remainingEdgeUsd,
-            exitCostUsd: edge.exitCostUsd,
-            minEdgeUsd: edge.minEdgeUsd,
-          },
-        );
-      }
+            capturedSpreadUsd,
+            expectedConvergenceUsd,
+            entryFeesUsd,
+            exitFeesUsd,
+            slippageUsd,
+            breakevenUsd,
+            minProfitUsd,
+            minEdgeUsd,
+            keepOpen,
+          });
+          if (!keepOpen) {
+            console.warn(
+              "OpenTrade edge below cost; closing both legs at market",
+              {
+                token,
+                capturedSpreadUsd,
+                expectedConvergenceUsd,
+                breakevenUsd,
+                minEdgeUsd,
+              },
+            );
+            const coveredQuantityBase = formatDecimal(covered, 10);
+            const close = await closeTradeBothLegs({
+              store: this.store,
+              registry: this.registry,
+              token,
+              symbol: preview.symbol,
+              longExchange: preview.longExchange,
+              shortExchange: preview.shortExchange,
+              legs: [
+                {
+                  exchangeId: preview.longExchange,
+                  side: "long",
+                  quantityBase: coveredQuantityBase,
+                  entryPriceUsd: longEntry,
+                  raw: undefined,
+                },
+                {
+                  exchangeId: preview.shortExchange,
+                  side: "short",
+                  quantityBase: coveredQuantityBase,
+                  entryPriceUsd: shortEntry,
+                  raw: undefined,
+                },
+              ],
+              reason: "edge_below_cost",
+              notify: (text) =>
+                this.options.notifyUrgent?.(text) ?? Promise.resolve(),
+            });
+            // Runtime assertion (design D4): the abort loss is structurally
+            // bounded by fees + slippage ≪ maxLossUsd; an exceedance means the
+            // fee model drifted. Log + notify but do not throw — the trade is
+            // already closed.
+            if (close.realizedPnlUsd != null) {
+              const maxLossUsd = parseDecimal(
+                this.options.maxLossUsd ?? DEFAULT_MAX_LOSS_USD,
+              );
+              const abortLossUsd = Math.abs(parseDecimal(close.realizedPnlUsd));
+              if (abortLossUsd > maxLossUsd) {
+                console.error(
+                  "OpenTrade edge abort exceeded max loss bound (fee-model drift detected)",
+                  { token, realizedPnlUsd: close.realizedPnlUsd, maxLossUsd },
+                );
+                await this.options.notifyUrgent?.(
+                  `🚨 fee-model drift detected: edge_below_cost close on ` +
+                    `${token.slice(0, 8)} realized $${abortLossUsd.toFixed(2)} ` +
+                    `(max loss bound $${maxLossUsd.toFixed(2)}). Check the ` +
+                    `configured fee bps against the venues' actual fees.`,
+                );
+              }
+            }
+            return {
+              outcome: "edge_closed" as const,
+              realizedPnlUsd: close.realizedPnlUsd,
+              capturedSpreadUsd,
+              minEdgeUsd,
+            };
+          }
 
-      await this.store.transition(token, "protecting", {
-        legs: [
-          {
-            exchangeId: preview.limitExchange,
-            side: limitSide === "buy" ? "long" : "short",
-            status: "open",
-            entryOrderId: activeLimit.id,
-            entryPriceUsd: limitFillPrice,
-          },
-        ],
-      });
-      const longTp = applyPercentChange(
-        longEntry,
-        this.options.takeProfitPercent,
-        "up",
-      );
-      const longSl = applyPercentChange(
-        longEntry,
-        this.options.stopLossPercent,
-        "down",
-      );
-      const longProtection = await this.protect(
+          await this.store.transition(token, "protecting", {
+            legs: [
+              {
+                exchangeId: preview.limitExchange,
+                side: limitSide === "buy" ? "long" : "short",
+                status: "open",
+                entryOrderId: activeLimit.id,
+                entryPriceUsd: limitFillPrice,
+              },
+            ],
+          });
+          const longProtection = await this.protect(
         this.execution(this.registry.get(preview.longExchange)),
         preview.longExchange,
         token,
@@ -786,8 +1073,8 @@ export class OpenTradeService {
         preview.symbol,
         "buy",
         covered,
-        longSl,
-        longTp,
+        shortTp,
+        shortSl,
         protectionOrderIds,
       );
       console.log("OpenTrade protection submitted", {
@@ -795,6 +1082,8 @@ export class OpenTradeService {
         coveredQuantityBase: formatDecimal(covered, 10),
         longTp,
         longSl,
+        shortTp,
+        shortSl,
         protectionOrderIds: protectionOrderIds.map((item) => item.id),
       });
       await this.store.transition(token, "open", {
@@ -818,8 +1107,8 @@ export class OpenTradeService {
             raw: {
               tpOrderId: shortProtection.tpOrderId,
               slOrderId: shortProtection.slOrderId,
-              tpTriggerUsd: longSl,
-              slTriggerUsd: longTp,
+              tpTriggerUsd: shortTp,
+              slTriggerUsd: shortSl,
             },
           },
         ],
@@ -829,6 +1118,8 @@ export class OpenTradeService {
         coveredQuantityBase: formatDecimal(covered, 10),
         longTp,
         longSl,
+        shortTp,
+        shortSl,
       });
       return { outcome: "opened" };
     } catch (error) {
@@ -1133,44 +1424,6 @@ export class OpenTradeService {
     if (this.now().getTime() - at.getTime() > this.options.quoteMaxAgeMs)
       throw new Error("Executable BBO quote is stale");
   }
-}
-
-export function evaluateCapturedEdge(input: {
-  longEntryUsd: string;
-  shortEntryUsd: string;
-  longTakerFeeBps: string;
-  shortTakerFeeBps: string;
-  minProfitUsd: string;
-}): {
-  capturedSpreadUsd: number;
-  remainingEdgeUsd: number;
-  exitCostUsd: number;
-  minEdgeUsd: number;
-  keepOpen: boolean;
-} {
-  const longEntry = parseDecimal(input.longEntryUsd);
-  const shortEntry = parseDecimal(input.shortEntryUsd);
-  const capturedSpreadUsd = longEntry - shortEntry;
-  // The strategy is long-the-cheap-venue / short-the-expensive-venue, so a
-  // NEGATIVE captured spread still has |spread| of convergence left to
-  // capture; a positive captured spread means the move already happened at
-  // our fills (inverted entry, no edge left).
-  const remainingEdgeUsd = Math.max(0, -capturedSpreadUsd);
-  const refPriceUsd = (longEntry + shortEntry) / 2;
-  const exitCostUsd =
-    (refPriceUsd *
-      (parseDecimal(input.longTakerFeeBps) +
-        parseDecimal(input.shortTakerFeeBps) +
-        EXIT_SLIPPAGE_BPS)) /
-    10_000;
-  const minEdgeUsd = exitCostUsd + parseDecimal(input.minProfitUsd);
-  return {
-    capturedSpreadUsd,
-    remainingEdgeUsd,
-    exitCostUsd,
-    minEdgeUsd,
-    keepOpen: remainingEdgeUsd >= minEdgeUsd,
-  };
 }
 
 function applyPercentChange(

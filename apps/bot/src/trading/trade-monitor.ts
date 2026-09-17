@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull } from 'drizzle-orm';
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { activeTradeStatuses, tradeLegs, trades, type getDb } from '@btc-arbitrage/db';
 import type { ExchangeAdapter } from '@btc-arbitrage/exchange-core';
 import { formatDecimal, parseDecimal } from '@btc-arbitrage/domain';
@@ -14,11 +14,20 @@ export async function monitorTrades(input: { db: Awaited<ReturnType<typeof getDb
       const adapter = input.registry.get(row.trade_legs.exchangeId).execution;
       if (!adapter) continue;
 
-      const position = await adapter.getPosition({ symbol: row.trades.symbol, side: row.trade_legs.side });
-      const positionClosed = position === null || position.status === 'closed';
-      if (!positionClosed || !shouldNotifyLegClosure({ positionClosed, alreadyNotified: row.trade_legs.closureNotifiedAt != null })) continue;
+          const position = await adapter.getPosition({ symbol: row.trades.symbol, side: row.trade_legs.side });
+          const positionClosed = position === null || position.status === 'closed';
+          if (!positionClosed || !shouldNotifyLegClosure({ positionClosed, alreadyNotified: row.trade_legs.closureNotifiedAt != null })) continue;
 
-      const siblingSide = row.trade_legs.side === 'long' ? 'short' : 'long';
+          // Farmed volume (design D6): a venue-side TP/SL closure farms volume
+          // too. Increment the closing leg's and the trade's
+          // filled_notional_usd by qty × exit price inside this transaction;
+          // skip the increment when the exit price is unknown.
+          const volumeDeltaUsd =
+            position?.exitPriceUsd != null && row.trade_legs.quantityBase != null
+              ? formatDecimal(parseDecimal(row.trade_legs.quantityBase) * parseDecimal(position.exitPriceUsd), 8)
+              : null;
+
+          const siblingSide = row.trade_legs.side === 'long' ? 'short' : 'long';
       const siblingRows = await input.db.select().from(tradeLegs).where(and(eq(tradeLegs.tradeId, row.trade_legs.tradeId), eq(tradeLegs.side, siblingSide)));
       const sibling = siblingRows[0];
 
@@ -29,9 +38,14 @@ export async function monitorTrades(input: { db: Awaited<ReturnType<typeof getDb
           closedAt: new Date(),
           closureNotifiedAt: new Date(),
         };
-        if (position?.exitPriceUsd != null) legUpdates.exitPriceUsd = position.exitPriceUsd;
-        if (position?.realizedPnlUsd != null) legUpdates.realizedPnlUsd = position.realizedPnlUsd;
-        await tx.update(tradeLegs).set(legUpdates).where(and(eq(tradeLegs.id, row.trade_legs.id), isNull(tradeLegs.closureNotifiedAt)));
+            if (position?.exitPriceUsd != null) legUpdates.exitPriceUsd = position.exitPriceUsd;
+            if (position?.realizedPnlUsd != null) legUpdates.realizedPnlUsd = position.realizedPnlUsd;
+            await tx.update(tradeLegs).set(legUpdates).where(and(eq(tradeLegs.id, row.trade_legs.id), isNull(tradeLegs.closureNotifiedAt)));
+            if (volumeDeltaUsd !== null) {
+              await tx.update(tradeLegs)
+                .set({ filledNotionalUsd: sql`coalesce(${tradeLegs.filledNotionalUsd}, 0) + ${volumeDeltaUsd}` })
+                .where(eq(tradeLegs.id, row.trade_legs.id));
+            }
 
         const siblingAlreadyClosed = sibling?.status === 'closed';
         if (siblingAlreadyClosed) {
@@ -44,15 +58,24 @@ export async function monitorTrades(input: { db: Awaited<ReturnType<typeof getDb
             }
             return sum;
           }, 0);
-          await tx.update(trades).set({
-            status: 'closed',
-            realizedPnlUsd: formatDecimal(totalRealizedPnl, 8),
-            closedAt: new Date(),
-            updatedAt: new Date(),
-          }).where(eq(trades.id, row.trades.id));
-        } else {
-          await tx.update(trades).set({ status: 'unhedged', updatedAt: new Date() }).where(eq(trades.id, row.trades.id));
-        }
+              await tx.update(trades).set({
+                status: 'closed',
+                realizedPnlUsd: formatDecimal(totalRealizedPnl, 8),
+                closedAt: new Date(),
+                updatedAt: new Date(),
+                ...(volumeDeltaUsd !== null
+                  ? { filledNotionalUsd: sql`coalesce(${trades.filledNotionalUsd}, 0) + ${volumeDeltaUsd}` }
+                  : {}),
+              }).where(eq(trades.id, row.trades.id));
+            } else {
+              await tx.update(trades).set({
+                status: 'unhedged',
+                updatedAt: new Date(),
+                ...(volumeDeltaUsd !== null
+                  ? { filledNotionalUsd: sql`coalesce(${trades.filledNotionalUsd}, 0) + ${volumeDeltaUsd}` }
+                  : {}),
+              }).where(eq(trades.id, row.trades.id));
+            }
       });
 
       const message = sibling?.status === 'closed'

@@ -185,42 +185,40 @@ Implemented live capabilities include:
 - available margin,
 - Stark signing context loading.
 
-## Spread-based exits and edge validation
+## Exits, protection, and edge validation
 
 Implemented in:
 
-- `apps/bot/src/trading/spread-exit-monitor.ts`
+- `apps/bot/src/trading/timeout-close-monitor.ts` (time-stop + recovery sweep)
 - `apps/bot/src/trading/trade-close.ts`
+- `apps/bot/src/trading/open-trade.ts` (per-leg anchoring + fill-time edge band)
 
-The venue-side ±3% TP/SL orders are a **catastrophic backstop only**. The
-primary exit expresses the actual strategy (spread convergence) in spread
-terms:
+Spread-USD exits were removed by adjust-tpsl-volume-farming: there are no
+spread-USD comparisons on open trades (`OPEN_TRADE_SPREAD_TP_USD` /
+`OPEN_TRADE_SPREAD_SL_USD` are rejected at config load). The exit model is:
 
-- Every tick, for each `open` trade, the bot computes the live spread
-  (long venue price − short venue price, same price source as the signal
-  engine) and compares it to the spread captured at the fills
-  (long leg `entry_price_usd` − short leg `entry_price_usd`).
-- `move = liveSpread − capturedSpread`; position PnL is `qty × move`.
-- Closes both legs (reduce-only market, venue TP/SL cancelled first) when:
-  - `move ≥ OPEN_TRADE_SPREAD_TP_USD` (default 60) — `spread_tp`,
-  - `move ≤ −OPEN_TRADE_SPREAD_SL_USD` (default 25) — `spread_sl`,
-  - the trade has been open for `OPEN_TRADE_SPREAD_EXIT_TIMEOUT_MINUTES`
-    (default 30) — `spread_timeout`.
+- **Venue-side per-leg TP/SL backstop** (primary risk layer): reduce-only
+  TP/SL orders anchored to each leg's OWN fill price — long TP = longFill ×
+  (1+`OPEN_TRADE_TAKE_PROFIT_PERCENT`), long SL = longFill × (1−`OPEN_TRADE_STOP_LOSS_PERCENT`
+  default 2.5); the short leg's TP sits below its fill and its SL above it.
+  RISEx triggers on MARK price; Extended stays LAST-triggered. A 100 bps
+  tolerance + cross-symmetry assertion runs before placement; a breach fails
+  loudly (rollback + urgent notify) instead of placing mis-anchored orders.
+- **Time-stop** (orthogonal): a trade open for
+  `OPEN_TRADE_SPREAD_EXIT_TIMEOUT_MINUTES` (default 30) minutes is closed
+  reduce-only with reason `spread_timeout`, regardless of spread moves.
+- **Stale-`closing` recovery sweep**: a trade stuck in `closing` is re-closed
+  (`close_recovery`).
+- **Fill-time edge band**: right after both fills, the trade is kept iff
+  expected convergence ≥ round-trip breakeven (entry maker/taker fees + exit
+  taker fees + `OPEN_TRADE_SLIPPAGE_BPS` slippage) + `OPEN_TRADE_MIN_PROFIT_USD`
+  (default $0.05); otherwise both legs close immediately reduce-only with
+  reason `edge_below_cost` and the Telegram `edge_closed` notice fires. An
+  abort loss beyond `OPEN_TRADE_MAX_LOSS_USD` (default $0.25) logs/notifies a
+  fee-model-drift alert.
 - Closure persists per-leg exit prices and realized PnL, the trade-level
-  realized PnL, and the exit spread; Telegram gets a `📕 Trade #N closed
-  (reason)` message with the PnL.
-
-Right after both fills complete (before protection is placed), the captured
-edge is validated:
-
-- `remainingEdge = max(0, −capturedSpread)` (the convergence still left).
-- `exitCost = refPrice × (takerLong + takerShort + 2bps slippage) / 10⁴`.
-- The trade is kept only if `remainingEdge ≥ exitCost + OPEN_TRADE_EDGE_MIN_PROFIT_USD`
-  (default 10). Otherwise both legs close immediately (`edge_below_cost`).
-
-Note: with RISEx taker 3bps + Extended taker 2.5bps, exit cost is ≈ $43 per
-BTC of spread at $78k, so the edge minimum exceeds `MIN_PRICE_DIFF_USD=40` —
-most trades are edge-closed at fill until the signal threshold is raised.
+  realized PnL, and the cumulative farmed volume; Telegram gets a `📕 Trade #N
+  closed (reason)` message with the PnL and farmed volume.
 
 ## Trade monitoring
 

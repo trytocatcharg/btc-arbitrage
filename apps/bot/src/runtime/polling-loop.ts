@@ -8,7 +8,7 @@ import type { getDb } from "@btc-arbitrage/db";
 import { signals, activeTradeStatuses, trades } from "@btc-arbitrage/db";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { monitorTrades } from "../trading/trade-monitor.js";
-import { monitorSpreadExits } from "../trading/spread-exit-monitor.js";
+import { monitorTimeoutClosures } from "../trading/timeout-close-monitor.js";
 import { runDataRetention } from "../retention/data-retention.js";
 import { shouldSuppressSignalForActiveTrades } from "../trading/trade-guards.js";
 import { extractInsertId } from "../db-result.js";
@@ -103,19 +103,15 @@ export async function runPollingLoop(input: {
       });
 
       try {
-        await monitorSpreadExits({
+        await monitorTimeoutClosures({
           db: input.db,
           registry: input.registry,
           notifier: input.notifier,
-          priceByExchange: new Map([
-            [priceA.exchangeId, priceA.priceUsd],
-            [priceB.exchangeId, priceB.priceUsd],
-          ]),
-          timeoutMinutes: input.config.openTrade.spreadExitTimeoutMinutes,
+          timeoutMinutes: input.config.openTrade.openTradeCloseTimeoutMinutes,
         });
       } catch (error) {
         console.error(
-          "Spread exit monitoring failed",
+          "Timeout close monitoring failed",
           error instanceof Error
             ? { tick, message: error.message }
             : { tick, error },

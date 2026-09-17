@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, inArray } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import {
   activeTradeStatuses,
   tradePreviews,
@@ -173,6 +173,16 @@ export class DbPreviewStore implements PreviewStore {
         .where(eq(tradeLegs.tradeId, row.tradeId));
     });
   }
+  /** Cumulative farmed volume (trades.filled_notional_usd) for the trade
+   * linked to a preview token; null when unknown. Used by close notices. */
+  async readFarmedVolumeUsd(token: string): Promise<string | null> {
+    const rows = await this.db
+      .select({ filledNotionalUsd: trades.filledNotionalUsd })
+      .from(trades)
+      .innerJoin(tradePreviews, eq(tradePreviews.tradeId, trades.id))
+      .where(eq(tradePreviews.token, token));
+    return rows[0]?.filledNotionalUsd ?? null;
+  }
   async claimRollback(token: string): Promise<boolean> {
     const result = await this.db
       .update(tradePreviews)
@@ -236,9 +246,19 @@ export class DbPreviewStore implements PreviewStore {
         tradeSet.closedAt = now;
       if (typeof details?.realizedPnlUsd === "string")
         tradeSet.realizedPnlUsd = details.realizedPnlUsd;
-      if (typeof details?.exitSpreadUsd === "string")
-        tradeSet.exitSpreadUsd = details.exitSpreadUsd;
-      await tx.update(trades).set(tradeSet).where(eq(trades.id, tradeId));
+          if (typeof details?.exitSpreadUsd === "string")
+            tradeSet.exitSpreadUsd = details.exitSpreadUsd;
+          await tx.update(trades).set(tradeSet).where(eq(trades.id, tradeId));
+          if (typeof details?.filledNotionalUsdDelta === "string") {
+            // Trade-level farmed-volume increment (monotonic coalesce+delta)
+            // inside the same transaction.
+            await tx
+              .update(trades)
+              .set({
+                filledNotionalUsd: sql`coalesce(${trades.filledNotionalUsd}, 0) + ${details.filledNotionalUsdDelta}`,
+              })
+              .where(eq(trades.id, tradeId));
+          }
       await tx.insert(tradeStatusHistory).values({
         tradeId,
         fromStatus,
@@ -280,7 +300,24 @@ export class DbPreviewStore implements PreviewStore {
               eq(tradeLegs.side, leg.side),
             ),
           );
-      }
+        if (leg.filledNotionalUsdDelta !== undefined) {
+          // Monotonic farmed-volume increment (coalesce + delta) inside the same
+          // transaction; safe under the stale-'closing' recovery re-close because
+          // the delta rides a transition that is only persisted once.
+          await tx
+            .update(tradeLegs)
+            .set({
+              filledNotionalUsd: sql`coalesce(${tradeLegs.filledNotionalUsd}, 0) + ${leg.filledNotionalUsdDelta}`,
+            })
+            .where(
+              and(
+                                        eq(tradeLegs.tradeId, tradeId),
+                                        eq(tradeLegs.exchangeId, leg.exchangeId),
+                                        eq(tradeLegs.side, leg.side),
+              ),
+            );
+        }
+}
     });
   }
 }

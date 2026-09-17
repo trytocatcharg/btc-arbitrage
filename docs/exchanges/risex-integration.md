@@ -25,7 +25,7 @@ Implemented in `apps/bot/src/exchanges/risex/risex-execution-adapter.ts` and cov
 - `POST /v1/orders/place`
 - `POST /v1/orders/cancel`
 
-Known limitation: the official REST documentation mirrored here does **not** document native TP/SL trigger endpoints. The bot refuses to invent them and fails closed for RISEx `take-profit-market` / `stop-market` requests.
+TP/SL placement is implemented in the adapted SDK (`ExchangeClient.placeTakeProfit` / `placeStopLoss`) and used by the bot with `stop_price_option: MarkPrice` triggers.
 
 Known limitation: there is no REST fill-history endpoint. `POST /v1/orders/place` returns an acknowledgment, not a fill. The adapter confirms market-order fills by polling `GET /v1/account/position` until the signed position quantity moves by the ordered amount (bounded, `MARKET_FILL_TIMEOUT_MS` default 15s), returning the position entry price as the average fill price. On timeout it reports `status: 'new'` so callers fail closed into rollback. Because filled orders disappear from `GET /v1/orders/open`, `getExecutionOrder` can only track resting orders; RISEx must not be used as the limit (maker) leg in live mode until fill-history exists.
 
@@ -42,6 +42,10 @@ Key documented behavior from the official API reference:
 - TP/SL orders are stored off-chain and executed on-chain once the stop condition is met.
 - `TAKE_PROFIT` triggers favorably; `STOP_LOSS` triggers unfavorably.
 - `MARK_PRICE` and `LAST_TRADED_PRICE` are supported trigger price sources.
+  The bot's adapter places TP/SL through `placeTakeProfit` / `placeStopLoss`
+  with `stop_price_option: MarkPrice` (MARK-price triggers stop wick-driven
+  mis-fires on thin books; Extended remains LAST-triggered, see D3 in the
+  adjust-tpsl-volume-farming design).
 - Placement uses EIP-712 `PlaceTpslOrder`.
 - Cancellation uses EIP-712 `CancelTpslOrder`.
 

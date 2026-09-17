@@ -6,26 +6,23 @@ import {
   type getDb,
 } from "@btc-arbitrage/db";
 import type { ExchangeAdapter } from "@btc-arbitrage/exchange-core";
-import { parseDecimal } from "@btc-arbitrage/domain";
 import { closeTradeBothLegs } from "./trade-close.js";
 import { DbPreviewStore } from "./db-preview-store.js";
 import { extractAffectedRows } from "../db-result.js";
 
-/** Time-stop and recovery monitor for open trades.
+/** Time-stop and recovery monitor for open trades (formerly
+ * spread-exit-monitor.ts; renamed by adjust-tpsl-volume-farming 2.9).
  *
  * Spread-USD exits were deleted by adjust-tpsl-volume-farming (PR1/1.5): the
  * spread-USD comparisons and the per-tick captured-edge gate are gone. What
  * remains: the stale-'closing' recovery sweep (close_recovery) and the
  * time-stop (spread_timeout, OPEN_TRADE_SPREAD_EXIT_TIMEOUT_MINUTES,
- * default 30 min). Live prices are still fetched per tick only to record the
- * exit spread on a time-stop close. */
-export async function monitorSpreadExits(input: {
+ * default 30 min). The time-stop no longer consults live prices — only
+ * openedAt matters — so a price-feed outage cannot delay a timeout close. */
+export async function monitorTimeoutClosures(input: {
   db: Awaited<ReturnType<typeof getDb>>;
   registry: { get(id: string): ExchangeAdapter };
   notifier: { notifyUrgent: (text: string) => Promise<void> };
-  /** Latest price per exchange id (from the polling loop's snapshots), used
-   * only to record exitSpreadUsd on a time-stop close. */
-  priceByExchange: Map<string, string>;
   timeoutMinutes: number;
   /** How long a trade may sit in 'closing' before the recovery sweep
    * re-runs its close. Defaults to 120 s (a close takes at most ~20 s). */
@@ -65,7 +62,7 @@ export async function monitorSpreadExits(input: {
           .where(eq(tradePreviews.tradeId, stale.id))
           .orderBy(desc(tradePreviews.id))
       )[0];
-      console.warn("Spread exit recovery: stale 'closing' trade found", {
+      console.warn("Timeout-close recovery: stale 'closing' trade found", {
         tradeId: stale.id,
         updatedAt: stale.updatedAt,
         openLegs: staleLegs.length,
@@ -77,7 +74,7 @@ export async function monitorSpreadExits(input: {
         .set({ updatedAt: new Date() })
         .where(eq(trades.id, stale.id));
       if (!tokenRow?.token) {
-        console.error("Spread exit recovery aborted: no preview token", {
+        console.error("Timeout-close recovery aborted: no preview token", {
           tradeId: stale.id,
         });
         continue;
@@ -94,7 +91,7 @@ export async function monitorSpreadExits(input: {
       }
       const staleQuantity = staleLegs[0]?.quantityBase ?? null;
       if (!staleQuantity) {
-        console.error("Spread exit recovery aborted: no leg quantity", {
+        console.error("Timeout-close recovery aborted: no leg quantity", {
           tradeId: stale.id,
         });
         continue;
@@ -118,7 +115,7 @@ export async function monitorSpreadExits(input: {
         notify: (text) => input.notifier.notifyUrgent(text),
       });
     } catch (error) {
-      console.warn("Spread exit recovery failed", {
+      console.warn("Timeout-close recovery failed", {
         tradeId: stale.id,
         message: error instanceof Error ? error.message : error,
       });
@@ -146,40 +143,26 @@ export async function monitorSpreadExits(input: {
           ),
         );
       const longLeg = legs.find((leg) => leg.side === "long");
-          const shortLeg = legs.find((leg) => leg.side === "short");
-          if (
-            legs.length !== 2 ||
-            !longLeg?.entryPriceUsd ||
-            !shortLeg?.entryPriceUsd ||
-            !longLeg.quantityBase
-          )
-            continue;
+      const shortLeg = legs.find((leg) => leg.side === "short");
+      if (
+        legs.length !== 2 ||
+        !longLeg?.entryPriceUsd ||
+        !shortLeg?.entryPriceUsd ||
+        !longLeg.quantityBase
+      )
+        continue;
 
-          const liveLong = input.priceByExchange.get(trade.longExchange);
-          const liveShort = input.priceByExchange.get(trade.shortExchange);
-          if (liveLong == null || liveShort == null) {
-            console.warn("Time-stop skipped: live price unavailable", {
-              tradeId: trade.id,
-              longExchange: trade.longExchange,
-              shortExchange: trade.shortExchange,
-            });
-            continue;
-          }
-
-          const liveSpread = parseDecimal(liveLong) - parseDecimal(liveShort);
-
-          const timedOut =
-            trade.openedAt && now - trade.openedAt.getTime() >= timeoutMs;
-          if (!timedOut) {
-            console.log("Time-stop evaluated", {
-              tradeId: trade.id,
-              liveSpreadUsd: liveSpread,
-              openedAt: trade.openedAt,
-              timeoutMinutes: input.timeoutMinutes,
-            });
-            continue;
-          }
-          const reason: "spread_timeout" = "spread_timeout";
+      const timedOut =
+        trade.openedAt && now - trade.openedAt.getTime() >= timeoutMs;
+      if (!timedOut) {
+        console.log("Time-stop evaluated", {
+          tradeId: trade.id,
+          openedAt: trade.openedAt,
+          timeoutMinutes: input.timeoutMinutes,
+        });
+        continue;
+      }
+      const reason: "spread_timeout" = "spread_timeout";
 
       // Claim the trade synchronously so a concurrent close (second bot
       // process, or a re-entrant tick) cannot double-fire the exit orders.
@@ -196,7 +179,7 @@ export async function monitorSpreadExits(input: {
         .orderBy(desc(tradePreviews.id));
       const token = previewRows[0]?.token;
       if (!token) {
-        console.warn("Spread exit aborted: no preview token for trade", {
+        console.warn("Time-stop aborted: no preview token for trade", {
           tradeId: trade.id,
         });
         await input.db
@@ -209,7 +192,8 @@ export async function monitorSpreadExits(input: {
       console.warn("Time-stop triggered", {
         tradeId: trade.id,
         reason,
-        liveSpreadUsd: liveSpread,
+        openedAt: trade.openedAt,
+        timeoutMinutes: input.timeoutMinutes,
       });
       const longQty = longLeg.quantityBase;
       await closeTradeBothLegs({
@@ -229,10 +213,9 @@ export async function monitorSpreadExits(input: {
         })),
         reason,
         notify: (text) => input.notifier.notifyUrgent(text),
-        exitSpreadUsd: liveSpread.toFixed(8),
       });
     } catch (error) {
-      console.warn("Spread exit monitoring skipped trade failure", {
+      console.warn("Timeout-close monitoring skipped trade failure", {
         tradeId: trade.id,
         message: error instanceof Error ? error.message : error,
       });

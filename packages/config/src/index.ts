@@ -43,8 +43,10 @@ export interface BotConfig {
     takeProfitPercent: string;
     stopLossPercent: string;
     /** Exit an open trade after this many minutes regardless of spread
-     * (time-stop for a convergence thesis that stopped converging). */
-    spreadExitTimeoutMinutes: number;
+     * (time-stop for a convergence thesis that stopped converging).
+     * Env var OPEN_TRADE_SPREAD_EXIT_TIMEOUT_MINUTES unchanged (kept per
+     * design D5 to avoid breaking-churn). */
+    openTradeCloseTimeoutMinutes: number;
     /** Minimum expected convergence profit (USD) required to KEEP a trade
      * right after both fills complete: keep iff expected convergence ≥
      * round-trip breakeven (fees + slippage) + this buffer; otherwise both
@@ -204,7 +206,7 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   if (Number(openTradeStopLossPercent) >= 100) {
     throw new Error("OPEN_TRADE_STOP_LOSS_PERCENT must be less than 100");
   }
-  const spreadExitTimeoutMinutes = parsePositiveInteger(
+  const openTradeCloseTimeoutMinutes = parsePositiveInteger(
     env.OPEN_TRADE_SPREAD_EXIT_TIMEOUT_MINUTES ?? "30",
     "OPEN_TRADE_SPREAD_EXIT_TIMEOUT_MINUTES",
   );
@@ -275,7 +277,7 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       ),
       takeProfitPercent: openTradeTakeProfitPercent,
       stopLossPercent: openTradeStopLossPercent,
-      spreadExitTimeoutMinutes,
+      openTradeCloseTimeoutMinutes,
       minProfitUsd,
       maxLossUsd,
       slippageBps,

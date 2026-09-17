@@ -2,6 +2,7 @@ import type { BotConfig } from "@btc-arbitrage/config";
 import type { getDb } from "@btc-arbitrage/db";
 import { signals, tradeLegs, tradePreviews } from "@btc-arbitrage/db";
 import { eq } from "drizzle-orm";
+import { parseDecimal } from "@btc-arbitrage/domain";
 import {
   buildTradeSummaryMessage,
   type ExchangeRegistryLike,
@@ -583,9 +584,16 @@ export class TelegramCommandPoller {
       lines.push(
         `Short: ${shortLeg.exchangeId} @ $${shortLeg.entryPriceUsd ?? "?"} ${shortLeg.status}`,
       );
-    if (legs[0]) lines.push(`Quantity: ${legs[0].quantityBase} BTC`);
-    lines.push("TP/SL placed on both legs.");
-    return lines.join("\n");
+        if (legs[0]) lines.push(`Quantity: ${legs[0].quantityBase} BTC`);
+        // Farmed volume surfaced from the persisted filled_notional_usd
+        // columns (design D6 / volume-farming spec), not a live-price estimate.
+        const farmedVolumeUsd = legs.reduce(
+          (sum, leg) => sum + parseDecimal(leg.filledNotionalUsd ?? "0"),
+          0,
+        );
+        lines.push(`Farmed volume: $${farmedVolumeUsd.toFixed(2)}`);
+        lines.push("TP/SL placed on both legs.");
+        return lines.join("\n");
   }
   private async sendMessage(
     text: string,
@@ -628,7 +636,7 @@ export function formatActiveConfigSummary(config: BotConfig): string {
     `Mode: ${config.botExecutionMode}`,
     `Order placement: ${config.enableOrderPlacement ? "enabled" : "disabled"}`,
     `Open trade TP/SL (venue backstop): +${config.openTrade.takeProfitPercent}% / -${config.openTrade.stopLossPercent}%`,
-    `Time-stop: close open trades after ${config.openTrade.spreadExitTimeoutMinutes}m`,
+    `Time-stop: close open trades after ${config.openTrade.openTradeCloseTimeoutMinutes}m`,
     `Edge band: keep trade if convergence ≥ exit cost + $${formatUsd(config.openTrade.minProfitUsd)}`,
     `Edge abort max loss: $${formatUsd(config.openTrade.maxLossUsd)}`,
     `Exit slippage: ${config.openTrade.slippageBps} bps`,
