@@ -1,0 +1,14 @@
+schema: spec-driven
+
+context: |
+  TypeScript monorepo (Yarn 4 workspaces, NodeNext) monitoring BTC perp prices across
+  risex/extended/arcus, emitting spread signals and executing Telegram-confirmed hedged
+  open trades (maker limit entry + taker hedge + TP/SL reduce-only).
+  Stack: Node 20+, tsx, Express 5, React 19 + Vite 6 + Tailwind v4, MariaDB + Drizzle,
+  native fetch only (no axios), node:test via tsx.
+  BOT PRIMARY OBJECTIVE: farm trading volume — trades only need to be slightly profitable
+  (even cents) or lose very little; generated volume must be persisted for statistics.
+  Conventions: live order placement only from apps/bot via Telegram confirmation;
+  backend and web are read-only; per-exchange specs in docs/exchanges/*.md are
+  authoritative; specs/*.md documents intended behavior; unit-test work is paused by
+  explicit user instruction (do not add tests unless re-enabled).
