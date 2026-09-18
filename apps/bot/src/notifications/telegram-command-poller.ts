@@ -376,7 +376,10 @@ export class TelegramCommandPoller {
         data,
         message,
       });
-      await this.answerCallback(callback.id, message);
+      await this.answerCallback(
+        callback.id,
+        friendlyCallbackError(message, this.config.openTrade.quoteMaxAgeMs),
+      );
     }
   }
 
@@ -584,16 +587,16 @@ export class TelegramCommandPoller {
       lines.push(
         `Short: ${shortLeg.exchangeId} @ $${shortLeg.entryPriceUsd ?? "?"} ${shortLeg.status}`,
       );
-        if (legs[0]) lines.push(`Quantity: ${legs[0].quantityBase} BTC`);
-        // Farmed volume surfaced from the persisted filled_notional_usd
-        // columns (design D6 / volume-farming spec), not a live-price estimate.
-        const farmedVolumeUsd = legs.reduce(
-          (sum, leg) => sum + parseDecimal(leg.filledNotionalUsd ?? "0"),
-          0,
-        );
-        lines.push(`Farmed volume: $${farmedVolumeUsd.toFixed(2)}`);
-        lines.push("TP/SL placed on both legs.");
-        return lines.join("\n");
+    if (legs[0]) lines.push(`Quantity: ${legs[0].quantityBase} BTC`);
+    // Farmed volume surfaced from the persisted filled_notional_usd
+    // columns (design D6 / volume-farming spec), not a live-price estimate.
+    const farmedVolumeUsd = legs.reduce(
+      (sum, leg) => sum + parseDecimal(leg.filledNotionalUsd ?? "0"),
+      0,
+    );
+    lines.push(`Farmed volume: $${farmedVolumeUsd.toFixed(2)}`);
+    lines.push("TP/SL placed on both legs.");
+    return lines.join("\n");
   }
   private async sendMessage(
     text: string,
@@ -668,6 +671,31 @@ function formatUsd(value: string): string {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return value;
   return parsed.toFixed(2);
+}
+
+/**
+ * Maps raw technical error messages from the trade/callback flow to a clear,
+ * operator-facing toast for the Telegram callback answer. The full technical
+ * detail is always kept in the console.error log.
+ */
+function friendlyCallbackError(raw: string, quoteMaxAgeMs: number): string {
+  switch (raw) {
+    case "Executable BBO quote is stale":
+      return (
+        `⏱ Cotización vencida: el precio llegó con más de ${Math.round(quoteMaxAgeMs / 1000)}s de antigüedad. ` +
+        'Tocá "Open Trade" de nuevo.'
+      );
+    case "Preview expired; open a new trade from a fresh signal":
+      return "⌛ La preview de la señal expiró. Esperá una señal nueva y tocá \"Open Trade\" ahí.";
+    case "Preview was already consumed, cancelled or expired":
+      return "↪️ Esa acción ya fue usada o expiró. Si el trade no abrió, usá una señal nueva.";
+    case "Signal no longer exists":
+      return "🔍 La señal ya no existe (puede haber sido limpiada). Esperá la próxima señal.";
+    case "Trade not available for retry":
+      return "🔁 Ese trade no está disponible para reintento.";
+    default:
+      return `❌ No se pudo completar: ${raw}`;
+  }
 }
 
 function splitTelegramMessage(text: string, maxChunkLength = 3900): string[] {
