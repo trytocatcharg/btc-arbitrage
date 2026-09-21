@@ -214,10 +214,12 @@ __metadata:
   resolution: "@btc-arbitrage/backend@workspace:apps/backend"
   dependencies:
     "@btc-arbitrage/config": "workspace:*"
+    "@btc-arbitrage/db": "workspace:*"
     "@btc-arbitrage/domain": "workspace:*"
     "@noble/curves": "npm:1.7.0"
     "@noble/hashes": "npm:1.6.0"
     "@types/express": "npm:5.0.3"
+    drizzle-orm: "npm:0.38.4"
     express: "npm:5.1.0"
     tsx: "npm:4.19.2"
   languageName: unknown

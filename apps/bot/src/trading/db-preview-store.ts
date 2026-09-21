@@ -246,19 +246,19 @@ export class DbPreviewStore implements PreviewStore {
         tradeSet.closedAt = now;
       if (typeof details?.realizedPnlUsd === "string")
         tradeSet.realizedPnlUsd = details.realizedPnlUsd;
-          if (typeof details?.exitSpreadUsd === "string")
-            tradeSet.exitSpreadUsd = details.exitSpreadUsd;
-          await tx.update(trades).set(tradeSet).where(eq(trades.id, tradeId));
-          if (typeof details?.filledNotionalUsdDelta === "string") {
-            // Trade-level farmed-volume increment (monotonic coalesce+delta)
-            // inside the same transaction.
-            await tx
-              .update(trades)
-              .set({
-                filledNotionalUsd: sql`coalesce(${trades.filledNotionalUsd}, 0) + ${details.filledNotionalUsdDelta}`,
-              })
-              .where(eq(trades.id, tradeId));
-          }
+      if (typeof details?.exitSpreadUsd === "string")
+        tradeSet.exitSpreadUsd = details.exitSpreadUsd;
+      await tx.update(trades).set(tradeSet).where(eq(trades.id, tradeId));
+      if (typeof details?.filledNotionalUsdDelta === "string") {
+        // Trade-level farmed-volume increment (monotonic coalesce+delta)
+        // inside the same transaction.
+        await tx
+          .update(trades)
+          .set({
+            filledNotionalUsd: sql`coalesce(${trades.filledNotionalUsd}, 0) + ${details.filledNotionalUsdDelta}`,
+          })
+          .where(eq(trades.id, tradeId));
+      }
       await tx.insert(tradeStatusHistory).values({
         tradeId,
         fromStatus,
@@ -290,16 +290,23 @@ export class DbPreviewStore implements PreviewStore {
           legSet.realizedPnlUsd = leg.realizedPnlUsd;
         if (leg.closeReason !== undefined) legSet.closeReason = leg.closeReason;
         if (leg.raw !== undefined) legSet.raw = leg.raw;
-        await tx
-          .update(tradeLegs)
-          .set(legSet)
-          .where(
-            and(
-              eq(tradeLegs.tradeId, tradeId),
-              eq(tradeLegs.exchangeId, leg.exchangeId),
-              eq(tradeLegs.side, leg.side),
-            ),
-          );
+        // Legs that only carry filledNotionalUsdDelta leave legSet empty;
+        // Drizzle throws "No values to set" on an empty .set(), which
+        // crashed the whole confirm flow into rollback (observed
+        // 2026-09-21). Skip the row update — the delta below is the only
+        // mutation for such legs.
+        if (Object.keys(legSet).length > 0) {
+          await tx
+            .update(tradeLegs)
+            .set(legSet)
+            .where(
+              and(
+                eq(tradeLegs.tradeId, tradeId),
+                eq(tradeLegs.exchangeId, leg.exchangeId),
+                eq(tradeLegs.side, leg.side),
+              ),
+            );
+        }
         if (leg.filledNotionalUsdDelta !== undefined) {
           // Monotonic farmed-volume increment (coalesce + delta) inside the same
           // transaction; safe under the stale-'closing' recovery re-close because
@@ -311,13 +318,13 @@ export class DbPreviewStore implements PreviewStore {
             })
             .where(
               and(
-                                        eq(tradeLegs.tradeId, tradeId),
-                                        eq(tradeLegs.exchangeId, leg.exchangeId),
-                                        eq(tradeLegs.side, leg.side),
+                eq(tradeLegs.tradeId, tradeId),
+                eq(tradeLegs.exchangeId, leg.exchangeId),
+                eq(tradeLegs.side, leg.side),
               ),
             );
         }
-}
+      }
     });
   }
 }

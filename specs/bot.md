@@ -125,14 +125,18 @@ When confirmed:
 
 1. consume preview,
 2. create `trades` + `trade_legs`,
-3. run preflight on both exchanges,
-4. place the maker leg as **limit**,
-5. hedge any filled quantity on the opposite exchange with **market**,
-6. evaluate the captured edge (see below); if the remaining convergence does
+3. place the maker leg as **limit**,
+4. hedge any filled quantity on the opposite exchange with **market**,
+5. evaluate the captured edge (see below); if the remaining convergence does
    not cover exit cost + minimum profit, close both legs immediately at market
    and stop (Telegram shows an `⚖️ Edge insuficiente` message),
-7. if covered quantity exists and the edge is kept, place TP/SL protection on
+6. if covered quantity exists and the edge is kept, place TP/SL protection on
    both legs (venue-side backstop).
+
+The execution setup (leverage set on RISEx, order-signing WASM init on
+Extended) runs **once at bot startup**, not per trade; per-trade preflight and
+margin reads were removed from the confirm path so the entry reaches the venue
+faster. Misconfiguration surfaces at boot (fatal) or at the submit step.
 
 Protection percentages are configurable from env:
 

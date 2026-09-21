@@ -686,7 +686,7 @@ function friendlyCallbackError(raw: string, quoteMaxAgeMs: number): string {
         'Tocá "Open Trade" de nuevo.'
       );
     case "Preview expired; open a new trade from a fresh signal":
-      return "⌛ La preview de la señal expiró. Esperá una señal nueva y tocá \"Open Trade\" ahí.";
+      return '⌛ La preview de la señal expiró. Esperá una señal nueva y tocá "Open Trade" ahí.';
     case "Preview was already consumed, cancelled or expired":
       return "↪️ Esa acción ya fue usada o expiró. Si el trade no abrió, usá una señal nueva.";
     case "Signal no longer exists":

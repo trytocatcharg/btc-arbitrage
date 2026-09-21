@@ -1,7 +1,7 @@
-import { desc, inArray, sql } from 'drizzle-orm';
-import { getDb, tradeLegs, trades, openTradeStatuses } from '@btc-arbitrage/db';
-import type { ExchangeAdapter } from '@btc-arbitrage/exchange-core';
-import type { MarketType, PriceSource } from '@btc-arbitrage/domain';
+import { desc, inArray, sql } from "drizzle-orm";
+import { getDb, tradeLegs, trades, openTradeStatuses } from "@btc-arbitrage/db";
+import type { ExchangeAdapter } from "@btc-arbitrage/exchange-core";
+import type { MarketType, PriceSource } from "@btc-arbitrage/domain";
 
 type BotDatabase = Awaited<ReturnType<typeof getDb>>;
 type TradeRow = typeof trades.$inferSelect;
@@ -36,7 +36,7 @@ interface ResolvedTradeSummary {
 interface ResolvedLegSummary {
   exchangeId: string;
   status: string;
-  side: 'long' | 'short';
+  side: "long" | "short";
   entryPriceUsd: number | null;
   quantityBase: number | null;
   currentPriceUsd: number | null;
@@ -48,7 +48,9 @@ interface QuoteSnapshot {
   priceUsd: number;
 }
 
-export async function buildTradeSummaryMessage(deps: TradeSummaryDependencies): Promise<string> {
+export async function buildTradeSummaryMessage(
+  deps: TradeSummaryDependencies,
+): Promise<string> {
   const farmedVolume = await loadFarmedVolumeUsd(deps.db);
   const farmedLines = [
     `Farmed volume (DB, lifetime): ${formatUsd(farmedVolume.lifetimeUsd)}`,
@@ -56,17 +58,20 @@ export async function buildTradeSummaryMessage(deps: TradeSummaryDependencies): 
   ];
   const activeTrades = await loadActiveTrades(deps.db);
   if (activeTrades.length === 0) {
-    return ['📭 No active trades found.', ...farmedLines].join('\n');
+    return ["📭 No active trades found.", ...farmedLines].join("\n");
   }
 
-  const legsByTradeId = await loadTradeLegsByTradeId(deps.db, activeTrades.map((trade) => trade.id));
+  const legsByTradeId = await loadTradeLegsByTradeId(
+    deps.db,
+    activeTrades.map((trade) => trade.id),
+  );
   const quoteCache = new Map<string, Promise<QuoteSnapshot | QuoteError>>();
 
   const summaries = await Promise.all(
     activeTrades.map(async (trade) => {
       const legs = legsByTradeId.get(trade.id) ?? [];
       return buildTradeSummary(trade, legs, deps.registry, quoteCache);
-    })
+    }),
   );
 
   return formatTradeSummaryMessage(summaries, farmedLines);
@@ -74,7 +79,9 @@ export async function buildTradeSummaryMessage(deps: TradeSummaryDependencies): 
 
 /** DB-backed farmed volume (volume-farming spec): lifetime total plus the
  * 24h trailing window pinned to trades.updatedAt (last fill activity). */
-async function loadFarmedVolumeUsd(db: BotDatabase): Promise<{ lifetimeUsd: number | null; last24hUsd: number | null }> {
+async function loadFarmedVolumeUsd(
+  db: BotDatabase,
+): Promise<{ lifetimeUsd: number | null; last24hUsd: number | null }> {
   const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
   const rows = await db
     .select({
@@ -96,11 +103,17 @@ async function loadActiveTrades(db: BotDatabase): Promise<TradeRow[]> {
     .orderBy(desc(trades.openedAt), desc(trades.createdAt));
 }
 
-async function loadTradeLegsByTradeId(db: BotDatabase, tradeIds: number[]): Promise<Map<number, TradeLegRow[]>> {
+async function loadTradeLegsByTradeId(
+  db: BotDatabase,
+  tradeIds: number[],
+): Promise<Map<number, TradeLegRow[]>> {
   const byTradeId = new Map<number, TradeLegRow[]>();
   if (tradeIds.length === 0) return byTradeId;
 
-  const rows = await db.select().from(tradeLegs).where(inArray(tradeLegs.tradeId, tradeIds));
+  const rows = await db
+    .select()
+    .from(tradeLegs)
+    .where(inArray(tradeLegs.tradeId, tradeIds));
   for (const row of rows) {
     const current = byTradeId.get(row.tradeId) ?? [];
     current.push(row);
@@ -113,22 +126,27 @@ async function buildTradeSummary(
   trade: TradeRow,
   tradeLegRows: TradeLegRow[],
   registry: ExchangeRegistryLike,
-  quoteCache: Map<string, Promise<QuoteSnapshot | QuoteError>>
+  quoteCache: Map<string, Promise<QuoteSnapshot | QuoteError>>,
 ): Promise<ResolvedTradeSummary> {
-  const longLegRow = tradeLegRows.find((leg) => leg.side === 'long');
-  const shortLegRow = tradeLegRows.find((leg) => leg.side === 'short');
+  const longLegRow = tradeLegRows.find((leg) => leg.side === "long");
+  const shortLegRow = tradeLegRows.find((leg) => leg.side === "short");
 
   const [longQuote, shortQuote] = await Promise.all([
-    longLegRow ? fetchCurrentQuote(registry, trade, longLegRow.exchangeId, quoteCache) : Promise.resolve<QuoteError>({ error: 'Missing long leg row' }),
-    shortLegRow ? fetchCurrentQuote(registry, trade, shortLegRow.exchangeId, quoteCache) : Promise.resolve<QuoteError>({ error: 'Missing short leg row' })
+    longLegRow
+      ? fetchCurrentQuote(registry, trade, longLegRow.exchangeId, quoteCache)
+      : Promise.resolve<QuoteError>({ error: "Missing long leg row" }),
+    shortLegRow
+      ? fetchCurrentQuote(registry, trade, shortLegRow.exchangeId, quoteCache)
+      : Promise.resolve<QuoteError>({ error: "Missing short leg row" }),
   ]);
 
-  const longLeg = resolveLegSummary(longLegRow, longQuote, 'long');
-  const shortLeg = resolveLegSummary(shortLegRow, shortQuote, 'short');
+  const longLeg = resolveLegSummary(longLegRow, longQuote, "long");
+  const shortLeg = resolveLegSummary(shortLegRow, shortQuote, "short");
   const entrySpreadUsd = resolveEntrySpreadUsd(trade, longLegRow, shortLegRow);
-  const liveSpreadUsd = longLeg.currentPriceUsd != null && shortLeg.currentPriceUsd != null
-    ? shortLeg.currentPriceUsd - longLeg.currentPriceUsd
-    : null;
+  const liveSpreadUsd =
+    longLeg.currentPriceUsd != null && shortLeg.currentPriceUsd != null
+      ? shortLeg.currentPriceUsd - longLeg.currentPriceUsd
+      : null;
 
   const totalEstimatedPnlUsd =
     longLeg.estimatedPnlUsd != null && shortLeg.estimatedPnlUsd != null
@@ -136,10 +154,12 @@ async function buildTradeSummary(
       : toNumber(trade.unrealizedPnlUsd);
 
   const notes: string[] = [];
-  if (!longLegRow) notes.push('Long leg row missing in DB.');
-  if (!shortLegRow) notes.push('Short leg row missing in DB.');
-  if (longLeg.quoteError) notes.push(`Long quote unavailable: ${longLeg.quoteError}`);
-  if (shortLeg.quoteError) notes.push(`Short quote unavailable: ${shortLeg.quoteError}`);
+  if (!longLegRow) notes.push("Long leg row missing in DB.");
+  if (!shortLegRow) notes.push("Short leg row missing in DB.");
+  if (longLeg.quoteError)
+    notes.push(`Long quote unavailable: ${longLeg.quoteError}`);
+  if (shortLeg.quoteError)
+    notes.push(`Short quote unavailable: ${shortLeg.quoteError}`);
 
   return {
     id: trade.id,
@@ -155,7 +175,7 @@ async function buildTradeSummary(
     totalEstimatedPnlUsd,
     longLeg,
     shortLeg,
-    notes
+    notes,
   };
 }
 
@@ -163,7 +183,7 @@ async function fetchCurrentQuote(
   registry: ExchangeRegistryLike,
   trade: TradeRow,
   exchangeId: string,
-  quoteCache: Map<string, Promise<QuoteSnapshot | QuoteError>>
+  quoteCache: Map<string, Promise<QuoteSnapshot | QuoteError>>,
 ): Promise<QuoteSnapshot | QuoteError> {
   const cacheKey = `${exchangeId}|${trade.symbol}|${trade.marketType}|${trade.priceSource}`;
   const cached = quoteCache.get(cacheKey);
@@ -175,15 +195,19 @@ async function fetchCurrentQuote(
       const snapshot = await adapter.getPriceSnapshot({
         symbol: trade.symbol,
         marketType: trade.marketType as MarketType,
-        priceSource: trade.priceSource as PriceSource
+        priceSource: trade.priceSource as PriceSource,
       });
       const price = toNumber(snapshot.priceUsd);
       if (price == null) {
-        return { error: `Invalid price ${snapshot.priceUsd}` } satisfies QuoteError;
+        return {
+          error: `Invalid price ${snapshot.priceUsd}`,
+        } satisfies QuoteError;
       }
       return { priceUsd: price } satisfies QuoteSnapshot;
     } catch (error) {
-      return { error: error instanceof Error ? error.message : 'Unknown quote error' } satisfies QuoteError;
+      return {
+        error: error instanceof Error ? error.message : "Unknown quote error",
+      } satisfies QuoteError;
     }
   })();
 
@@ -191,25 +215,30 @@ async function fetchCurrentQuote(
   return promise;
 }
 
-function resolveLegSummary(leg: TradeLegRow | undefined, quote: QuoteSnapshot | QuoteError, side: 'long' | 'short'): ResolvedLegSummary {
+function resolveLegSummary(
+  leg: TradeLegRow | undefined,
+  quote: QuoteSnapshot | QuoteError,
+  side: "long" | "short",
+): ResolvedLegSummary {
   const entryPriceUsd = leg ? toNumber(leg.entryPriceUsd) : null;
   const quantityBase = resolveQuantityBase(leg);
-  const currentPriceUsd = 'priceUsd' in quote ? quote.priceUsd : null;
-  const estimatedPnlUsd = entryPriceUsd != null && quantityBase != null && currentPriceUsd != null
-    ? side === 'long'
-      ? (currentPriceUsd - entryPriceUsd) * quantityBase
-      : (entryPriceUsd - currentPriceUsd) * quantityBase
-    : null;
+  const currentPriceUsd = "priceUsd" in quote ? quote.priceUsd : null;
+  const estimatedPnlUsd =
+    entryPriceUsd != null && quantityBase != null && currentPriceUsd != null
+      ? side === "long"
+        ? (currentPriceUsd - entryPriceUsd) * quantityBase
+        : (entryPriceUsd - currentPriceUsd) * quantityBase
+      : null;
 
   return {
-    exchangeId: leg?.exchangeId ?? 'unknown',
-    status: leg?.status ?? 'missing',
+    exchangeId: leg?.exchangeId ?? "unknown",
+    status: leg?.status ?? "missing",
     side,
     entryPriceUsd,
     quantityBase,
     currentPriceUsd,
     estimatedPnlUsd,
-    quoteError: 'error' in quote ? quote.error : undefined
+    quoteError: "error" in quote ? quote.error : undefined,
   };
 }
 
@@ -226,7 +255,11 @@ function resolveQuantityBase(leg: TradeLegRow | undefined): number | null {
   return null;
 }
 
-function resolveEntrySpreadUsd(trade: TradeRow, longLeg: TradeLegRow | undefined, shortLeg: TradeLegRow | undefined): number | null {
+function resolveEntrySpreadUsd(
+  trade: TradeRow,
+  longLeg: TradeLegRow | undefined,
+  shortLeg: TradeLegRow | undefined,
+): number | null {
   const storedEntrySpread = toNumber(trade.entrySpreadUsd);
   if (storedEntrySpread != null) return storedEntrySpread;
 
@@ -236,31 +269,45 @@ function resolveEntrySpreadUsd(trade: TradeRow, longLeg: TradeLegRow | undefined
   return shortEntry - longEntry;
 }
 
-function formatTradeSummaryMessage(summaries: ResolvedTradeSummary[], farmedLines: string[]): string {
-  const globalEstimatedPnlUsd = summaries.reduce<number | null>((total, summary) => {
-    if (summary.totalEstimatedPnlUsd == null) return total;
-    return (total ?? 0) + summary.totalEstimatedPnlUsd;
-  }, null);
-  const lines: string[] = ['📊 Active trade summary'];
+function formatTradeSummaryMessage(
+  summaries: ResolvedTradeSummary[],
+  farmedLines: string[],
+): string {
+  const globalEstimatedPnlUsd = summaries.reduce<number | null>(
+    (total, summary) => {
+      if (summary.totalEstimatedPnlUsd == null) return total;
+      return (total ?? 0) + summary.totalEstimatedPnlUsd;
+    },
+    null,
+  );
+  const lines: string[] = ["📊 Active trade summary"];
 
   lines.push(`Open trades: ${summaries.length}`);
   lines.push(`Global estimated PnL: ${formatPnl(globalEstimatedPnlUsd)}`);
   lines.push(...farmedLines);
 
   for (const summary of summaries) {
-    const spreadMoveUsd = summary.entrySpreadUsd != null && summary.liveSpreadUsd != null
-      ? summary.liveSpreadUsd - summary.entrySpreadUsd
-      : null;
-    const totalQuantityBase = sumKnown([summary.longLeg.quantityBase, summary.shortLeg.quantityBase]);
+    const spreadMoveUsd =
+      summary.entrySpreadUsd != null && summary.liveSpreadUsd != null
+        ? summary.liveSpreadUsd - summary.entrySpreadUsd
+        : null;
+    const totalQuantityBase = sumKnown([
+      summary.longLeg.quantityBase,
+      summary.shortLeg.quantityBase,
+    ]);
     const totalNotionalUsd = sumKnown([
       calculateLegNotionalUsd(summary.longLeg),
-      calculateLegNotionalUsd(summary.shortLeg)
+      calculateLegNotionalUsd(summary.shortLeg),
     ]);
 
-    lines.push('');
+    lines.push("");
     lines.push(`Trade #${summary.id} · ${summary.symbol} · ${summary.status}`);
-    lines.push(`Market: ${summary.marketType} · Source: ${summary.priceSource}`);
-    lines.push(`Created: ${formatDate(summary.createdAt)}${summary.openedAt ? ` · Opened: ${formatDate(summary.openedAt)}` : ''}`);
+    lines.push(
+      `Market: ${summary.marketType} · Source: ${summary.priceSource}`,
+    );
+    lines.push(
+      `Created: ${formatDate(summary.createdAt)}${summary.openedAt ? ` · Opened: ${formatDate(summary.openedAt)}` : ""}`,
+    );
 
     if (summary.entrySpreadUsd != null) {
       lines.push(`Entry spread: ${formatSignedUsd(summary.entrySpreadUsd)}`);
@@ -269,10 +316,14 @@ function formatTradeSummaryMessage(summaries: ResolvedTradeSummary[], farmedLine
       lines.push(`Live spread: ${formatSignedUsd(summary.liveSpreadUsd)}`);
     }
     if (spreadMoveUsd != null) {
-      lines.push(`Spread move: ${formatSignedUsd(spreadMoveUsd)} ${spreadMoveUsd <= 0 ? '(converging)' : '(widening)'}`);
+      lines.push(
+        `Spread move: ${formatSignedUsd(spreadMoveUsd)} ${spreadMoveUsd <= 0 ? "(converging)" : "(widening)"}`,
+      );
     }
     if (summary.totalEstimatedPnlUsd != null) {
-      lines.push(`Trade estimated PnL: ${formatPnl(summary.totalEstimatedPnlUsd)}`);
+      lines.push(
+        `Trade estimated PnL: ${formatPnl(summary.totalEstimatedPnlUsd)}`,
+      );
     }
     if (totalQuantityBase != null) {
       lines.push(`Total qty: ${formatQty(totalQuantityBase)} BTC`);
@@ -281,42 +332,48 @@ function formatTradeSummaryMessage(summaries: ResolvedTradeSummary[], farmedLine
       // Live-price estimate — explicitly labeled so it is never confused
       // with the persisted farmed-volume lines above (Open Question 3:
       // both are kept, labeled distinctly).
-      lines.push(`Total notional (live-price estimate): ${formatUsd(totalNotionalUsd)}`);
+      lines.push(
+        `Total notional (live-price estimate): ${formatUsd(totalNotionalUsd)}`,
+      );
     }
 
-    lines.push('');
+    lines.push("");
     lines.push(formatLegSummary(summary.longLeg));
     lines.push(formatLegSummary(summary.shortLeg));
 
     if (summary.notes.length > 0) {
-      lines.push('');
+      lines.push("");
       for (const note of summary.notes) {
         lines.push(`• ${note}`);
       }
     }
   }
 
-  return lines.join('\n');
+  return lines.join("\n");
 }
 
 function formatLegSummary(leg: ResolvedLegSummary): string {
   const label = leg.side.toUpperCase();
-  const priceMoveUsd = leg.entryPriceUsd != null && leg.currentPriceUsd != null
-    ? leg.currentPriceUsd - leg.entryPriceUsd
-    : null;
-  const priceMovePercent = leg.entryPriceUsd != null && priceMoveUsd != null
-    ? (priceMoveUsd / leg.entryPriceUsd) * 100
-    : null;
+  const priceMoveUsd =
+    leg.entryPriceUsd != null && leg.currentPriceUsd != null
+      ? leg.currentPriceUsd - leg.entryPriceUsd
+      : null;
+  const priceMovePercent =
+    leg.entryPriceUsd != null && priceMoveUsd != null
+      ? (priceMoveUsd / leg.entryPriceUsd) * 100
+      : null;
   const notionalUsd = calculateLegNotionalUsd(leg);
   const lines = [
     `${label} ${leg.exchangeId}`,
     `Status: ${leg.status}`,
     `Entry: ${formatUsd(leg.entryPriceUsd)}`,
-    `Current: ${formatUsd(leg.currentPriceUsd)}`
+    `Current: ${formatUsd(leg.currentPriceUsd)}`,
   ];
 
   if (priceMoveUsd != null) {
-    lines.push(`Price move: ${formatSignedUsd(priceMoveUsd)} (${formatSignedPercent(priceMovePercent)})`);
+    lines.push(
+      `Price move: ${formatSignedUsd(priceMoveUsd)} (${formatSignedPercent(priceMovePercent)})`,
+    );
   }
   if (leg.quantityBase != null) {
     lines.push(`Qty: ${formatQty(leg.quantityBase)}`);
@@ -330,37 +387,40 @@ function formatLegSummary(leg: ResolvedLegSummary): string {
     lines.push(`Quote error: ${leg.quoteError}`);
   }
 
-  return lines.join('\n');
+  return lines.join("\n");
 }
 
 function formatDate(value: Date): string {
-  return value.toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, 'Z');
+  return value
+    .toISOString()
+    .replace("T", " ")
+    .replace(/\.\d{3}Z$/, "Z");
 }
 
 function formatUsd(value: number | null): string {
-  if (value == null) return 'n/a';
+  if (value == null) return "n/a";
   return `$${value.toFixed(2)}`;
 }
 
 function formatQty(value: number): string {
-  return value.toFixed(8).replace(/\.?0+$/, '');
+  return value.toFixed(8).replace(/\.?0+$/, "");
 }
 
 function formatSignedUsd(value: number | null): string {
-  if (value == null) return 'n/a';
-  const prefix = value >= 0 ? '+' : '-';
+  if (value == null) return "n/a";
+  const prefix = value >= 0 ? "+" : "-";
   return `${prefix}$${Math.abs(value).toFixed(2)}`;
 }
 
 function formatSignedPercent(value: number | null): string {
-  if (value == null) return 'n/a';
-  const prefix = value >= 0 ? '+' : '-';
+  if (value == null) return "n/a";
+  const prefix = value >= 0 ? "+" : "-";
   return `${prefix}${Math.abs(value).toFixed(2)}%`;
 }
 
 function formatPnl(value: number | null): string {
-  if (value == null) return 'n/a';
-  const icon = value >= 0 ? '🟢' : '🔴';
+  if (value == null) return "n/a";
+  const icon = value >= 0 ? "🟢" : "🔴";
   return `${icon} ${formatSignedUsd(value)}`;
 }
 

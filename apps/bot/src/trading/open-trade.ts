@@ -190,12 +190,28 @@ export function assertProtectionAnchors(input: {
   const tpFactor = 1 + parseDecimal(input.takeProfitPercent, "percent") / 100;
   const slFactor = 1 - parseDecimal(input.stopLossPercent, "percent") / 100;
   const checks: Array<{ label: string; actual: string; expected: number }> = [
-    { label: "longTp", actual: input.longTpUsd, expected: parseDecimal(input.longEntryUsd) * tpFactor },
-    { label: "longSl", actual: input.longSlUsd, expected: parseDecimal(input.longEntryUsd) * slFactor },
+    {
+      label: "longTp",
+      actual: input.longTpUsd,
+      expected: parseDecimal(input.longEntryUsd) * tpFactor,
+    },
+    {
+      label: "longSl",
+      actual: input.longSlUsd,
+      expected: parseDecimal(input.longEntryUsd) * slFactor,
+    },
     // Short profits when price falls: its TP trigger sits BELOW its fill and
     // its SL trigger sits ABOVE it.
-    { label: "shortTp", actual: input.shortTpUsd, expected: parseDecimal(input.shortEntryUsd) * slFactor },
-    { label: "shortSl", actual: input.shortSlUsd, expected: parseDecimal(input.shortEntryUsd) * tpFactor },
+    {
+      label: "shortTp",
+      actual: input.shortTpUsd,
+      expected: parseDecimal(input.shortEntryUsd) * slFactor,
+    },
+    {
+      label: "shortSl",
+      actual: input.shortSlUsd,
+      expected: parseDecimal(input.shortEntryUsd) * tpFactor,
+    },
   ];
   const breaches: string[] = [];
   for (const check of checks) {
@@ -204,7 +220,8 @@ export function assertProtectionAnchors(input: {
       breaches.push(`${check.label}: non-positive actual/expected`);
       continue;
     }
-    const deviationBps = (Math.abs(actual - check.expected) / check.expected) * 10_000;
+    const deviationBps =
+      (Math.abs(actual - check.expected) / check.expected) * 10_000;
     if (deviationBps > PROTECTION_TOLERANCE_BPS)
       breaches.push(
         `${check.label}: ${check.actual} deviates ${deviationBps.toFixed(1)} bps from expected ${check.expected} (> ${PROTECTION_TOLERANCE_BPS} bps)`,
@@ -214,16 +231,32 @@ export function assertProtectionAnchors(input: {
   const longSl = parseDecimal(input.longSlUsd);
   const shortTp = parseDecimal(input.shortTpUsd);
   const shortSl = parseDecimal(input.shortSlUsd);
-  const crossChecks: Array<{ label: string; left: number; right: number; rightExpected: number }> = [
-    { label: "shortSl≈longTp", left: shortSl, right: longTp, rightExpected: longTp },
-    { label: "shortTp≈longSl", left: shortTp, right: longSl, rightExpected: longSl },
+  const crossChecks: Array<{
+    label: string;
+    left: number;
+    right: number;
+    rightExpected: number;
+  }> = [
+    {
+      label: "shortSl≈longTp",
+      left: shortSl,
+      right: longTp,
+      rightExpected: longTp,
+    },
+    {
+      label: "shortTp≈longSl",
+      left: shortTp,
+      right: longSl,
+      rightExpected: longSl,
+    },
   ];
   for (const check of crossChecks) {
     if (!(check.rightExpected > 0)) {
       breaches.push(`${check.label}: non-positive reference level`);
       continue;
     }
-    const deviationBps = (Math.abs(check.left - check.right) / check.rightExpected) * 10_000;
+    const deviationBps =
+      (Math.abs(check.left - check.right) / check.rightExpected) * 10_000;
     if (deviationBps > PROTECTION_TOLERANCE_BPS)
       breaches.push(
         `${check.label}: ${check.left} vs ${check.right} deviates ${deviationBps.toFixed(1)} bps (> ${PROTECTION_TOLERANCE_BPS} bps)`,
@@ -468,25 +501,11 @@ export class OpenTradeService {
     const protectionOrderIds: Array<{ adapter: ExecutionAdapter; id: string }> =
       [];
     try {
-      const [, , limitMarginUsd, marketMarginUsd] = await Promise.all([
-        limit.validateExecutionPreflight({
-          symbol: preview.symbol,
-          leverage: this.options.leverage,
-        }),
-        market.validateExecutionPreflight({
-          symbol: preview.symbol,
-          leverage: this.options.leverage,
-        }),
-        limit.getAvailableMarginUsd(),
-        market.getAvailableMarginUsd(),
-      ]);
-      console.log("OpenTrade preflight ok", {
-        token,
-        limitExchange: preview.limitExchange,
-        marketExchange: preview.marketExchange,
-        limitMarginUsd,
-        marketMarginUsd,
-      });
+      // Execution setup (leverage set on RISEx, order-signing WASM init
+      // on Extended) is process-lifetime work hoisted to bot startup —
+      // see main.ts. Re-running it per trade added avoidable latency to
+      // the entry path; margin/leverage misconfigurations now surface at
+      // the submit step instead.
       const limitSide =
         preview.limitExchange === preview.shortExchange ? "sell" : "buy";
       const totalQuantityBase = parseDecimal(preview.quantityBase);
@@ -514,20 +533,20 @@ export class OpenTradeService {
           },
         ],
       });
-          let marketFillPrice: string | undefined;
-          // Provenance of the market (hedge) leg fill price, when the adapter
-          // reports it (RISEx). Undefined means the ack is authoritative
-          // (order_ack semantics).
-          let hedgeFillSource:
-            | "order_ack"
-            | "order_history"
-            | "position_average"
-            | undefined;
-          let hedgeFillDerived = false;
-          let hedgeNotionalUsd = 0;
-          const marketSide =
-            preview.marketExchange === preview.shortExchange ? "sell" : "buy";
-          const started = this.now().getTime();
+      let marketFillPrice: string | undefined;
+      // Provenance of the market (hedge) leg fill price, when the adapter
+      // reports it (RISEx). Undefined means the ack is authoritative
+      // (order_ack semantics).
+      let hedgeFillSource:
+        | "order_ack"
+        | "order_history"
+        | "position_average"
+        | undefined;
+      let hedgeFillDerived = false;
+      let hedgeNotionalUsd = 0;
+      const marketSide =
+        preview.marketExchange === preview.shortExchange ? "sell" : "buy";
+      const started = this.now().getTime();
       let current = activeLimit;
       let lastLoggedStatus = current.status;
       // Fill accounting must survive repricing: fills of cancelled orders
@@ -539,6 +558,10 @@ export class OpenTradeService {
       let activeNotionalUsd = 0;
       let repriceCount = 0;
       let lastRepriceCheckAt = started;
+      // Why a no-fill entry aborted: plain timeout, or the anti-chase
+      // guard stopped repricing once the executable spread inverted.
+      let entryAbortReason: "limit_timeout" | "spread_inverted" =
+        "limit_timeout";
       console.log("OpenTrade fill polling started", {
         token,
         orderId: activeLimit.id,
@@ -567,14 +590,14 @@ export class OpenTradeService {
             type: "market",
             quantityBase: formatDecimal(diff, 10),
           });
-          hedgeNotionalUsd += diff * parseDecimal(hedge.averageFillPriceUsd ?? "0");
+          hedgeNotionalUsd +=
+            diff * parseDecimal(hedge.averageFillPriceUsd ?? "0");
           const hedgeAck = hedge as {
             fillPriceSource?: string;
             fillPriceDerived?: boolean;
           };
           hedgeFillSource =
-            (hedgeAck.fillPriceSource as typeof hedgeFillSource) ??
-            "order_ack";
+            (hedgeAck.fillPriceSource as typeof hedgeFillSource) ?? "order_ack";
           hedgeFillDerived = hedgeAck.fillPriceDerived === true;
           console.log("OpenTrade hedge submitted", {
             token,
@@ -585,9 +608,52 @@ export class OpenTradeService {
             status: hedge.status,
             averageFillPriceUsd: hedge.averageFillPriceUsd,
           });
-          if (hedge.status !== "filled" || !hedge.averageFillPriceUsd)
+          // Venue acks can lag the fill: RISEx returns no status/price in
+          // the ack and proves fills via position delta, and its
+          // getExecutionOrder throws once the order is filled (it leaves
+          // the open-orders list). Never roll back a quantity-complete
+          // hedge just because the metadata is stale — a false negative
+          // here emergency-closes both legs and crystallizes a loss
+          // (observed 2026-09-18). Re-read the order a bounded number of
+          // times first; only an unresolved hedge after that is a failure.
+          let resolvedHedge = hedge;
+          const hedgeFilledBase = parseDecimal(hedge.filledQuantityBase ?? "0");
+          if (
+            (hedge.status !== "filled" || !hedge.averageFillPriceUsd) &&
+            hedgeFilledBase >= diff - 1e-10
+          ) {
+            for (let attempt = 1; attempt <= 6; attempt += 1) {
+              await this.sleep(500);
+              try {
+                const latest = await market.getExecutionOrder(hedge.id);
+                console.log("OpenTrade hedge fill re-poll", {
+                  token,
+                  orderId: hedge.id,
+                  attempt,
+                  status: latest.status,
+                  averageFillPriceUsd: latest.averageFillPriceUsd,
+                });
+                if (latest.status === "filled" && latest.averageFillPriceUsd) {
+                  resolvedHedge = { ...hedge, ...latest };
+                  break;
+                }
+              } catch (error) {
+                console.warn("OpenTrade hedge fill re-poll failed", {
+                  token,
+                  orderId: hedge.id,
+                  attempt,
+                  message:
+                    error instanceof Error ? error.message : String(error),
+                });
+              }
+            }
+          }
+          if (
+            resolvedHedge.status !== "filled" ||
+            !resolvedHedge.averageFillPriceUsd
+          )
             throw new Error("Market hedge was not immediately filled");
-          marketFillPrice = hedge.averageFillPriceUsd;
+          marketFillPrice = resolvedHedge.averageFillPriceUsd;
           await this.store.transition(token, "hedging", {
             legs: [
               {
@@ -595,7 +661,7 @@ export class OpenTradeService {
                 side: marketSide === "buy" ? "long" : "short",
                 status: "open",
                 entryOrderId: hedge.id,
-                entryPriceUsd: hedge.averageFillPriceUsd,
+                entryPriceUsd: resolvedHedge.averageFillPriceUsd,
               },
             ],
           });
@@ -612,11 +678,55 @@ export class OpenTradeService {
           });
           lastLoggedStatus = current.status;
         }
-        if (
-          current.status === "filled" ||
-          this.now().getTime() - started >= this.options.limitTimeoutMs
-        )
+        if (current.status === "filled") break;
+        if (this.now().getTime() - started >= this.options.limitTimeoutMs) {
+          // Timeout: cancel the resting order and settle any fill that
+          // raced the cancel before giving up on the trade. Extended has
+          // accepted a cancel on an already-filled order (observed
+          // 2026-09-21), which left a naked position on the limit venue
+          // while the bot believed nothing filled. Re-read with bounded
+          // retries, keep the max-filled state, and continue the loop on
+          // a late fill so the increment hedge runs before re-checking.
+          try {
+            await limit.cancelExecutionOrder(activeLimit.id);
+          } catch (error) {
+            // A filled order rejects the cancel; nothing else to do here.
+            console.warn("OpenTrade cancel after wait failed", {
+              token,
+              orderId: activeLimit.id,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          }
+          const settled = await this.readOrderAfterCancel(
+            limit,
+            activeLimit.id,
+            current,
+          );
+          if (
+            parseDecimal(settled.filledQuantityBase) >
+            parseDecimal(current.filledQuantityBase)
+          ) {
+            console.warn("OpenTrade late fill detected after cancel", {
+              token,
+              orderId: activeLimit.id,
+              finalStatus: settled.status,
+              filledQuantityBase: settled.filledQuantityBase,
+              averageFillPriceUsd: settled.averageFillPriceUsd,
+              elapsedMs: this.now().getTime() - started,
+            });
+            current = settled;
+            continue;
+          }
+          console.warn("OpenTrade limit timed out and was cancelled", {
+            token,
+            orderId: activeLimit.id,
+            finalStatus: settled.status,
+            filledQuantityBase: settled.filledQuantityBase,
+            elapsedMs: this.now().getTime() - started,
+          });
+          current = settled;
           break;
+        }
         await this.sleep(250);
         // Extended has read-after-write lag: an order created seconds ago
         // can briefly 404 on GET (observed 2026-09-14, and historical
@@ -646,14 +756,21 @@ export class OpenTradeService {
           lastRepriceCheckAt = this.now().getTime();
           let bbo: BestBidOffer;
           let meta: Awaited<ReturnType<ExecutionAdapter["getMarketMetadata"]>>;
+          let otherBbo: BestBidOffer;
           try {
-            [bbo, meta] = await Promise.all([
+            [bbo, meta, otherBbo] = await Promise.all([
               limit.getBestBidOffer({
                 symbol: preview.symbol,
                 marketType: "perpetual",
                 priceSource: "last",
               }),
               limit.getMarketMetadata({
+                symbol: preview.symbol,
+                marketType: "perpetual",
+                priceSource: "last",
+              }),
+              // Anti-chase guard input: the hedge side's executable quote.
+              market.getBestBidOffer({
                 symbol: preview.symbol,
                 marketType: "perpetual",
                 priceSource: "last",
@@ -688,6 +805,82 @@ export class OpenTradeService {
             remainingBase <= REPRICE_MIN_REMAINING_BASE
           )
             continue;
+          // Anti-chase guard: never reprice past the point where the
+          // cross-venue executable spread stops covering round-trip cost
+          // + minimum profit. Without it, an aggressive limit chases a
+          // moving book into a guaranteed-loss fill (observed 2026-09-21:
+          // buy filled at 84800 while the hedge side bid was 84770 — a
+          // -$30 entry). The signal can be a mark-price illusion; the
+          // executable BBO is the truth.
+          const hedgeQuoteUsd =
+            limitSide === "buy" ? otherBbo.bidUsd : otherBbo.askUsd;
+          const priceEdgeUsd =
+            limitSide === "buy"
+              ? parseDecimal(hedgeQuoteUsd) - parseDecimal(desiredPriceUsd)
+              : parseDecimal(desiredPriceUsd) - parseDecimal(hedgeQuoteUsd);
+          const prospectiveEdgeUsd = priceEdgeUsd * remainingBase;
+          const limitFees = this.options.fees[preview.limitExchange];
+          const marketFees = this.options.fees[preview.marketExchange];
+          const limitNotionalUsd =
+            parseDecimal(desiredPriceUsd) * remainingBase;
+          const hedgeNotionalUsd = parseDecimal(hedgeQuoteUsd) * remainingBase;
+          const guardEntryFeesUsd =
+            (limitNotionalUsd * parseDecimal(limitFees.makerBps) +
+              hedgeNotionalUsd * parseDecimal(marketFees.takerBps)) /
+            10_000;
+          const guardExitFeesUsd =
+            (limitNotionalUsd * parseDecimal(limitFees.takerBps) +
+              hedgeNotionalUsd * parseDecimal(marketFees.takerBps)) /
+            10_000;
+          const guardSlippageUsd =
+            ((limitNotionalUsd + hedgeNotionalUsd) *
+              parseDecimal(this.options.slippageBps ?? DEFAULT_SLIPPAGE_BPS)) /
+            10_000;
+          const guardBufferUsd =
+            guardEntryFeesUsd +
+            guardExitFeesUsd +
+            guardSlippageUsd +
+            parseDecimal(this.options.minProfitUsd ?? DEFAULT_MIN_PROFIT_USD);
+          if (prospectiveEdgeUsd < guardBufferUsd) {
+            console.warn(
+              "OpenTrade repricing stopped: executable spread below cost",
+              {
+                token,
+                orderId: activeLimit.id,
+                desiredPriceUsd,
+                hedgeQuoteUsd,
+                prospectiveEdgeUsd,
+                guardBufferUsd,
+                remainingBase: formatDecimal(remainingBase, 10),
+              },
+            );
+            try {
+              await limit.cancelExecutionOrder(activeLimit.id);
+            } catch (error) {
+              console.warn("OpenTrade anti-chase cancel failed; re-reading", {
+                token,
+                orderId: activeLimit.id,
+                message: error instanceof Error ? error.message : String(error),
+              });
+            }
+            const settled = await this.readOrderAfterCancel(
+              limit,
+              activeLimit.id,
+              current,
+            );
+            if (
+              parseDecimal(settled.filledQuantityBase) >
+              parseDecimal(current.filledQuantityBase)
+            ) {
+              // A fill raced the cancel: let the loop top hedge it, then
+              // the post-loop edge band decides whether to keep it.
+              current = settled;
+              continue;
+            }
+            current = settled;
+            entryAbortReason = "spread_inverted";
+            break;
+          }
           console.log("OpenTrade repricing resting limit order", {
             token,
             orderId: activeLimit.id,
@@ -757,41 +950,22 @@ export class OpenTradeService {
           }
         }
       }
-      if (current.status !== "filled") {
-        try {
-          await limit.cancelExecutionOrder(activeLimit.id);
-        } catch (error) {
-          // A filled order rejects the cancel; nothing else to do here.
-          console.warn("OpenTrade cancel after wait failed", {
-            token,
-            orderId: activeLimit.id,
-            message: error instanceof Error ? error.message : String(error),
-          });
-        }
-        console.warn("OpenTrade limit timed out and was cancelled", {
-          token,
-          orderId: activeLimit.id,
-          finalStatus: current.status,
-          filledQuantityBase: current.filledQuantityBase,
-          elapsedMs: this.now().getTime() - started,
-        });
-      }
       if (covered <= 0) {
         await this.store.transition(token, "cancelled", {
-          closeReason: "limit_timeout",
+          closeReason: entryAbortReason,
           legs: [
             {
               exchangeId: preview.limitExchange,
               side: limitSide === "buy" ? "long" : "short",
               status: "cancelled",
-              closeReason: "limit_timeout",
+              closeReason: entryAbortReason,
               exitOrderId: activeLimit.id,
             },
             {
               exchangeId: preview.marketExchange,
               side: limitSide === "buy" ? "short" : "long",
               status: "cancelled",
-              closeReason: "limit_timeout",
+              closeReason: entryAbortReason,
             },
           ],
         });
@@ -799,15 +973,21 @@ export class OpenTradeService {
           token,
           orderId: activeLimit.id,
           finalStatus: current.status,
+          reason: entryAbortReason,
         });
         const limitSideForNotice =
           preview.limitExchange === preview.shortExchange ? "sell" : "buy";
         await this.options.notifyLimitTimeout?.({
           token,
           message:
-            `⏱ Limit order en ${preview.limitExchange} (${limitSideForNotice} ` +
-            `${preview.quantityBase} ${preview.symbol}) no se llenó en ` +
-            `${this.options.limitTimeoutMs}ms y fue cancelada. ¿Reintentar?`,
+            entryAbortReason === "spread_inverted"
+              ? `🛑 Entrada abortada en ${preview.limitExchange} ` +
+                `(${limitSideForNotice} ${preview.quantityBase} ${preview.symbol}): ` +
+                `perseguir el precio ya era pérdida segura (spread ejecutable invertido). ` +
+                `Límite cancelado sin fill. ¿Reintentar?`
+              : `⏱ Limit order en ${preview.limitExchange} (${limitSideForNotice} ` +
+                `${preview.quantityBase} ${preview.symbol}) no se llenó en ` +
+                `${this.options.limitTimeoutMs}ms y fue cancelada. ¿Reintentar?`,
         });
         return { outcome: "cancelled" as const };
       }
@@ -823,239 +1003,232 @@ export class OpenTradeService {
         preview.limitExchange === preview.shortExchange
           ? limitFillPrice
           : marketFillPrice;
-          if (!longEntry || !shortEntry)
-            throw new Error("Cannot protect trade without confirmed fill prices");
+      if (!longEntry || !shortEntry)
+        throw new Error("Cannot protect trade without confirmed fill prices");
 
-          // Fill-price integrity (design D2): the order ack / order-history
-          // provenance is authoritative and used directly. The whole-position
-          // average is a documented fallback only — a blank, non-positive,
-          // signed-size-derived (blended), or same-BTC-sanity-failing value
-          // fails the protection step loudly instead of anchoring mis-priced
-          // TP/SL orders.
-          if (hedgeFillSource === "position_average") {
-            const limitPriceUsd = limitFillPrice
-              ? parseDecimal(limitFillPrice)
-              : NaN;
-            const hedgePriceUsd = marketFillPrice
-              ? parseDecimal(marketFillPrice)
-              : NaN;
-            const corrupt =
-              hedgeFillDerived ||
-              !marketFillPrice ||
-              marketFillPrice.trim() === "" ||
-              !(hedgePriceUsd > 0);
-            const sanityDeviationBps =
-              !corrupt && limitPriceUsd > 0
-                ? (Math.abs(hedgePriceUsd - limitPriceUsd) / limitPriceUsd) *
-                  10_000
-                : 0;
-            if (
-              corrupt ||
-              sanityDeviationBps > PROTECTION_TOLERANCE_BPS
-            ) {
-              throw new ProtectionAnchorError(
-                `Hedge fill price failed integrity check ` +
-                  `(source=position_average, derived=${hedgeFillDerived}, ` +
-                  `price=${marketFillPrice ?? "n/a"}, ` +
-                  `limitFill=${limitFillPrice}, ` +
-                  `deviationBps=${sanityDeviationBps.toFixed(1)}); ` +
-                  `refusing to anchor protection orders`,
-              );
-            }
-          }
+      // Fill-price integrity (design D2): the order ack / order-history
+      // provenance is authoritative and used directly. The whole-position
+      // average is a documented fallback only — a blank, non-positive,
+      // signed-size-derived (blended), or same-BTC-sanity-failing value
+      // fails the protection step loudly instead of anchoring mis-priced
+      // TP/SL orders.
+      if (hedgeFillSource === "position_average") {
+        const limitPriceUsd = limitFillPrice
+          ? parseDecimal(limitFillPrice)
+          : NaN;
+        const hedgePriceUsd = marketFillPrice
+          ? parseDecimal(marketFillPrice)
+          : NaN;
+        const corrupt =
+          hedgeFillDerived ||
+          !marketFillPrice ||
+          marketFillPrice.trim() === "" ||
+          !(hedgePriceUsd > 0);
+        const sanityDeviationBps =
+          !corrupt && limitPriceUsd > 0
+            ? (Math.abs(hedgePriceUsd - limitPriceUsd) / limitPriceUsd) * 10_000
+            : 0;
+        if (corrupt || sanityDeviationBps > PROTECTION_TOLERANCE_BPS) {
+          throw new ProtectionAnchorError(
+            `Hedge fill price failed integrity check ` +
+              `(source=position_average, derived=${hedgeFillDerived}, ` +
+              `price=${marketFillPrice ?? "n/a"}, ` +
+              `limitFill=${limitFillPrice}, ` +
+              `deviationBps=${sanityDeviationBps.toFixed(1)}); ` +
+              `refusing to anchor protection orders`,
+          );
+        }
+      }
 
-          // Farmed volume (design D6): both entry fills land in one
-          // transition — the limit leg's settled notional (exact across
-          // reprices), the hedge leg's qty × fill price, and the trade-level
-          // sum — via monotonic coalesce+delta inside the transaction.
-          await this.store.transition(token, "hedging", {
-            filledNotionalUsdDelta: formatDecimal(
-              settledNotionalUsd + hedgeNotionalUsd,
-              8,
-            ),
-            legs: [
-              {
-                exchangeId: preview.limitExchange,
-                side: limitSide === "buy" ? "long" : "short",
-                filledNotionalUsdDelta: formatDecimal(settledNotionalUsd, 8),
-              },
-              {
-                exchangeId: preview.marketExchange,
-                side: marketSide === "buy" ? "long" : "short",
-                filledNotionalUsdDelta: formatDecimal(hedgeNotionalUsd, 8),
-              },
-            ],
-          });
+      // Farmed volume (design D6): both entry fills land in one
+      // transition — the limit leg's settled notional (exact across
+      // reprices), the hedge leg's qty × fill price, and the trade-level
+      // sum — via monotonic coalesce+delta inside the transaction.
+      await this.store.transition(token, "hedging", {
+        filledNotionalUsdDelta: formatDecimal(
+          settledNotionalUsd + hedgeNotionalUsd,
+          8,
+        ),
+        legs: [
+          {
+            exchangeId: preview.limitExchange,
+            side: limitSide === "buy" ? "long" : "short",
+            filledNotionalUsdDelta: formatDecimal(settledNotionalUsd, 8),
+          },
+          {
+            exchangeId: preview.marketExchange,
+            side: marketSide === "buy" ? "long" : "short",
+            filledNotionalUsdDelta: formatDecimal(hedgeNotionalUsd, 8),
+          },
+        ],
+      });
 
-          // Per-leg protection anchors (design D1): each leg's TP/SL is
-          // anchored to ITS OWN fill price — long TP = longFill × (1+TP%),
-          // long SL = longFill × (1−SL%); the short leg profits when price
-          // falls, so its TP trigger sits BELOW its fill (×(1−SL%)) and its
-          // SL trigger ABOVE it (×(1+TP%)). This replaces the old cross-anchor
-          // where the short leg inherited the long leg's trigger levels.
-          const longTp = applyPercentChange(
-            longEntry,
-            this.options.takeProfitPercent,
-            "up",
-          );
-          const longSl = applyPercentChange(
-            longEntry,
-            this.options.stopLossPercent,
-            "down",
-          );
-          const shortTp = applyPercentChange(
-            shortEntry,
-            this.options.stopLossPercent,
-            "down",
-          );
-          const shortSl = applyPercentChange(
-            shortEntry,
-            this.options.takeProfitPercent,
-            "up",
-          );
-          assertProtectionAnchors({
-            longEntryUsd: longEntry,
-            shortEntryUsd: shortEntry,
-            longTpUsd: longTp,
-            longSlUsd: longSl,
-            shortTpUsd: shortTp,
-            shortSlUsd: shortSl,
-            takeProfitPercent: this.options.takeProfitPercent,
-            stopLossPercent: this.options.stopLossPercent,
-          });
+      // Per-leg protection anchors (design D1): each leg's TP/SL is
+      // anchored to ITS OWN fill price — long TP = longFill × (1+TP%),
+      // long SL = longFill × (1−SL%); the short leg profits when price
+      // falls, so its TP trigger sits BELOW its fill (×(1−SL%)) and its
+      // SL trigger ABOVE it (×(1+TP%)). This replaces the old cross-anchor
+      // where the short leg inherited the long leg's trigger levels.
+      const longTp = applyPercentChange(
+        longEntry,
+        this.options.takeProfitPercent,
+        "up",
+      );
+      const longSl = applyPercentChange(
+        longEntry,
+        this.options.stopLossPercent,
+        "down",
+      );
+      const shortTp = applyPercentChange(
+        shortEntry,
+        this.options.stopLossPercent,
+        "down",
+      );
+      const shortSl = applyPercentChange(
+        shortEntry,
+        this.options.takeProfitPercent,
+        "up",
+      );
+      assertProtectionAnchors({
+        longEntryUsd: longEntry,
+        shortEntryUsd: shortEntry,
+        longTpUsd: longTp,
+        longSlUsd: longSl,
+        shortTpUsd: shortTp,
+        shortSlUsd: shortSl,
+        takeProfitPercent: this.options.takeProfitPercent,
+        stopLossPercent: this.options.stopLossPercent,
+      });
 
-          // Fee-aware fill-time edge band (design D4): the band's inputs are
-          // knowable exactly once, at fill. Keep the trade iff the expected
-          // convergence still left in the captured spread covers the
-          // round-trip breakeven (entry fees + exit fees + slippage) plus the
-          // configured minimum profit; otherwise abort immediately.
-          const limitFees = this.options.fees[preview.limitExchange];
-          const marketFees = this.options.fees[preview.marketExchange];
-          const limitNotionalUsd = settledNotionalUsd;
-          const exitNotionalUsd = limitNotionalUsd + hedgeNotionalUsd;
-          const entryFeesUsd =
-            (limitNotionalUsd * parseDecimal(limitFees.makerBps) +
-              hedgeNotionalUsd * parseDecimal(marketFees.takerBps)) /
-            10_000;
-          const exitFeesUsd =
-            (limitNotionalUsd * parseDecimal(limitFees.takerBps) +
-              hedgeNotionalUsd * parseDecimal(marketFees.takerBps)) /
-            10_000;
-          const slippageUsd =
-            (exitNotionalUsd *
-              parseDecimal(this.options.slippageBps ?? DEFAULT_SLIPPAGE_BPS)) /
-            10_000;
-          const breakevenUsd = entryFeesUsd + exitFeesUsd + slippageUsd;
-          // Convergence still capturable at fills: the strategy is
-          // long-the-cheap-venue / short-the-expensive-venue, so both legs
-          // profit as the prices meet: (P − longEntry) + (shortEntry − P) =
-          // shortEntry − longEntry. (Design D4 wrote max(0, longEntry −
-          // shortEntry); that sign aborts every normally-filled trade and
-          // contradicts the spec's keep scenario — see apply-progress
-          // deviation #1.)
-          const expectedConvergenceUsd = Math.max(
-            0,
-            parseDecimal(shortEntry) - parseDecimal(longEntry),
+      // Fee-aware fill-time edge band (design D4): the band's inputs are
+      // knowable exactly once, at fill. Keep the trade iff the expected
+      // convergence still left in the captured spread covers the
+      // round-trip breakeven (entry fees + exit fees + slippage) plus the
+      // configured minimum profit; otherwise abort immediately.
+      const limitFees = this.options.fees[preview.limitExchange];
+      const marketFees = this.options.fees[preview.marketExchange];
+      const limitNotionalUsd = settledNotionalUsd;
+      const exitNotionalUsd = limitNotionalUsd + hedgeNotionalUsd;
+      const entryFeesUsd =
+        (limitNotionalUsd * parseDecimal(limitFees.makerBps) +
+          hedgeNotionalUsd * parseDecimal(marketFees.takerBps)) /
+        10_000;
+      const exitFeesUsd =
+        (limitNotionalUsd * parseDecimal(limitFees.takerBps) +
+          hedgeNotionalUsd * parseDecimal(marketFees.takerBps)) /
+        10_000;
+      const slippageUsd =
+        (exitNotionalUsd *
+          parseDecimal(this.options.slippageBps ?? DEFAULT_SLIPPAGE_BPS)) /
+        10_000;
+      const breakevenUsd = entryFeesUsd + exitFeesUsd + slippageUsd;
+      // Convergence still capturable at fills: the strategy is
+      // long-the-cheap-venue / short-the-expensive-venue, so both legs
+      // profit as the prices meet: (P − longEntry) + (shortEntry − P) =
+      // shortEntry − longEntry. (Design D4 wrote max(0, longEntry −
+      // shortEntry); that sign aborts every normally-filled trade and
+      // contradicts the spec's keep scenario — see apply-progress
+      // deviation #1.)
+      const expectedConvergenceUsd = Math.max(
+        0,
+        parseDecimal(shortEntry) - parseDecimal(longEntry),
+      );
+      const capturedSpreadUsd = expectedConvergenceUsd;
+      const minProfitUsd = parseDecimal(
+        this.options.minProfitUsd ?? DEFAULT_MIN_PROFIT_USD,
+      );
+      const minEdgeUsd = breakevenUsd + minProfitUsd;
+      const keepOpen = expectedConvergenceUsd >= minEdgeUsd;
+      console.log("OpenTrade edge band evaluated", {
+        token,
+        capturedSpreadUsd,
+        expectedConvergenceUsd,
+        entryFeesUsd,
+        exitFeesUsd,
+        slippageUsd,
+        breakevenUsd,
+        minProfitUsd,
+        minEdgeUsd,
+        keepOpen,
+      });
+      if (!keepOpen) {
+        console.warn("OpenTrade edge below cost; closing both legs at market", {
+          token,
+          capturedSpreadUsd,
+          expectedConvergenceUsd,
+          breakevenUsd,
+          minEdgeUsd,
+        });
+        const coveredQuantityBase = formatDecimal(covered, 10);
+        const close = await closeTradeBothLegs({
+          store: this.store,
+          registry: this.registry,
+          token,
+          symbol: preview.symbol,
+          longExchange: preview.longExchange,
+          shortExchange: preview.shortExchange,
+          legs: [
+            {
+              exchangeId: preview.longExchange,
+              side: "long",
+              quantityBase: coveredQuantityBase,
+              entryPriceUsd: longEntry,
+              raw: undefined,
+            },
+            {
+              exchangeId: preview.shortExchange,
+              side: "short",
+              quantityBase: coveredQuantityBase,
+              entryPriceUsd: shortEntry,
+              raw: undefined,
+            },
+          ],
+          reason: "edge_below_cost",
+          notify: (text) =>
+            this.options.notifyUrgent?.(text) ?? Promise.resolve(),
+        });
+        // Runtime assertion (design D4): the abort loss is structurally
+        // bounded by fees + slippage ≪ maxLossUsd; an exceedance means the
+        // fee model drifted. Log + notify but do not throw — the trade is
+        // already closed.
+        if (close.realizedPnlUsd != null) {
+          const maxLossUsd = parseDecimal(
+            this.options.maxLossUsd ?? DEFAULT_MAX_LOSS_USD,
           );
-          const capturedSpreadUsd = expectedConvergenceUsd;
-          const minProfitUsd = parseDecimal(
-            this.options.minProfitUsd ?? DEFAULT_MIN_PROFIT_USD,
-          );
-          const minEdgeUsd = breakevenUsd + minProfitUsd;
-          const keepOpen = expectedConvergenceUsd >= minEdgeUsd;
-          console.log("OpenTrade edge band evaluated", {
-            token,
-            capturedSpreadUsd,
-            expectedConvergenceUsd,
-            entryFeesUsd,
-            exitFeesUsd,
-            slippageUsd,
-            breakevenUsd,
-            minProfitUsd,
-            minEdgeUsd,
-            keepOpen,
-          });
-          if (!keepOpen) {
-            console.warn(
-              "OpenTrade edge below cost; closing both legs at market",
-              {
-                token,
-                capturedSpreadUsd,
-                expectedConvergenceUsd,
-                breakevenUsd,
-                minEdgeUsd,
-              },
+          const abortLossUsd = Math.abs(parseDecimal(close.realizedPnlUsd));
+          if (abortLossUsd > maxLossUsd) {
+            console.error(
+              "OpenTrade edge abort exceeded max loss bound (fee-model drift detected)",
+              { token, realizedPnlUsd: close.realizedPnlUsd, maxLossUsd },
             );
-            const coveredQuantityBase = formatDecimal(covered, 10);
-            const close = await closeTradeBothLegs({
-              store: this.store,
-              registry: this.registry,
-              token,
-              symbol: preview.symbol,
-              longExchange: preview.longExchange,
-              shortExchange: preview.shortExchange,
-              legs: [
-                {
-                  exchangeId: preview.longExchange,
-                  side: "long",
-                  quantityBase: coveredQuantityBase,
-                  entryPriceUsd: longEntry,
-                  raw: undefined,
-                },
-                {
-                  exchangeId: preview.shortExchange,
-                  side: "short",
-                  quantityBase: coveredQuantityBase,
-                  entryPriceUsd: shortEntry,
-                  raw: undefined,
-                },
-              ],
-              reason: "edge_below_cost",
-              notify: (text) =>
-                this.options.notifyUrgent?.(text) ?? Promise.resolve(),
-            });
-            // Runtime assertion (design D4): the abort loss is structurally
-            // bounded by fees + slippage ≪ maxLossUsd; an exceedance means the
-            // fee model drifted. Log + notify but do not throw — the trade is
-            // already closed.
-            if (close.realizedPnlUsd != null) {
-              const maxLossUsd = parseDecimal(
-                this.options.maxLossUsd ?? DEFAULT_MAX_LOSS_USD,
-              );
-              const abortLossUsd = Math.abs(parseDecimal(close.realizedPnlUsd));
-              if (abortLossUsd > maxLossUsd) {
-                console.error(
-                  "OpenTrade edge abort exceeded max loss bound (fee-model drift detected)",
-                  { token, realizedPnlUsd: close.realizedPnlUsd, maxLossUsd },
-                );
-                await this.options.notifyUrgent?.(
-                  `🚨 fee-model drift detected: edge_below_cost close on ` +
-                    `${token.slice(0, 8)} realized $${abortLossUsd.toFixed(2)} ` +
-                    `(max loss bound $${maxLossUsd.toFixed(2)}). Check the ` +
-                    `configured fee bps against the venues' actual fees.`,
-                );
-              }
-            }
-            return {
-              outcome: "edge_closed" as const,
-              realizedPnlUsd: close.realizedPnlUsd,
-              capturedSpreadUsd,
-              minEdgeUsd,
-            };
+            await this.options.notifyUrgent?.(
+              `🚨 fee-model drift detected: edge_below_cost close on ` +
+                `${token.slice(0, 8)} realized $${abortLossUsd.toFixed(2)} ` +
+                `(max loss bound $${maxLossUsd.toFixed(2)}). Check the ` +
+                `configured fee bps against the venues' actual fees.`,
+            );
           }
+        }
+        return {
+          outcome: "edge_closed" as const,
+          realizedPnlUsd: close.realizedPnlUsd,
+          capturedSpreadUsd,
+          minEdgeUsd,
+        };
+      }
 
-          await this.store.transition(token, "protecting", {
-            legs: [
-              {
-                exchangeId: preview.limitExchange,
-                side: limitSide === "buy" ? "long" : "short",
-                status: "open",
-                entryOrderId: activeLimit.id,
-                entryPriceUsd: limitFillPrice,
-              },
-            ],
-          });
-          const longProtection = await this.protect(
+      await this.store.transition(token, "protecting", {
+        legs: [
+          {
+            exchangeId: preview.limitExchange,
+            side: limitSide === "buy" ? "long" : "short",
+            status: "open",
+            entryOrderId: activeLimit.id,
+            entryPriceUsd: limitFillPrice,
+          },
+        ],
+      });
+      const longProtection = await this.protect(
         this.execution(this.registry.get(preview.longExchange)),
         preview.longExchange,
         token,
@@ -1415,6 +1588,54 @@ export class OpenTradeService {
       await this.sleep(1000);
     }
   }
+  /** Re-reads an order after a cancel with bounded retries, tolerating the
+   * venue's read-after-write lag (Extended briefly 404s on recent orders).
+   * Returns the observed state with the highest filled quantity — a fill can
+   * land between the cancel request and the first read. Falls back to the
+   * pre-cancel state only if every re-poll fails (same tolerance as the main
+   * polling loop: a transient read failure must not kill the trade). */
+  private async readOrderAfterCancel(
+    adapter: ExecutionAdapter,
+    orderId: string,
+    fallback: Awaited<ReturnType<ExecutionAdapter["getExecutionOrder"]>>,
+  ): Promise<Awaited<ReturnType<ExecutionAdapter["getExecutionOrder"]>>> {
+    let best:
+      | Awaited<ReturnType<ExecutionAdapter["getExecutionOrder"]>>
+      | undefined;
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      try {
+        const latest = await adapter.getExecutionOrder(orderId);
+        const latestFilled = parseDecimal(latest.filledQuantityBase);
+        const bestFilled = best ? parseDecimal(best.filledQuantityBase) : -1;
+        // Prefer the highest fill; on ties prefer a snapshot that carries the
+        // average fill price, else the hedge step would abort loudly.
+        if (
+          latestFilled > bestFilled ||
+          (latestFilled === bestFilled &&
+            !best?.averageFillPriceUsd &&
+            latest.averageFillPriceUsd)
+        )
+          best = latest;
+        if (latest.status === "filled") break;
+      } catch (error) {
+        console.warn("OpenTrade post-cancel order re-poll failed", {
+          orderId,
+          attempt,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+      await this.sleep(500);
+    }
+    if (!best) {
+      console.warn(
+        "OpenTrade post-cancel order re-poll exhausted; keeping pre-cancel state",
+        { orderId },
+      );
+      return fallback;
+    }
+    return best;
+  }
+
   private execution(adapter: ExchangeAdapter): ExecutionAdapter {
     if (!adapter.execution)
       throw new Error(`${adapter.id} does not expose execution primitives`);

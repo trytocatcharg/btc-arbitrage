@@ -5,7 +5,7 @@ Safe-by-default TypeScript monorepo for monitoring BTC perpetual/futures prices 
 ## Current state
 
 | Area | Status |
-|---|---|
+| --- | --- |
 | Bot | Monitors BTC prices on two configured exchanges and sends Telegram alerts when spread threshold is met. |
 | Exchanges | Read-only market data adapters for RISEx, Extended, and Arcus. |
 | Trading | Blocked. No live order placement, TP, or SL is implemented yet. |
@@ -251,3 +251,7 @@ Most important rules:
 - No real order submission.
 - No mutating web/API endpoints.
 - No axios.
+
+## References
+
+- [Arbitrage strategy walkthrough (YouTube)](https://youtu.be/U_ojAJoUNG4)

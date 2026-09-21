@@ -1,98 +1,154 @@
-import { loadBotConfig, loadDotEnvFile, redactSecrets } from '@btc-arbitrage/config';
-import { getDb, validateDbConnection } from '@btc-arbitrage/db';
-import { createExchangeRegistry } from './exchanges/registry.js';
-import { TelegramCommandPoller } from './notifications/telegram-command-poller.js';
-import { TelegramNotifier } from './notifications/telegram-notifier.js';
-import { runPollingLoop } from './runtime/polling-loop.js';
+import {
+  loadBotConfig,
+  loadDotEnvFile,
+  redactSecrets,
+} from "@btc-arbitrage/config";
+import { getDb, validateDbConnection } from "@btc-arbitrage/db";
+import { createExchangeRegistry } from "./exchanges/registry.js";
+import { TelegramCommandPoller } from "./notifications/telegram-command-poller.js";
+import { TelegramNotifier } from "./notifications/telegram-notifier.js";
+import { runPollingLoop } from "./runtime/polling-loop.js";
 
 async function main() {
-  console.log('btc-arbitrage bot process booting', {
+  console.log("btc-arbitrage bot process booting", {
     pid: process.pid,
     nodeVersion: process.version,
     cwd: process.cwd(),
-    startedAt: new Date().toISOString()
+    startedAt: new Date().toISOString(),
   });
 
   const loadedEnvPath = loadDotEnvFile();
-  console.log('Environment file status', { loaded: Boolean(loadedEnvPath), path: loadedEnvPath ?? null });
+  console.log("Environment file status", {
+    loaded: Boolean(loadedEnvPath),
+    path: loadedEnvPath ?? null,
+  });
 
   const config = loadBotConfig();
   if (config.risex.tradingEnabled) {
-    console.warn('RISEx live execution adapter is enabled; signed REST mutations require configured account and session signer credentials', {
-      risexTradingEnabled: true,
-      hasRisexAccountAddress: Boolean(config.risex.accountAddress),
-      hasRisexSessionSignerPrivateKey: Boolean(config.risex.sessionSignerPrivateKey),
-      botExecutionMode: config.botExecutionMode
-    });
+    console.warn(
+      "RISEx live execution adapter is enabled; signed REST mutations require configured account and session signer credentials",
+      {
+        risexTradingEnabled: true,
+        hasRisexAccountAddress: Boolean(config.risex.accountAddress),
+        hasRisexSessionSignerPrivateKey: Boolean(
+          config.risex.sessionSignerPrivateKey,
+        ),
+        botExecutionMode: config.botExecutionMode,
+      },
+    );
   }
   if (config.extended.tradingEnabled) {
-    console.warn('Extended live execution adapter is enabled; signed Stark REST mutations require API key, Stark private key and vault id', {
-      extendedTradingEnabled: true,
-      hasExtendedApiKey: Boolean(config.extended.apiKey),
-      hasExtendedStarkPrivateKey: Boolean(config.extended.starkPrivateKey),
-      hasExtendedVaultId: Boolean(config.extended.vaultId),
-      botExecutionMode: config.botExecutionMode
-    });
+    console.warn(
+      "Extended live execution adapter is enabled; signed Stark REST mutations require API key, Stark private key and vault id",
+      {
+        extendedTradingEnabled: true,
+        hasExtendedApiKey: Boolean(config.extended.apiKey),
+        hasExtendedStarkPrivateKey: Boolean(config.extended.starkPrivateKey),
+        hasExtendedVaultId: Boolean(config.extended.vaultId),
+        botExecutionMode: config.botExecutionMode,
+      },
+    );
   }
   if (config.arcus.tradingEnabled) {
-    console.warn('Arcus trading flag is enabled but live execution remains unreviewed for this exchange', {
-      arcusTradingEnabled: true,
-      botExecutionMode: config.botExecutionMode
-    });
+    console.warn(
+      "Arcus trading flag is enabled but live execution remains unreviewed for this exchange",
+      {
+        arcusTradingEnabled: true,
+        botExecutionMode: config.botExecutionMode,
+      },
+    );
   }
 
-  console.log('Bot runtime config loaded', redactSecrets({
-    database: {
-      hostName: config.database.hostName,
-      port: config.database.port,
-      userName: config.database.userName,
-      dbName: config.database.dbName,
-      url: config.database.url
-    },
-    exchangeA: config.exchangeA,
-    exchangeB: config.exchangeB,
-    symbol: config.btcSymbol,
-    marketType: config.marketType,
-    priceSource: config.priceSource,
-    pricePollIntervalMs: config.pricePollIntervalMs,
-    minPriceDiffUsd: config.minPriceDiffUsd,
-    leverage: config.leverage,
-    botExecutionMode: config.botExecutionMode,
-    botRunOnce: config.botRunOnce,
-    telegramEnabled: config.telegram.enabled,
-    telegramAlertCooldownMs: config.telegram.alertCooldownMs
-  }));
+  console.log(
+    "Bot runtime config loaded",
+    redactSecrets({
+      database: {
+        hostName: config.database.hostName,
+        port: config.database.port,
+        userName: config.database.userName,
+        dbName: config.database.dbName,
+        url: config.database.url,
+      },
+      exchangeA: config.exchangeA,
+      exchangeB: config.exchangeB,
+      symbol: config.btcSymbol,
+      marketType: config.marketType,
+      priceSource: config.priceSource,
+      pricePollIntervalMs: config.pricePollIntervalMs,
+      minPriceDiffUsd: config.minPriceDiffUsd,
+      leverage: config.leverage,
+      botExecutionMode: config.botExecutionMode,
+      botRunOnce: config.botRunOnce,
+      telegramEnabled: config.telegram.enabled,
+      telegramAlertCooldownMs: config.telegram.alertCooldownMs,
+    }),
+  );
 
-
-  console.log('Connecting to database...');
+  console.log("Connecting to database...");
   const db = await getDb();
-  console.log('Database connected');
+  console.log("Database connected");
   // await validateDbConnection(config.database.url);
   // console.log('connection succesfull');
 
-
-  console.log('Initializing exchange registry');
+  console.log("Initializing exchange registry");
   const registry = createExchangeRegistry(config);
+
+  // One-time execution setup, hoisted from the per-trade preflight: sets
+  // the account leverage on RISEx and initializes Extended order-signing
+  // WASM. These are process-lifetime steps, not per-trade checks —
+  // re-running them on every trade added avoidable latency to the entry
+  // path. Fail fast here: if live trading is enabled but the venue
+  // rejects the setup, better to die at boot than mid-trade.
+  for (const exchangeId of [config.exchangeA, config.exchangeB]) {
+    const tradingEnabled =
+      (exchangeId === "risex" && config.risex.tradingEnabled) ||
+      (exchangeId === "extended" && config.extended.tradingEnabled) ||
+      (exchangeId === "arcus" && config.arcus.tradingEnabled);
+    if (!tradingEnabled) continue;
+    const adapter = registry.get(exchangeId);
+    if (!adapter.execution) continue;
+    await adapter.execution.validateExecutionPreflight({
+      symbol: config.btcSymbol,
+      leverage: config.leverage,
+    });
+    console.log("Execution preflight completed at startup", {
+      exchange: exchangeId,
+    });
+  }
   const notifier = new TelegramNotifier(config.telegram);
-  const commandPoller = config.telegram.enabled ? new TelegramCommandPoller(config, db, registry) : undefined;
+  const commandPoller = config.telegram.enabled
+    ? new TelegramCommandPoller(config, db, registry)
+    : undefined;
   if (commandPoller) {
     try {
       await commandPoller.configureAvailableCommands();
-      console.log('Telegram commands configured', {
-        scope: 'chat',
-        commands: ['config', 'trade']
+      console.log("Telegram commands configured", {
+        scope: "chat",
+        commands: ["config", "trade"],
       });
     } catch (error) {
-      console.warn('Telegram command configuration failed; monitoring will continue', error instanceof Error ? { message: error.message } : { error });
+      console.warn(
+        "Telegram command configuration failed; monitoring will continue",
+        error instanceof Error ? { message: error.message } : { error },
+      );
     }
   }
 
-  console.log('Starting monitoring loop');
+  console.log("Starting monitoring loop");
   await runPollingLoop({ config, registry, notifier, db, commandPoller });
-  console.log('Monitoring loop stopped', { stoppedAt: new Date().toISOString() });
+  console.log("Monitoring loop stopped", {
+    stoppedAt: new Date().toISOString(),
+  });
 }
 
 main().catch((error: unknown) => {
-  console.error('Bot stopped after fatal error', redactSecrets(error instanceof Error ? { message: error.message, stack: error.stack } : error));
+  console.error(
+    "Bot stopped after fatal error",
+    redactSecrets(
+      error instanceof Error
+        ? { message: error.message, stack: error.stack }
+        : error,
+    ),
+  );
   process.exitCode = 1;
 });

@@ -1,5 +1,5 @@
-import { getDb, trades, tradeLegs } from '@btc-arbitrage/db';
-import { and, eq, gte, sql } from 'drizzle-orm';
+import { getDb, trades, tradeLegs } from "@btc-arbitrage/db";
+import { and, eq, gte, sql } from "drizzle-orm";
 
 type Db = Awaited<ReturnType<typeof getDb>>;
 
@@ -19,9 +19,9 @@ export interface RawVolumeStats {
   generatedAt: Date;
   lifetime: VolumeTotalsSnapshot;
   windows: {
-    '24h': VolumeTotalsSnapshot;
-    '7d': VolumeTotalsSnapshot;
-    '30d': VolumeTotalsSnapshot;
+    "24h": VolumeTotalsSnapshot;
+    "7d": VolumeTotalsSnapshot;
+    "30d": VolumeTotalsSnapshot;
   };
 }
 
@@ -30,9 +30,9 @@ export interface VolumeStatsService {
 }
 
 const WINDOW_DEFINITIONS = [
-  { key: '24h', cutoffMs: 24 * 60 * 60 * 1000 },
-  { key: '7d', cutoffMs: 7 * 24 * 60 * 60 * 1000 },
-  { key: '30d', cutoffMs: 30 * 24 * 60 * 60 * 1000 }
+  { key: "24h", cutoffMs: 24 * 60 * 60 * 1000 },
+  { key: "7d", cutoffMs: 7 * 24 * 60 * 60 * 1000 },
+  { key: "30d", cutoffMs: 30 * 24 * 60 * 60 * 1000 },
 ] as const;
 
 /**
@@ -55,29 +55,34 @@ export function createVolumeStatsService(): VolumeStatsService {
       const generatedAt = new Date();
 
       const lifetime = await readTotals(db);
-      const windows = {} as RawVolumeStats['windows'];
+      const windows = {} as RawVolumeStats["windows"];
       for (const window of WINDOW_DEFINITIONS) {
         const cutoff = new Date(generatedAt.getTime() - window.cutoffMs);
         windows[window.key] = await readTotals(db, cutoff);
       }
 
       return { generatedAt, lifetime, windows };
-    }
+    },
   };
 }
 
-async function readTotals(db: Db, cutoff?: Date): Promise<VolumeTotalsSnapshot> {
+async function readTotals(
+  db: Db,
+  cutoff?: Date,
+): Promise<VolumeTotalsSnapshot> {
   const conditions = cutoff ? [gte(trades.updatedAt, cutoff)] : [];
 
   const totalRows = await db
-    .select({ totalUsd: sql<string>`coalesce(sum(${trades.filledNotionalUsd}), 0)` })
+    .select({
+      totalUsd: sql<string>`coalesce(sum(${trades.filledNotionalUsd}), 0)`,
+    })
     .from(trades)
     .where(and(...conditions));
 
   const byVenueRows = await db
     .select({
       exchangeId: tradeLegs.exchangeId,
-      volumeUsd: sql<string>`coalesce(sum(${tradeLegs.filledNotionalUsd}), 0)`
+      volumeUsd: sql<string>`coalesce(sum(${tradeLegs.filledNotionalUsd}), 0)`,
     })
     .from(tradeLegs)
     .innerJoin(trades, eq(tradeLegs.tradeId, trades.id))
@@ -85,7 +90,7 @@ async function readTotals(db: Db, cutoff?: Date): Promise<VolumeTotalsSnapshot> 
     .groupBy(tradeLegs.exchangeId);
 
   return {
-    totalUsd: totalRows[0]?.totalUsd ?? '0',
-    byVenue: byVenueRows
+    totalUsd: totalRows[0]?.totalUsd ?? "0",
+    byVenue: byVenueRows,
   };
 }

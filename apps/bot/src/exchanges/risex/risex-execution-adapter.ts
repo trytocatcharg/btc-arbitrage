@@ -50,6 +50,10 @@ interface MarketFillResult {
    * readPositionEntryPrice (a blended whole-position fallback, not a true
    * order fill). */
   derived: boolean;
+  /** True once the fill itself is proven by the position delta, even when no
+   * price source has the fill indexed yet. False when the deadline expired
+   * before the position moved (genuinely unfilled). */
+  filled: boolean;
 }
 
 type RisexSide = 0 | 1;
@@ -314,7 +318,19 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
       quantityStepBase: info.quantityStepBase,
       baseline: marketFillWatch.baseline,
     });
-    if (fill.priceUsd === undefined) return submitted;
+    if (!fill.filled) return submitted;
+    if (fill.priceUsd === undefined) {
+      // The fill is proven by the position delta, but no price source
+      // indexed it within the deadline. Report the fill truthfully (the
+      // stale ack must not read as "not filled" upstream — that false
+      // negative triggered a rollback of a fully-filled hedge on
+      // 2026-09-18). Price resolution is left to the caller's re-poll.
+      return {
+        ...submitted,
+        status: "filled",
+        filledQuantityBase: input.quantityBase,
+      };
+    }
     return withFillProvenance(
       {
         ...submitted,
@@ -483,194 +499,244 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
     return signed ? parseDecimal(signed) : 0;
   }
 
-      private async waitForMarketFill(input: {
-        marketId: number;
-        orderId: string;
-        side: "buy" | "sell";
-        quantityBase: string;
-        quantityStepBase: string;
-        baseline: number;
-      }): Promise<MarketFillResult> {
-        const targetDelta = parseDecimal(input.quantityBase);
-        const tolerance = Math.max(
-          parseDecimal(input.quantityStepBase) / 2,
-          1e-10,
+  private async waitForMarketFill(input: {
+    marketId: number;
+    orderId: string;
+    side: "buy" | "sell";
+    quantityBase: string;
+    quantityStepBase: string;
+    baseline: number;
+  }): Promise<MarketFillResult> {
+    const targetDelta = parseDecimal(input.quantityBase);
+    const tolerance = Math.max(parseDecimal(input.quantityStepBase) / 2, 1e-10);
+    const direction = input.side === "buy" ? 1 : -1;
+    const deadline = this.now().getTime() + this.marketFillTimeoutMs;
+    let pollCount = 0;
+    for (;;) {
+      pollCount += 1;
+      const signed = await this.readSignedPositionQuantity(input.marketId);
+      const delta = direction * (signed - input.baseline);
+      console.log("RISEx market fill poll", {
+        marketId: input.marketId,
+        poll: pollCount,
+        side: input.side,
+        baseline: input.baseline,
+        signed,
+        delta,
+        targetDelta,
+      });
+      if (delta >= targetDelta - tolerance) {
+        // Prefer the order's own fill data over the whole-position average
+        // (which blends with any residual position). Fall back to the
+        // position average only when the order-level read yields nothing.
+        const orderFill = await this.readOrderHistoryFillPrice(
+          input.orderId,
+          input.marketId,
         );
-        const direction = input.side === "buy" ? 1 : -1;
-        const deadline = this.now().getTime() + this.marketFillTimeoutMs;
-        let pollCount = 0;
-        for (;;) {
-          pollCount += 1;
-          const signed = await this.readSignedPositionQuantity(input.marketId);
-          const delta = direction * (signed - input.baseline);
-          console.log("RISEx market fill poll", {
+        if (orderFill.priceUsd !== undefined) return orderFill;
+        const position = await this.readPositionEntryPrice(input.marketId);
+        if (position.priceUsd !== undefined) {
+          // The quote/size derivation is exact (this order's own fill price)
+          // only when the position consists solely of this fill: flat at
+          // baseline and the observed size matches baseline + delta. Any
+          // residual or unexpected size means the derivation blends other
+          // fills and must stay flagged, so the caller's D2 integrity check
+          // rejects it instead of anchoring a blended price (2026-09-18:
+          // a flat-baseline fill with 0.0 bps deviation was falsely flagged
+          // derived and the orchestrator rolled back a healthy trade).
+          const blended =
+            Math.abs(input.baseline) > tolerance ||
+            Math.abs(
+              Math.abs(signed) - (Math.abs(input.baseline) + targetDelta),
+            ) > tolerance;
+          console.log("RISEx market fill detected", {
             marketId: input.marketId,
-            poll: pollCount,
-            side: input.side,
-            baseline: input.baseline,
-            signed,
-            delta,
-            targetDelta,
+            polls: pollCount,
+            entryPriceUsd: position.priceUsd,
+            source: "position_average",
+            derived: blended,
           });
-          if (delta >= targetDelta - tolerance) {
-            // Prefer the order's own fill data over the whole-position average
-            // (which blends with any residual position). Fall back to the
-            // position average only when the order-level read yields nothing.
-            const orderFill = await this.readOrderHistoryFillPrice(
-              input.orderId,
-              input.marketId,
-            );
-            if (orderFill.priceUsd !== undefined) return orderFill;
-            const position = await this.readPositionEntryPrice(input.marketId);
-            console.log("RISEx market fill detected", {
-              marketId: input.marketId,
-              polls: pollCount,
-              entryPriceUsd: position.priceUsd,
-              source: "position_average",
-              derived: position.derived,
-            });
-            return {
-              priceUsd: position.priceUsd,
-              source: "position_average",
-              derived: position.derived,
-            };
-          }
-          if (this.now().getTime() >= deadline) {
-            console.warn("RISEx market fill timed out", {
-              marketId: input.marketId,
-              polls: pollCount,
-              baseline: input.baseline,
-              lastSigned: signed,
-              timeoutMs: this.marketFillTimeoutMs,
-            });
-            return { source: "position_average", derived: false };
-          }
-          await this.sleep(MARKET_FILL_POLL_MS);
+          return {
+            priceUsd: position.priceUsd,
+            source: "position_average",
+            derived: blended,
+            filled: true,
+          };
         }
-      }
-
-      /** Reads the order's own fills back from the account order endpoints:
-       * first `/v1/orders` history by order id (average-fill field when
-       * present), then a quantity-weighted average of the order's per-fill
-       * prices from `/v1/trade-history`. Read failures degrade to "no data"
-       * so the caller can fall back to the position average. */
-      private async readOrderHistoryFillPrice(
-        orderId: string,
-        marketId: number,
-      ): Promise<MarketFillResult> {
-        const account = this.requireAccountAddress();
-        try {
-          const historyPayload = await this.http.get("/v1/orders", {
-            account,
-            market_id: String(marketId),
-            limit: "50",
+        // The fill is proven by the position delta, but no price source has
+        // it indexed yet (read-after-write lag on /v1/orders, /v1/trade-
+        // history, and the position snapshot). Returning "filled but price
+        // unknown" upstream once triggered a false "Market hedge was not
+        // immediately filled" rollback of a fully-filled hedge (2026-09-18),
+        // so keep polling the history endpoints until the deadline instead.
+        if (this.now().getTime() >= deadline) {
+          console.warn("RISEx market fill price unresolved at deadline", {
+            marketId: input.marketId,
+            polls: pollCount,
+            orderId: input.orderId,
           });
-          const history = asRisexArrayPayload(historyPayload).filter(isRecord);
-          const entry = history.find(
-            (candidate) =>
-              stringField(candidate, ["order_id", "orderId", "id"]) === orderId ||
-              normalizeHex(
-                stringField(candidate, ["order_id", "orderId", "id"]) ?? "",
-              ) === normalizeHex(orderId),
-          );
-          if (entry) {
-            const average = optionalDecimalDeep(entry, [
-              "average_fill_price",
-              "averageFillPrice",
-              "avg_fill_price",
-              "avgFillPrice",
-            ]);
-            if (average) {
-              console.log("RISEx order history average fill price", {
-                orderId,
-                averageFillPriceUsd: average,
-              });
-              return { priceUsd: average, source: "order_history", derived: false };
-            }
-          }
-        } catch (error) {
-          console.warn("RISEx order history read failed; trying trade history", {
-            orderId,
-            message: error instanceof Error ? error.message : String(error),
-          });
+          return { source: "position_average", derived: false, filled: true };
         }
-        try {
-          const fillsPayload = await this.http.get("/v1/trade-history", {
-            account,
-            market_id: String(marketId),
-            limit: "50",
-          });
-          const fills = asRisexArrayPayload(fillsPayload)
-            .filter(isRecord)
-            .filter(
-              (fill) =>
-                stringField(fill, ["order_id", "orderId"]) === orderId ||
-                normalizeHex(stringField(fill, ["order_id", "orderId"]) ?? "") ===
-                  normalizeHex(orderId),
-            );
-          let notional = 0;
-          let size = 0;
-          for (const fill of fills) {
-            const fillSize = optionalDecimalDeep(fill, ["size", "filled_size"]);
-            const fillPrice = optionalDecimalDeep(fill, ["price", "price_usd"]);
-            if (!fillSize || !fillPrice) continue;
-            notional += parseDecimal(fillSize) * parseDecimal(fillPrice);
-            size += parseDecimal(fillSize);
-          }
-          if (size > 0) {
-            const average = formatDecimal(notional / size, 8);
-            console.log("RISEx trade history weighted fill price", {
-              orderId,
-              fills: fills.length,
-              averageFillPriceUsd: average,
-            });
-            return { priceUsd: average, source: "order_history", derived: false };
-          }
-        } catch (error) {
-          console.warn("RISEx trade history read failed", {
-            orderId,
-            message: error instanceof Error ? error.message : String(error),
-          });
-        }
-        return { source: "position_average", derived: false };
-      }
-
-      private async readPositionEntryPrice(
-        marketId: number,
-      ): Promise<{ priceUsd?: string; derived: boolean }> {
-        const account = this.requireAccountAddress();
-        const payload = await this.http.get("/v1/account/position", {
-          account,
-          market_id: String(marketId),
+        console.warn("RISEx market fill price not yet indexed; retrying", {
+          marketId: input.marketId,
+          polls: pollCount,
+          orderId: input.orderId,
         });
-        const body = firstRecord(unwrapData(payload));
-        if (!body) return { derived: false };
-        const explicit = optionalDecimalDeep(body, [
-          "entry_price",
-          "entryPrice",
-          "avg_entry_price",
-          "averageEntryPrice",
+        await this.sleep(MARKET_FILL_POLL_MS);
+        continue;
+      }
+      if (this.now().getTime() >= deadline) {
+        console.warn("RISEx market fill timed out", {
+          marketId: input.marketId,
+          polls: pollCount,
+          baseline: input.baseline,
+          lastSigned: signed,
+          timeoutMs: this.marketFillTimeoutMs,
+        });
+        return { source: "position_average", derived: false, filled: false };
+      }
+      await this.sleep(MARKET_FILL_POLL_MS);
+    }
+  }
+
+  /** Reads the order's own fills back from the account order endpoints:
+   * first `/v1/orders` history by order id (average-fill field when
+   * present), then a quantity-weighted average of the order's per-fill
+   * prices from `/v1/trade-history`. Read failures degrade to "no data"
+   * so the caller can fall back to the position average. */
+  private async readOrderHistoryFillPrice(
+    orderId: string,
+    marketId: number,
+  ): Promise<MarketFillResult> {
+    const account = this.requireAccountAddress();
+    try {
+      const historyPayload = await this.http.get("/v1/orders", {
+        account,
+        market_id: String(marketId),
+        limit: "50",
+      });
+      const history = asRisexArrayPayload(historyPayload).filter(isRecord);
+      const entry = history.find(
+        (candidate) =>
+          stringField(candidate, ["order_id", "orderId", "id"]) === orderId ||
+          normalizeHex(
+            stringField(candidate, ["order_id", "orderId", "id"]) ?? "",
+          ) === normalizeHex(orderId),
+      );
+      if (entry) {
+        const average = optionalDecimalDeep(entry, [
+          "average_fill_price",
+          "averageFillPrice",
+          "avg_fill_price",
+          "avgFillPrice",
         ]);
-        if (explicit) {
-          console.log("RISEx position entry price (explicit field)", {
-            marketId,
-            entryPriceUsd: explicit,
+        if (average) {
+          console.log("RISEx order history average fill price", {
+            orderId,
+            averageFillPriceUsd: average,
           });
-          return { priceUsd: explicit, derived: false };
+          return {
+            priceUsd: average,
+            source: "order_history",
+            derived: false,
+            filled: true,
+          };
         }
+      }
+    } catch (error) {
+      console.warn("RISEx order history read failed; trying trade history", {
+        orderId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+    try {
+      const fillsPayload = await this.http.get("/v1/trade-history", {
+        account,
+        market_id: String(marketId),
+        limit: "50",
+      });
+      const fills = asRisexArrayPayload(fillsPayload)
+        .filter(isRecord)
+        .filter(
+          (fill) =>
+            stringField(fill, ["order_id", "orderId"]) === orderId ||
+            normalizeHex(stringField(fill, ["order_id", "orderId"]) ?? "") ===
+              normalizeHex(orderId),
+        );
+      let notional = 0;
+      let size = 0;
+      for (const fill of fills) {
+        const fillSize = optionalDecimalDeep(fill, ["size", "filled_size"]);
+        const fillPrice = optionalDecimalDeep(fill, ["price", "price_usd"]);
+        if (!fillSize || !fillPrice) continue;
+        notional += parseDecimal(fillSize) * parseDecimal(fillPrice);
+        size += parseDecimal(fillSize);
+      }
+      if (size > 0) {
+        const average = formatDecimal(notional / size, 8);
+        console.log("RISEx trade history weighted fill price", {
+          orderId,
+          fills: fills.length,
+          averageFillPriceUsd: average,
+        });
+        return {
+          priceUsd: average,
+          source: "order_history",
+          derived: false,
+          filled: true,
+        };
+      }
+    } catch (error) {
+      console.warn("RISEx trade history read failed", {
+        orderId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+    // No order-level fill data available yet; the caller falls back to the
+    // position average and retry loops. `filled` stays false here because
+    // this return carries no fill evidence of its own.
+    return { source: "position_average", derived: false, filled: false };
+  }
+
+  private async readPositionEntryPrice(
+    marketId: number,
+  ): Promise<{ priceUsd?: string; derived: boolean }> {
+    const account = this.requireAccountAddress();
+    const payload = await this.http.get("/v1/account/position", {
+      account,
+      market_id: String(marketId),
+    });
+    const body = firstRecord(unwrapData(payload));
+    if (!body) return { derived: false };
+    // 2026-09-18: the endpoint wraps the record in a "position" envelope
+    // (positionKeys: "position"); unwrap it before extracting fields.
+    const record = nestedRecord(body, "position") ?? body;
+    const explicit = optionalDecimalDeep(record, [
+      "entry_price",
+      "entryPrice",
+      "avg_entry_price",
+      "averageEntryPrice",
+    ]);
+    if (explicit) {
+      console.log("RISEx position entry price (explicit field)", {
+        marketId,
+        entryPriceUsd: explicit,
+      });
+      return { priceUsd: explicit, derived: false };
+    }
     // Some RISEx position payloads report avg_entry_price: "" even on an open
     // position (observed 2026-09-14 right after a market fill). Derive the
     // average entry from position notional instead: quote_amount / |size|.
     // NOTE: size must be read with the SIGNED deep helper — a short position
     // reports size "-0.00384", which primitiveDecimal (unsigned regex)
     // rejects; that silently killed this fallback on 2026-09-14.
-    const size = optionalSignedDecimalDeep(body, [
+    const size = optionalSignedDecimalDeep(record, [
       "size",
       "position_size",
       "positionSize",
       "quantity",
     ]);
-    const quote = optionalDecimalDeep(body, [
+    const quote = optionalDecimalDeep(record, [
       "quote_amount",
       "quoteAmount",
       "notional",
@@ -680,7 +746,7 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
     if (!size || !quote) {
       console.warn("RISEx position entry price unavailable", {
         marketId,
-        positionKeys: Object.keys(body).join(","),
+        positionKeys: Object.keys(record).join(","),
       });
       return { derived: false };
     }
