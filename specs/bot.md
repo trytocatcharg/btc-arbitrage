@@ -123,25 +123,41 @@ Previews are persisted in `trade_previews`.
 
 When confirmed:
 
-1. consume preview,
-2. create `trades` + `trade_legs`,
-3. place the maker leg as **limit**,
-4. hedge any filled quantity on the opposite exchange with **market**,
-5. evaluate the captured edge (see below); if the remaining convergence does
-   not cover exit cost + minimum profit, close both legs immediately at market
-   and stop (Telegram shows an `⚖️ Edge insuficiente` message),
-6. if covered quantity exists and the edge is kept, place TP/SL protection on
-   both legs (venue-side backstop).
-
-The execution setup (leverage set on RISEx, order-signing WASM init on
-Extended) runs **once at bot startup**, not per trade; per-trade preflight and
-margin reads were removed from the confirm path so the entry reaches the venue
-faster. Misconfiguration surfaces at boot (fatal) or at the submit step.
-
-Protection percentages are configurable from env:
-
-- `OPEN_TRADE_TAKE_PROFIT_PERCENT`
-- `OPEN_TRADE_STOP_LOSS_PERCENT`
+    1. consume preview,
+    2. create `trades` + `trade_legs`,
+    3. place the maker leg as **limit**,
+    4. hedge any filled quantity on the opposite exchange with **market**,
+    5. place TP/SL protection on both legs (exchange-side backstop): one
+       `take-profit-market` + one `stop-market` reduce-only trigger per leg on
+       its own exchange, anchored to that leg's own fill.
+    
+    **Margin-based percentages (since 2026-09-21)**: `OPEN_TRADE_TAKE_PROFIT_PERCENT`
+    and `OPEN_TRADE_STOP_LOSS_PERCENT` are defined **on the margin**, not on
+    price. The price-side trigger distance divides by `LEVERAGE` (at 5x: 3% TP
+    = 0.6% price, 2.5% SL = 0.5% price), so the ROI on margin at each trigger
+    equals the configured percentage. A loud sanity check throws (→ rollback)
+    if any trigger lands on the wrong side of its leg's fill.
+    
+    **Disabled exits (since 2026-09-21)**: the fill-time edge band
+    (`EDGE_BAND_ENABLED = false` in `open-trade.ts`) and the time-stop close
+    (`BOT_TIME_STOP_ENABLED` env gate in `timeout-close-monitor.ts`) are
+    disabled. The edge evaluation still runs and logs for diagnostics but never
+    closes. When one leg's TP/SL fills, the sibling stays open: the position
+    monitor marks the trade `unhedged` and notifies urgently. The
+    stale-`closing` recovery sweep stays active regardless.
+    
+    The execution setup (leverage set on RISEx, order-signing WASM init on
+    Extended) runs **once at bot startup**, not per trade; per-trade preflight and
+    margin reads were removed from the confirm path so the entry reaches the
+    exchange faster. Misconfiguration surfaces at boot (fatal) or at the submit
+    step.
+    
+    Protection percentages are configurable from env (defined **on the
+    margin** since 2026-09-21; the price-side trigger distance divides by
+    `LEVERAGE`):
+    
+    - `OPEN_TRADE_TAKE_PROFIT_PERCENT` (margin ROI at the TP trigger)
+    - `OPEN_TRADE_STOP_LOSS_PERCENT` (margin ROI at the SL trigger)
 
 ### Important execution rules
 

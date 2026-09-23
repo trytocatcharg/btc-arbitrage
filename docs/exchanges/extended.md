@@ -61,8 +61,8 @@ This spec captures the Extended API facts this bot relies on, so trading work is
 
 Currently, Extended features a flat fee structure for both perpetuals and spot markets:
 
-* Taker: 0.025%
-* Maker: 0.000%
+* Taker: 0.025%  | market order
+* Maker: 0.000%  | limit order
 
 The team reserves the right to update the fee schedule going forward.
 

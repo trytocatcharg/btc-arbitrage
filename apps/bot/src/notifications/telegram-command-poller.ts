@@ -412,6 +412,8 @@ export class TelegramCommandPoller {
           ],
         });
       },
+      minSpreadUsd: this.config.minPriceDiffUsd,
+      priceSource: this.config.priceSource,
       fees: {
         risex: {
           makerBps: this.config.openTrade.risexMakerFeeBps,
@@ -595,7 +597,7 @@ export class TelegramCommandPoller {
       0,
     );
     lines.push(`Farmed volume: $${farmedVolumeUsd.toFixed(2)}`);
-    lines.push("TP/SL placed on both legs.");
+    lines.push("TP/SL placed on both legs (percentages on margin).");
     return lines.join("\n");
   }
   private async sendMessage(
@@ -638,10 +640,10 @@ export function formatActiveConfigSummary(config: BotConfig): string {
     `Leverage: ${config.leverage}x`,
     `Mode: ${config.botExecutionMode}`,
     `Order placement: ${config.enableOrderPlacement ? "enabled" : "disabled"}`,
-    `Open trade TP/SL (venue backstop): +${config.openTrade.takeProfitPercent}% / -${config.openTrade.stopLossPercent}%`,
-    `Time-stop: close open trades after ${config.openTrade.openTradeCloseTimeoutMinutes}m`,
-    `Edge band: keep trade if convergence ≥ exit cost + $${formatUsd(config.openTrade.minProfitUsd)}`,
-    `Edge abort max loss: $${formatUsd(config.openTrade.maxLossUsd)}`,
+    `Open trade margin: $${formatUsd(config.openTrade.marginUsd)} per leg (notional $${formatUsd(config.openTrade.notionalUsd)} at ${config.leverage}x)`,
+    `Open trade TP/SL (exchange backstop, stop-market per leg): TP +${config.openTrade.takeProfitPercent}% / SL -${config.openTrade.stopLossPercent}% of margin (price distance = % ÷ leverage)`,
+    `Time-stop: disabled (BOT_TIME_STOP_ENABLED=true to re-enable)`,
+    `Edge band: disabled (EDGE_BAND_ENABLED in open-trade.ts to re-enable)`,
     `Exit slippage: ${config.openTrade.slippageBps} bps`,
     `Telegram cooldown: ${config.telegram.alertCooldownMs} ms`,
     "",

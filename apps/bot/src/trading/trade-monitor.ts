@@ -8,6 +8,7 @@ import {
 import type { ExchangeAdapter } from "@btc-arbitrage/exchange-core";
 import { formatDecimal, parseDecimal } from "@btc-arbitrage/domain";
 import { shouldNotifyLegClosure } from "./trade-guards.js";
+import { formatPnlColored, formatUsdOrNa } from "./trade-close.js";
 
 export async function monitorTrades(input: {
   db: Awaited<ReturnType<typeof getDb>>;
@@ -154,10 +155,30 @@ export async function monitorTrades(input: {
         }
       });
 
-      const message =
-        sibling?.status === "closed"
-          ? `✅ Trade #${row.trades.id}: both legs closed.`
-          : `🚨 Trade #${row.trades.id}: ${row.trade_legs.side.toUpperCase()} ${row.trade_legs.exchangeId} closed (${position?.closeReason ?? "unknown"}). Remaining ${sibling?.side?.toUpperCase() ?? "UNKNOWN"} ${sibling?.exchangeId ?? "unknown"} is UNHEDGED.`;
+      const siblingSnapshot: LegClosureSnapshot | null = sibling
+        ? {
+            side: sibling.side,
+            exchangeId: sibling.exchangeId,
+            entryPriceUsd: sibling.entryPriceUsd,
+            exitPriceUsd: sibling.exitPriceUsd,
+            realizedPnlUsd: sibling.realizedPnlUsd,
+            quantityBase: sibling.quantityBase,
+          }
+        : null;
+      const message = buildLegClosureMessage({
+        tradeId: row.trades.id,
+        closedLeg: {
+          side: row.trade_legs.side,
+          exchangeId: row.trade_legs.exchangeId,
+          entryPriceUsd: row.trade_legs.entryPriceUsd,
+          exitPriceUsd: position?.exitPriceUsd ?? null,
+          realizedPnlUsd: position?.realizedPnlUsd ?? null,
+          quantityBase: row.trade_legs.quantityBase,
+        },
+        closeReason: position?.closeReason ?? null,
+        sibling: siblingSnapshot,
+        siblingClosed: sibling?.status === "closed",
+      });
       await input.notify(message);
     } catch (error) {
       console.warn(
@@ -166,4 +187,75 @@ export async function monitorTrades(input: {
       );
     }
   }
+}
+
+interface LegClosureSnapshot {
+  side: "long" | "short";
+  exchangeId: string;
+  entryPriceUsd: string | null;
+  exitPriceUsd: string | null;
+  realizedPnlUsd: string | null;
+  quantityBase: string | null;
+}
+
+/** Exchange-agnostic leg PnL: the exchange-reported realized value when
+ * present, else derived from entry/exit/qty (same convention as
+ * trade-close). */
+function deriveLegPnlUsd(leg: LegClosureSnapshot): number | null {
+  if (leg.realizedPnlUsd != null) {
+    const parsed = Number(leg.realizedPnlUsd);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  const entry = leg.entryPriceUsd != null ? Number(leg.entryPriceUsd) : null;
+  const exit = leg.exitPriceUsd != null ? Number(leg.exitPriceUsd) : null;
+  const qty = leg.quantityBase != null ? Number(leg.quantityBase) : null;
+  if (entry == null || exit == null || qty == null) return null;
+  const sideMul = leg.side === "long" ? 1 : -1;
+  return (exit - entry) * qty * sideMul;
+}
+
+function formatLegLine(leg: LegClosureSnapshot, pnl: number | null): string {
+  return (
+    `${leg.side.toUpperCase()} ${leg.exchangeId}: ` +
+    `${formatUsdOrNa(leg.entryPriceUsd)} → ${formatUsdOrNa(leg.exitPriceUsd)} ` +
+    `· PnL ${formatPnlColored(pnl)}`
+  );
+}
+
+/** Telegram notice for a detected leg closure: per-leg entry → exit with
+ * colored PnL, the exchange's close reason when known, the combined total
+ * when both legs are closed, and an explicit unhedged warning otherwise. */
+function buildLegClosureMessage(input: {
+  tradeId: number;
+  closedLeg: LegClosureSnapshot;
+  closeReason: string | null;
+  sibling: LegClosureSnapshot | null;
+  siblingClosed: boolean;
+}): string {
+  const closedPnl = deriveLegPnlUsd(input.closedLeg);
+  const siblingPnl =
+    input.sibling != null ? deriveLegPnlUsd(input.sibling) : null;
+  const lines: string[] = [
+    input.siblingClosed
+      ? `✅ Trade #${input.tradeId}: ambas patas cerradas`
+      : `🚨 Pata cerrada: Trade #${input.tradeId}`,
+  ];
+  if (input.closeReason != null && input.closeReason !== "unknown")
+    lines.push(`Motivo: ${input.closeReason}`);
+  lines.push(formatLegLine(input.closedLeg, closedPnl));
+  if (input.sibling != null) {
+    if (input.siblingClosed) {
+      lines.push(formatLegLine(input.sibling, siblingPnl));
+      lines.push("———————————————");
+      const total =
+        closedPnl != null && siblingPnl != null ? closedPnl + siblingPnl : null;
+      lines.push(`PnL total: ${formatPnlColored(total)}`);
+    } else {
+      lines.push(
+        `⚠️ La pata restante sigue abierta: ` +
+          `${input.sibling.side.toUpperCase()} ${input.sibling.exchangeId} (unhedged).`,
+      );
+    }
+  }
+  return lines.join("\n");
 }

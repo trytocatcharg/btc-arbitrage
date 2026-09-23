@@ -47,14 +47,14 @@ const CLOSE_FLAT_TIMEOUT_MS = 10_000;
 const CLOSE_FLAT_POLL_MS = 500;
 
 /** 🟢/🔴 PnL formatting, matching the trade-summary module convention. */
-function formatPnlColored(value: number | null): string {
+export function formatPnlColored(value: number | null): string {
   if (value == null) return "n/a (precio de salida no disponible)";
   return value >= 0
     ? `🟢 +$${value.toFixed(2)}`
     : `🔴 -$${Math.abs(value).toFixed(2)}`;
 }
 
-function formatUsdOrNa(value: string | undefined): string {
+export function formatUsdOrNa(value: string | null | undefined): string {
   if (value == null) return "n/a";
   const parsed = Number(value);
   return Number.isFinite(parsed) ? `$${parsed.toFixed(2)}` : "n/a";
@@ -234,9 +234,9 @@ export async function closeTradeBothLegs(
 
     const exit = exitPriceUsd ?? close.averageFillPriceUsd ?? null;
     const closeVolumeDeltaUsd =
-      exit != null
-        ? formatDecimal(parseDecimal(quantityBase) * parseDecimal(exit), 8)
-        : undefined;
+      exit == null
+        ? undefined
+        : formatDecimal(parseDecimal(quantityBase) * parseDecimal(exit), 8);
     if (closeVolumeDeltaUsd !== undefined) {
       totalCloseVolumeUsd += parseDecimal(closeVolumeDeltaUsd);
       closeVolumeKnownLegs += 1;
@@ -328,9 +328,9 @@ export async function closeTradeBothLegs(
     ? `${totalRealizedUsd >= 0 ? "+" : ""}$${totalRealizedUsd.toFixed(2)}`
     : "n/a (exit price unavailable)";
   const farmedText =
-    farmedVolumeUsd != null
-      ? ` Farmed volume (cumulative): $${parseDecimal(farmedVolumeUsd).toFixed(2)}.`
-      : "";
+    farmedVolumeUsd == null
+      ? ""
+      : ` Farmed volume (cumulative): $${parseDecimal(farmedVolumeUsd).toFixed(2)}.`;
   if (input.reason === "spread_timeout") {
     // Time-stop closes get a human-readable summary instead of the dense
     // outcome dump: per-leg entry → exit with colored PnL and the combined
@@ -346,9 +346,9 @@ export async function closeTradeBothLegs(
         `${leg.side.toUpperCase()} ${leg.exchangeId}: ` +
           `${formatUsdOrNa(leg.entryPriceUsd)} → ${formatUsdOrNa(leg.exitPriceUsd)} ` +
           `· PnL ${formatPnlColored(
-            leg.realizedPnlUsd != null
-              ? parseDecimal(leg.realizedPnlUsd)
-              : null,
+            leg.realizedPnlUsd == null
+              ? null
+              : parseDecimal(leg.realizedPnlUsd),
           )}`,
       );
     }

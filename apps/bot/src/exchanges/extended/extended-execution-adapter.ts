@@ -56,6 +56,14 @@ interface ExtendedHttpApi {
 
 const MARKET_CROSSING_BUFFER_BPS = 150;
 
+/** How long cached Extended fees / Starknet domain stay valid. Both are
+ * near-static exchange config (the exchange rotates them rarely), but the
+ * adapter re-fetched them on EVERY order submission — and every reprice
+ * re-submits, so the hot path paid two extra private HTTP round trips per
+ * order (2026-09-21). A stale entry only misprices fee metadata or the
+ * signing domain for a few minutes; an order rejection surfaces loudly. */
+const FEES_DOMAIN_CACHE_TTL_MS = 10 * 60 * 1000;
+
 export function createExtendedExecutionAdapter(
   config: ExtendedConfig,
   http: ExtendedHttpApi,
@@ -70,6 +78,16 @@ export function assertExtendedTradingUnsupported(): never {
 }
 
 class ExtendedExecutionAdapter implements ExecutionAdapter {
+  // TTL caches for getFees/getStarknetDomain (see FEES_DOMAIN_CACHE_TTL_MS).
+  private readonly feesCache = new Map<
+    string,
+    { value: ExtendedFees; expiresAt: number }
+  >();
+  private starknetDomainCache?: {
+    value: ExtendedStarknetDomain;
+    expiresAt: number;
+  };
+
   constructor(
     private readonly config: ExtendedConfig,
     private readonly http: ExtendedHttpApi,
@@ -400,6 +418,8 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
 
   private async getFees(marketName: string): Promise<ExtendedFees> {
     this.requireApiKey();
+    const cached = this.feesCache.get(marketName);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
     const payload = unwrapData(
       await this.http.get("/api/v1/user/fees", {
         private: true,
@@ -409,22 +429,34 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
     const fees =
       asRecords(payload)[0] ??
       fail("Extended fees response did not include fee data");
-    return {
+    const value: ExtendedFees = {
       makerFeeRate: decimalField(fees, ["makerFeeRate"], "makerFeeRate"),
       takerFeeRate: decimalField(fees, ["takerFeeRate"], "takerFeeRate"),
       builderFeeRate: optionalDecimal(fees.builderFeeRate),
     };
+    this.feesCache.set(marketName, {
+      value,
+      expiresAt: Date.now() + FEES_DOMAIN_CACHE_TTL_MS,
+    });
+    return value;
   }
 
   private async getStarknetDomain(): Promise<ExtendedStarknetDomain> {
+    const cached = this.starknetDomainCache;
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
     const payload = unwrapData(await this.http.get("/api/v1/info/starknet"));
     const domain = requiredRecord(payload, "Extended starknet domain");
-    return {
+    const value: ExtendedStarknetDomain = {
       name: stringField(domain, ["name"], "starknet.name"),
       version: stringField(domain, ["version"], "starknet.version"),
       chainId: stringField(domain, ["chainId"], "starknet.chainId"),
       revision: Number(decimalField(domain, ["revision"], "starknet.revision")),
     };
+    this.starknetDomainCache = {
+      value,
+      expiresAt: Date.now() + FEES_DOMAIN_CACHE_TTL_MS,
+    };
+    return value;
   }
 
   private requireTradingEnabled(): void {
@@ -552,10 +584,15 @@ function firstPrice(payload: unknown, side: "bid" | "ask"): string {
   );
 }
 
-// pi-lens-ignore: no-unknown-returns — envelope peel only; every caller
-// narrows the result immediately with requiredRecord/asRecords/firstRecord.
-function unwrapData(payload: unknown): unknown {
-  return isRecord(payload) && "data" in payload ? payload.data : payload;
+// Envelope peel with boundary validation: the unwrapped payload must be
+// an object or array — every consumer narrowed it with requiredRecord /
+// asRecords / firstPrice anyway, so failing here (instead of one helper
+// deeper) keeps the error at the boundary with a named return type.
+function unwrapData(payload: unknown): Record<string, unknown> | unknown[] {
+  const unwrapped =
+    isRecord(payload) && "data" in payload ? payload.data : payload;
+  if (isRecord(unwrapped) || Array.isArray(unwrapped)) return unwrapped;
+  throw new Error("Extended response payload was not an object or array");
 }
 
 function asRecords(payload: unknown): Record<string, unknown>[] {

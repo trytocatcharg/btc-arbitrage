@@ -33,6 +33,7 @@ export interface BotConfig {
   enableOrderPlacement: boolean;
   confirmLiveTrading?: string;
   openTrade: {
+    marginUsd: string;
     notionalUsd: string;
     previewTtlMs: number;
     quoteMaxAgeMs: number;
@@ -222,6 +223,20 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     env.OPEN_TRADE_SLIPPAGE_BPS ?? "2",
     "OPEN_TRADE_SLIPPAGE_BPS",
   );
+  // OPEN_TRADE_MARGIN_USD replaced OPEN_TRADE_NOTIONAL_USD (2026-09-22): the
+  // operator sizes in margin, and the notional derives as margin × leverage
+  // (a single source of truth — the pair cannot drift apart). The removed
+  // variable fails loudly so a stale .env cannot silently override sizing.
+  if (env.OPEN_TRADE_NOTIONAL_USD)
+    throw new Error(
+      "OPEN_TRADE_NOTIONAL_USD was removed: size trades with " +
+        "OPEN_TRADE_MARGIN_USD instead (notional = margin × leverage).",
+    );
+  const marginUsd = parsePositiveDecimalString(
+    env.OPEN_TRADE_MARGIN_USD ?? "20",
+    "OPEN_TRADE_MARGIN_USD",
+  );
+  const notionalUsd = (Number(marginUsd) * leverage).toFixed(8);
 
   return {
     database,
@@ -247,10 +262,8 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     enableOrderPlacement,
     confirmLiveTrading: emptyToUndefined(env.CONFIRM_LIVE_TRADING),
     openTrade: {
-      notionalUsd: parsePositiveDecimalString(
-        env.OPEN_TRADE_NOTIONAL_USD ?? "100",
-        "OPEN_TRADE_NOTIONAL_USD",
-      ),
+      marginUsd,
+      notionalUsd,
       previewTtlMs: parsePositiveInteger(
         env.OPEN_TRADE_PREVIEW_TTL_MS ?? "120000",
         "OPEN_TRADE_PREVIEW_TTL_MS",

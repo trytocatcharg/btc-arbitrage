@@ -4,6 +4,7 @@ import {
   parseDecimal,
   type ExchangeId,
   type MarketType,
+  type PriceSource,
 } from "@btc-arbitrage/domain";
 import type {
   BestBidOffer,
@@ -133,6 +134,14 @@ export interface OpenTradeOptions {
   /** Assumed exit slippage in basis points (OPEN_TRADE_SLIPPAGE_BPS,
    * default "2"); wired from config since PR1, consumed in PR2. */
   slippageBps?: string;
+  /** Live-spread viability watch during the entry fill wait: on each reprice
+   * check, the directional spread (mark(short) − mark(long)) must stay >=
+   * this value (MIN_PRICE_DIFF_USD), else the entry aborts — the signal's
+   * opportunity died while the limit rested. Optional: unset disables the
+   * watch. */
+  minSpreadUsd?: string;
+  /** Price source for the viability watch snapshots; defaults to "mark". */
+  priceSource?: PriceSource;
   fees: Record<ExchangeId, { makerBps: string; takerBps: string }>;
   notifyUrgent?: (text: string) => Promise<void>;
   notifyLimitTimeout?: (input: {
@@ -174,9 +183,15 @@ export class ProtectionAnchorError extends Error {
  * orders are placed (adjust-tpsl-volume-farming design D1): each trigger must
  * sit within PROTECTION_TOLERANCE_BPS of its leg's `fill × (1 ± percent)`
  * level, and the cross-symmetry property must hold — the short leg's SL ≈
- * the long leg's TP and the short leg's TP ≈ the long leg's SL (both venues
+ * the long leg's TP and the short leg's TP ≈ the long leg's SL (both exchanges
  * track the same BTC). Logs the full anchor set on pass; throws
- * ProtectionAnchorError on breach. */
+ * ProtectionAnchorError on breach.
+ *
+ * DEPRECATED (2026-09-21): no call sites. It encodes the OLD price-based
+ * cross-anchor semantics — the live flow uses margin-based percentages
+ * (percent ÷ leverage for the price distance, see runEntry) and a small
+ * wrong-side sanity check instead. If this is ever re-wired, rework its
+ * expected-value math for margin-based inputs first. */
 export function assertProtectionAnchors(input: {
   longEntryUsd: string;
   shortEntryUsd: string;
@@ -558,10 +573,19 @@ export class OpenTradeService {
       let activeNotionalUsd = 0;
       let repriceCount = 0;
       let lastRepriceCheckAt = started;
-      // Why a no-fill entry aborted: plain timeout, or the anti-chase
-      // guard stopped repricing once the executable spread inverted.
-      let entryAbortReason: "limit_timeout" | "spread_inverted" =
-        "limit_timeout";
+      // Why a no-fill entry aborted: plain timeout, the anti-chase
+      // guard stopped repricing once the executable spread inverted, or
+      // the live mark spread dropped below the signal threshold.
+      let entryAbortReason:
+        | "limit_timeout"
+        | "spread_inverted"
+        | "spread_dropped" = "limit_timeout";
+      // Live-spread viability watch state (set on each reprice check).
+      const minSpreadUsd =
+        this.options.minSpreadUsd == null
+          ? null
+          : parseDecimal(this.options.minSpreadUsd);
+      let lastLiveSpreadUsd: number | null = null;
       console.log("OpenTrade fill polling started", {
         token,
         orderId: activeLimit.id,
@@ -757,6 +781,12 @@ export class OpenTradeService {
           let bbo: BestBidOffer;
           let meta: Awaited<ReturnType<ExecutionAdapter["getMarketMetadata"]>>;
           let otherBbo: BestBidOffer;
+          let longSnapshot:
+            | Awaited<ReturnType<ExchangeAdapter["getPriceSnapshot"]>>
+            | undefined;
+          let shortSnapshot:
+            | Awaited<ReturnType<ExchangeAdapter["getPriceSnapshot"]>>
+            | undefined;
           try {
             [bbo, meta, otherBbo] = await Promise.all([
               limit.getBestBidOffer({
@@ -776,6 +806,25 @@ export class OpenTradeService {
                 priceSource: "last",
               }),
             ]);
+            // Live-spread viability watch input: fresh mark prices from
+            // both exchanges (the main polling loop is blocked while this
+            // entry runs, so the snapshots must be fetched here).
+            if (minSpreadUsd != null) {
+              const priceSource = this.options.priceSource ?? "mark";
+              const snapshotRequest = {
+                symbol: preview.symbol,
+                marketType: preview.marketType,
+                priceSource,
+              };
+              [longSnapshot, shortSnapshot] = await Promise.all([
+                this.registry
+                  .get(preview.longExchange)
+                  .getPriceSnapshot(snapshotRequest),
+                this.registry
+                  .get(preview.shortExchange)
+                  .getPriceSnapshot(snapshotRequest),
+              ]);
+            }
           } catch (error) {
             console.warn(
               "OpenTrade reprice quote fetch failed; keeping resting order",
@@ -786,6 +835,53 @@ export class OpenTradeService {
               },
             );
             continue;
+          }
+          // Live-spread viability watch: the signal fired because the
+          // directional spread was >= MIN_PRICE_DIFF_USD; if it collapses
+          // while the limit rests, the opportunity is gone — filling into
+          // it would open a hedge on a dead spread. Abort the entry (a
+          // fill that raced the cancel is hedged by the loop top).
+          if (minSpreadUsd != null && longSnapshot && shortSnapshot) {
+            lastLiveSpreadUsd =
+              parseDecimal(shortSnapshot.priceUsd) -
+              parseDecimal(longSnapshot.priceUsd);
+            if (lastLiveSpreadUsd < minSpreadUsd) {
+              console.warn(
+                "OpenTrade spread no longer viable; aborting entry",
+                {
+                  token,
+                  orderId: activeLimit.id,
+                  liveSpreadUsd: lastLiveSpreadUsd,
+                  minSpreadUsd,
+                  elapsedMs: this.now().getTime() - started,
+                },
+              );
+              try {
+                await limit.cancelExecutionOrder(activeLimit.id);
+              } catch (error) {
+                console.warn("OpenTrade viability cancel failed; re-reading", {
+                  token,
+                  orderId: activeLimit.id,
+                  message:
+                    error instanceof Error ? error.message : String(error),
+                });
+              }
+              const settled = await this.readOrderAfterCancel(
+                limit,
+                activeLimit.id,
+                current,
+              );
+              if (
+                parseDecimal(settled.filledQuantityBase) >
+                parseDecimal(current.filledQuantityBase)
+              ) {
+                current = settled;
+                continue;
+              }
+              current = settled;
+              entryAbortReason = "spread_dropped";
+              break;
+            }
           }
           // Must use the same improve-by-tick pricing as the submit path,
           // else the resting order would be repriced every interval
@@ -977,17 +1073,28 @@ export class OpenTradeService {
         });
         const limitSideForNotice =
           preview.limitExchange === preview.shortExchange ? "sell" : "buy";
+        let abortNotice: string;
+        if (entryAbortReason === "spread_inverted")
+          abortNotice =
+            `🛑 Entrada abortada en ${preview.limitExchange} ` +
+            `(${limitSideForNotice} ${preview.quantityBase} ${preview.symbol}): ` +
+            `perseguir el precio ya era pérdida segura (spread ejecutable invertido). ` +
+            `Límite cancelado sin fill. ¿Reintentar?`;
+        else if (entryAbortReason === "spread_dropped")
+          abortNotice =
+            `🛑 Entrada abortada: el spread en vivo cayó a ` +
+            `$${lastLiveSpreadUsd?.toFixed(2) ?? "n/a"} (mínimo ` +
+            `$${minSpreadUsd?.toFixed(2) ?? "n/a"}) mientras esperaba el fill ` +
+            `del límite en ${preview.limitExchange}. Límite cancelado sin fill. ` +
+            `¿Reintentar?`;
+        else
+          abortNotice =
+            `⏱ Limit order en ${preview.limitExchange} (${limitSideForNotice} ` +
+            `${preview.quantityBase} ${preview.symbol}) no se llenó en ` +
+            `${this.options.limitTimeoutMs}ms y fue cancelada. ¿Reintentar?`;
         await this.options.notifyLimitTimeout?.({
           token,
-          message:
-            entryAbortReason === "spread_inverted"
-              ? `🛑 Entrada abortada en ${preview.limitExchange} ` +
-                `(${limitSideForNotice} ${preview.quantityBase} ${preview.symbol}): ` +
-                `perseguir el precio ya era pérdida segura (spread ejecutable invertido). ` +
-                `Límite cancelado sin fill. ¿Reintentar?`
-              : `⏱ Limit order en ${preview.limitExchange} (${limitSideForNotice} ` +
-                `${preview.quantityBase} ${preview.symbol}) no se llenó en ` +
-                `${this.options.limitTimeoutMs}ms y fue cancelada. ¿Reintentar?`,
+          message: abortNotice,
         });
         return { outcome: "cancelled" as const };
       }
@@ -1069,36 +1176,40 @@ export class OpenTradeService {
       // falls, so its TP trigger sits BELOW its fill (×(1−SL%)) and its
       // SL trigger ABOVE it (×(1+TP%)). This replaces the old cross-anchor
       // where the short leg inherited the long leg's trigger levels.
-      const longTp = applyPercentChange(
-        longEntry,
-        this.options.takeProfitPercent,
-        "up",
+      // SL/TP semantics (2026-09-21, margin-based): both percentages are
+      // defined on the MARGIN, not on price — the loss when the SL hits
+      // is stopLossPercent of the leg's margin, the gain at TP is
+      // takeProfitPercent of it. The price-side trigger distance divides
+      // by the leverage (at 5x: 2.5% margin = 0.5% price, 3% margin =
+      // 0.6% price). Triggers stay anchored to each leg's own fill
+      // (design D1) and rest on each leg's own exchange.
+      const slPricePercent = formatDecimal(
+        parseDecimal(this.options.stopLossPercent) / this.options.leverage,
+        8,
       );
-      const longSl = applyPercentChange(
-        longEntry,
-        this.options.stopLossPercent,
-        "down",
+      const tpPricePercent = formatDecimal(
+        parseDecimal(this.options.takeProfitPercent) / this.options.leverage,
+        8,
       );
-      const shortTp = applyPercentChange(
-        shortEntry,
-        this.options.stopLossPercent,
-        "down",
-      );
-      const shortSl = applyPercentChange(
-        shortEntry,
-        this.options.takeProfitPercent,
-        "up",
-      );
-      assertProtectionAnchors({
-        longEntryUsd: longEntry,
-        shortEntryUsd: shortEntry,
-        longTpUsd: longTp,
-        longSlUsd: longSl,
-        shortTpUsd: shortTp,
-        shortSlUsd: shortSl,
-        takeProfitPercent: this.options.takeProfitPercent,
-        stopLossPercent: this.options.stopLossPercent,
-      });
+      const longTp = applyPercentChange(longEntry, tpPricePercent, "up");
+      const longSl = applyPercentChange(longEntry, slPricePercent, "down");
+      const shortTp = applyPercentChange(shortEntry, tpPricePercent, "down");
+      const shortSl = applyPercentChange(shortEntry, slPricePercent, "up");
+      // Loud sanity check (replaces assertProtectionAnchors under the
+      // margin-based scheme): every trigger must sit on its intended
+      // side of the leg's own fill, or a resting order would close the
+      // leg at the wrong moment.
+      if (
+        parseDecimal(longSl) >= parseDecimal(longEntry) ||
+        parseDecimal(shortSl) <= parseDecimal(shortEntry) ||
+        parseDecimal(longTp) <= parseDecimal(longEntry) ||
+        parseDecimal(shortTp) >= parseDecimal(shortEntry)
+      )
+        throw new Error(
+          `Protection trigger on the wrong side of its fill ` +
+            `(longTp=${longTp}, longSl=${longSl} vs longEntry=${longEntry}; ` +
+            `shortTp=${shortTp}, shortSl=${shortSl} vs shortEntry=${shortEntry})`,
+        );
 
       // Fee-aware fill-time edge band (design D4): the band's inputs are
       // knowable exactly once, at fill. Keep the trade iff the expected
@@ -1151,7 +1262,13 @@ export class OpenTradeService {
         minEdgeUsd,
         keepOpen,
       });
-      if (!keepOpen) {
+      // STRATEGY CHANGE (2026-09-21, SL-only exits): the fill-time edge
+      // band's abort path is disabled — the operator runs an SL-only
+      // exit strategy and the band must not close trades. Evaluation +
+      // logging stay for diagnostics; flip EDGE_BAND_ENABLED to re-enable
+      // the edge_below_cost close.
+      const EDGE_BAND_ENABLED = false;
+      if (EDGE_BAND_ENABLED && !keepOpen) {
         console.warn("OpenTrade edge below cost; closing both legs at market", {
           token,
           capturedSpreadUsd,
@@ -1532,6 +1649,9 @@ export class OpenTradeService {
     sl: string,
     known: Array<{ adapter: ExecutionAdapter; id: string }>,
   ): Promise<{ tpOrderId: string; slOrderId: string }> {
+    // One take-profit + one stop-market trigger per leg on its own exchange,
+    // both reduce-only and anchored to the leg's own fill. Percentages are
+    // margin-based (see the anchor computation in runEntry).
     const a = await adapter.submitExecutionOrder({
       clientOrderId: `${token}-tp`,
       symbol,

@@ -122,6 +122,14 @@ export async function monitorTimeoutClosures(input: {
     }
   }
 
+  // STRATEGY CHANGE (2026-09-21, SL-only exits): time-stop closes are
+  // disabled. The stale-'closing' recovery sweep above stays active — it
+  // only finishes closes that already started; without it a mid-close
+  // crash would leave a zombie trade suppressing signals forever. Set
+  // BOT_TIME_STOP_ENABLED=true to re-enable the time-stop without a code
+  // change.
+  if (process.env.BOT_TIME_STOP_ENABLED !== "true") return;
+
   const openTrades = await input.db
     .select()
     .from(trades)
