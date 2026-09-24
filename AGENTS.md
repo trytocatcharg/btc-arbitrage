@@ -17,9 +17,9 @@ Current capabilities:
 - Trade monitoring detects leg closure via position polling and notifies `closed` or `unhedged` states.
 - Persists price snapshots, spread snapshots, signals, trades, trade legs, trade previews, status history, Telegram command logs, operations, and events in MariaDB.
 
-Guardrails (non-goals):
+Guardrails (non-goals, unless explicitly opted in):
 
-- No order placement without the operator explicitly confirming a Telegram preview. No auto-trading on signals.
+- No order placement without the operator explicitly confirming a Telegram preview — EXCEPT when the operator explicitly enables `OPEN_TRADE_AUTO_CONFIRM=true` (auto-trading opt-in; the bot logs a loud startup warning and all entry guards still apply).
 - No real order submission from the web app or backend.
 - No mutating web/API endpoints.
 - Arcus is market-data only: `capabilities.orderPlacement: false`, no execution adapter.
@@ -140,8 +140,10 @@ Copy `.env.example` to `.env` and fill in real values. Never commit `.env` or re
 | `BOT_RUN_ONCE` | `false` | Run a single tick and exit |
 | `BOT_EXECUTION_MODE` | `dry-run` | `dry-run` / `live` (cross-validated with `ENABLE_ORDER_PLACEMENT`) |
 | `ENABLE_ORDER_PLACEMENT` | `false` | Cross-validated with mode; see "Execution gates" below |
-| `RISEX_TRADING_ENABLED` / `EXTENDED_TRADING_ENABLED` / `ARCUS_TRADING_ENABLED` | `false` | Per-exchange live trading gates |
+| `EXTENDED_TRADING_ENABLED` / `ARCUS_TRADING_ENABLED` | `false` | Per-exchange live trading gates |
+| `EXTENDED_ORDER_EXPIRATION_HOURS` | `168` | GTT signature lifetime for Extended orders (resting limits AND TP/SL triggers); the old 1-hour default silently expired untouched protection orders. Max 2160 (90 days) |
 | `OPEN_TRADE_MARGIN_USD` | `20` | Margin per leg; the preview notional derives as margin × `LEVERAGE` (removed `OPEN_TRADE_NOTIONAL_USD` — defining it fails config load) |
+| `OPEN_TRADE_AUTO_CONFIRM` | `false` | **Auto-trading opt-in**: open a trade immediately when a signal is created, without Telegram confirmation. Loud startup warning when enabled; all entry guards still apply |
 | `OPEN_TRADE_PREVIEW_TTL_MS` | `120000` | Preview expiry |
 | `OPEN_TRADE_QUOTE_MAX_AGE_MS` | `5000` | BBO freshness assertion |
 | `OPEN_TRADE_LIMIT_TIMEOUT_MS` | `30000` | Passive limit fill wait |

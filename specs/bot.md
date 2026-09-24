@@ -161,7 +161,13 @@ When confirmed:
 
 ### Important execution rules
 
-- Execution happens **only after Telegram confirmation**.
+    - Execution happens **only after Telegram confirmation** — or automatically
+      when the operator enables `OPEN_TRADE_AUTO_CONFIRM=true` (default false;
+      the bot logs a loud startup warning). The auto-confirm path runs the
+      same preview/confirm flow as the button, including all entry guards
+      (active-trade suppression, blocking-execution check, viability watch,
+      anti-chase guard); failures are logged and the monitoring loop continues.
+
 - Routing rule is permanent: **maker fee wins first, taker fee breaks ties**.
 - `maker = limit order`
 - `taker = market order`

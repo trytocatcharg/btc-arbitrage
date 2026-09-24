@@ -56,13 +56,19 @@ interface ExtendedHttpApi {
 
 const MARKET_CROSSING_BUFFER_BPS = 150;
 
-/** How long cached Extended fees / Starknet domain stay valid. Both are
- * near-static exchange config (the exchange rotates them rarely), but the
- * adapter re-fetched them on EVERY order submission — and every reprice
- * re-submits, so the hot path paid two extra private HTTP round trips per
- * order (2026-09-21). A stale entry only misprices fee metadata or the
- * signing domain for a few minutes; an order rejection surfaces loudly. */
-const FEES_DOMAIN_CACHE_TTL_MS = 10 * 60 * 1000;
+/** How long cached near-static Extended data (fees, Starknet domain,
+ * market records) stay valid. All three are exchange config that rotates
+ * rarely, but the adapter re-fetched them on EVERY order/BBO call — and
+ * every reprice re-submits, so the hot path paid multiple extra HTTP
+ * round trips per tick (2026-09-21). A stale entry is TTL-bounded and any
+ * resulting order rejection surfaces loudly. */
+const EXCHANGE_STATIC_DATA_TTL_MS = 10 * 60 * 1000;
+/** Fallback GTT signature lifetime (hours) for placed orders when the adapter
+ * config does not carry orderExpirationHours. The signing code's 1-hour
+ * default silently expired untouched resting TP/SL triggers and left trades
+ * unprotected on Extended (observed 2026-09-23); real orders always pass an
+ * explicit expiryTime computed from this value or from config. */
+const DEFAULT_ORDER_EXPIRATION_HOURS = 168;
 
 export function createExtendedExecutionAdapter(
   config: ExtendedConfig,
@@ -78,10 +84,15 @@ export function assertExtendedTradingUnsupported(): never {
 }
 
 class ExtendedExecutionAdapter implements ExecutionAdapter {
-  // TTL caches for getFees/getStarknetDomain (see FEES_DOMAIN_CACHE_TTL_MS).
+  // TTL caches for getFees / getStarknetDomain / getMarket (see
+  // EXCHANGE_STATIC_DATA_TTL_MS).
   private readonly feesCache = new Map<
     string,
     { value: ExtendedFees; expiresAt: number }
+  >();
+  private readonly marketCache = new Map<
+    string,
+    { value: Record<string, unknown>; expiresAt: number }
   >();
   private starknetDomainCache?: {
     value: ExtendedStarknetDomain;
@@ -306,6 +317,14 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
     ctx: ReturnType<typeof createExtendedOrderContext>,
   ) {
     const minPriceChange = priceStep(market);
+    // GTT resting orders (limit entries and TP/SL triggers) must live as
+    // long as the trade can stay open. Configurable per network per
+    // docs/exchanges/extended.md ("GTT expiry max differs by network").
+    const expiryTime = new Date(
+      Date.now() +
+        (this.config.orderExpirationHours ?? DEFAULT_ORDER_EXPIRATION_HOURS) *
+          3_600_000,
+    );
     if (input.type === "limit") {
       if (!input.priceUsd)
         throw new Error("Extended limit order requires priceUsd");
@@ -322,6 +341,7 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
         timeInForce: "GTT",
         reduceOnly: input.reduceOnly ?? false,
         postOnly: input.reduceOnly ? false : true,
+        expiryTime,
         ctx,
       });
     }
@@ -336,6 +356,7 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
         timeInForce: "IOC",
         reduceOnly: input.reduceOnly ?? false,
         postOnly: false,
+        expiryTime,
         ctx,
       });
     }
@@ -377,6 +398,7 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
         tpSlType: "ORDER",
         takeProfit: input.type === "take-profit-market" ? trigger : undefined,
         stopLoss: input.type === "stop-market" ? trigger : undefined,
+        expiryTime,
         ctx,
       });
     }
@@ -412,8 +434,16 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
   private async getMarket(
     input: PriceRequest,
   ): Promise<Record<string, unknown>> {
+    const cacheKey = `${input.symbol}|${input.marketType}`;
+    const cached = this.marketCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
     const payload = await this.http.get("/api/v1/info/markets");
-    return findMarket(payload, input.symbol, input.marketType);
+    const value = findMarket(payload, input.symbol, input.marketType);
+    this.marketCache.set(cacheKey, {
+      value,
+      expiresAt: Date.now() + EXCHANGE_STATIC_DATA_TTL_MS,
+    });
+    return value;
   }
 
   private async getFees(marketName: string): Promise<ExtendedFees> {
@@ -436,7 +466,7 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
     };
     this.feesCache.set(marketName, {
       value,
-      expiresAt: Date.now() + FEES_DOMAIN_CACHE_TTL_MS,
+      expiresAt: Date.now() + EXCHANGE_STATIC_DATA_TTL_MS,
     });
     return value;
   }
@@ -454,7 +484,7 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
     };
     this.starknetDomainCache = {
       value,
-      expiresAt: Date.now() + FEES_DOMAIN_CACHE_TTL_MS,
+      expiresAt: Date.now() + EXCHANGE_STATIC_DATA_TTL_MS,
     };
     return value;
   }

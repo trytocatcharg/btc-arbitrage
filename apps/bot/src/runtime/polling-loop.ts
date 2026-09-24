@@ -11,6 +11,7 @@ import { monitorTrades } from "../trading/trade-monitor.js";
 import { monitorTimeoutClosures } from "../trading/timeout-close-monitor.js";
 import { runDataRetention } from "../retention/data-retention.js";
 import { shouldSuppressSignalForActiveTrades } from "../trading/trade-guards.js";
+import { autoConfirmSignalTrade } from "../trading/open-trade-factory.js";
 import { extractInsertId } from "../db-result.js";
 
 export interface ExchangeRegistry {
@@ -179,6 +180,26 @@ export async function runPollingLoop(input: {
           ...signal,
           id: signalId ? String(signalId) : undefined,
         });
+        if (input.config.openTrade.autoConfirm) {
+          await autoConfirmSignalTrade({
+            config: input.config,
+            registry: input.registry,
+            db: input.db,
+            notifier: {
+              notifyUrgent: (text) => input.notifier.notifyUrgent(text),
+              notifyLimitTimeout: async ({ message }) => {
+                await input.notifier.notifyUrgent(message);
+              },
+            },
+            signalId: signalId ?? 0,
+            signal: {
+              symbol: signal.symbol,
+              marketType: input.config.marketType,
+              longExchange: signal.longExchange,
+              shortExchange: signal.shortExchange,
+            },
+          });
+        }
       }
       console.log("Monitoring tick completed", {
         tick,

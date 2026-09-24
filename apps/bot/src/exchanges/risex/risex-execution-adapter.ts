@@ -31,6 +31,11 @@ import type { RisexConfig } from "./risex.types.js";
 // position move by the ordered quantity (no REST fill-history endpoint exists).
 const MARKET_FILL_TIMEOUT_MS = 15_000;
 const MARKET_FILL_POLL_MS = 300;
+/** TTL for cached near-static exchange data (market info). The entry and
+ * reprice paths re-fetched /v1/markets on every call; the record rotates
+ * rarely, so a short TTL cache removes those round trips from the hot
+ * path (same rationale as the Extended static-data cache, 2026-09-22). */
+const EXCHANGE_STATIC_DATA_TTL_MS = 10 * 60 * 1000;
 const PLACE_ORDER_SELECTOR = "RISE_PERPS_PLACE_ORDER_V1";
 const CANCEL_ORDER_SELECTOR = "RISE_PERPS_CANCEL_ORDER_V1";
 const UPDATE_LEVERAGE_SELECTOR = "RISE_PERPS_UPDATE_LEVERAGE_V1";
@@ -102,6 +107,12 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
   private readonly exchangeClient?: ExchangeClient;
   private exchangeClientReady?: Promise<ExchangeClient>;
   private readonly sleep: (ms: number) => Promise<void>;
+
+  // TTL cache for getMarketInfo (see EXCHANGE_STATIC_DATA_TTL_MS).
+  private readonly marketInfoCache = new Map<
+    string,
+    { value: RisexMarketInfo; expiresAt: number }
+  >();
 
   constructor(
     private readonly config: RisexConfig,
@@ -777,6 +788,9 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
   }
 
   private async getMarketInfo(input: PriceRequest): Promise<RisexMarketInfo> {
+    const cacheKey = `${input.symbol}|${input.marketType}`;
+    const cached = this.marketInfoCache.get(cacheKey);
+    if (cached && cached.expiresAt > this.now().getTime()) return cached.value;
     const payload = await this.http.get("/v1/markets");
     const market = findMarket(payload, input.symbol, input.marketType);
     const config = nestedRecord(market, "config");
@@ -802,7 +816,7 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
       ],
       "RISEx price step",
     );
-    return {
+    const info: RisexMarketInfo = {
       market,
       marketId: parseMarketId(getMarketId(market)),
       minQuantityBase,
@@ -813,6 +827,11 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
         ["max_leverage", "maxLeverage"],
       ),
     };
+    this.marketInfoCache.set(cacheKey, {
+      value: info,
+      expiresAt: this.now().getTime() + EXCHANGE_STATIC_DATA_TTL_MS,
+    });
+    return info;
   }
 
   private async getOrderbook(

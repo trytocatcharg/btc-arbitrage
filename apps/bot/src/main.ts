@@ -3,7 +3,7 @@ import {
   loadDotEnvFile,
   redactSecrets,
 } from "@btc-arbitrage/config";
-import { getDb, validateDbConnection } from "@btc-arbitrage/db";
+import { getDb } from "@btc-arbitrage/db";
 import { createExchangeRegistry } from "./exchanges/registry.js";
 import { TelegramCommandPoller } from "./notifications/telegram-command-poller.js";
 import { TelegramNotifier } from "./notifications/telegram-notifier.js";
@@ -55,6 +55,16 @@ async function main() {
       {
         arcusTradingEnabled: true,
         botExecutionMode: config.botExecutionMode,
+      },
+    );
+  }
+  if (config.openTrade.autoConfirm) {
+    console.warn(
+      "OPEN_TRADE_AUTO_CONFIRM is ENABLED: the bot will open trades automatically on signals WITHOUT Telegram operator confirmation",
+      {
+        openTradeAutoConfirm: true,
+        botExecutionMode: config.botExecutionMode,
+        minPriceDiffUsd: config.minPriceDiffUsd,
       },
     );
   }

@@ -48,6 +48,11 @@ export interface BotConfig {
      * Env var OPEN_TRADE_SPREAD_EXIT_TIMEOUT_MINUTES unchanged (kept per
      * design D5 to avoid breaking-churn). */
     openTradeCloseTimeoutMinutes: number;
+    /** OPEN_TRADE_AUTO_CONFIRM: open a trade immediately when a signal is
+     * created, WITHOUT Telegram operator confirmation. Default false —
+     * enabling this turns the bot into an auto-trader; the startup log
+     * warns loudly when it is on. */
+    autoConfirm: boolean;
     /** Minimum expected convergence profit (USD) required to KEEP a trade
      * right after both fills complete: keep iff expected convergence ≥
      * round-trip breakeven (fees + slippage) + this buffer; otherwise both
@@ -81,6 +86,10 @@ export interface BotConfig {
     vaultId?: string;
     tradingEnabled: boolean;
     userAgent: string;
+    /** GTT order signature lifetime in hours (env
+     * EXTENDED_ORDER_EXPIRATION_HOURS, default 168 = 7 days). The old
+     * 1-hour default silently expired resting TP/SL triggers. */
+    orderExpirationHours: number;
   };
   arcus: {
     apiBaseUrl: string;
@@ -156,6 +165,21 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   const extendedTradingEnabled = parseBoolean(
     env.EXTENDED_TRADING_ENABLED ?? "false",
   );
+  // GTT signature lifetime for orders placed on Extended (resting limit
+  // entries AND TP/SL triggers). The old 1-hour default expired
+  // untouched protection orders and left trades unprotected (observed
+  // 2026-09-23). Capped at 90 days per docs/exchanges/extended.md
+  // ("GTT expiry max differs by network — keep configurable expiry and
+  // validate before sending"); a venue-side rejection surfaces loudly.
+  const extendedOrderExpirationHours = parsePositiveInteger(
+    env.EXTENDED_ORDER_EXPIRATION_HOURS ?? "168",
+    "EXTENDED_ORDER_EXPIRATION_HOURS",
+  );
+  if (extendedOrderExpirationHours > 2160) {
+    throw new Error(
+      "EXTENDED_ORDER_EXPIRATION_HOURS must be at most 2160 (90 days)",
+    );
+  }
   const arcusTradingEnabled = parseBoolean(
     env.ARCUS_TRADING_ENABLED ?? "false",
   );
@@ -223,6 +247,7 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     env.OPEN_TRADE_SLIPPAGE_BPS ?? "2",
     "OPEN_TRADE_SLIPPAGE_BPS",
   );
+  const autoConfirm = parseBoolean(env.OPEN_TRADE_AUTO_CONFIRM ?? "false");
   // OPEN_TRADE_MARGIN_USD replaced OPEN_TRADE_NOTIONAL_USD (2026-09-22): the
   // operator sizes in margin, and the notional derives as margin × leverage
   // (a single source of truth — the pair cannot drift apart). The removed
@@ -264,6 +289,7 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     openTrade: {
       marginUsd,
       notionalUsd,
+      autoConfirm,
       previewTtlMs: parsePositiveInteger(
         env.OPEN_TRADE_PREVIEW_TTL_MS ?? "120000",
         "OPEN_TRADE_PREVIEW_TTL_MS",
@@ -339,6 +365,7 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       vaultId: emptyToUndefined(env.EXTENDED_VAULT_ID),
       tradingEnabled: extendedTradingEnabled,
       userAgent: env.EXTENDED_USER_AGENT ?? "btc-arbitrage-bot/0.1",
+      orderExpirationHours: extendedOrderExpirationHours,
     },
     arcus: {
       apiBaseUrl: trimTrailingSlash(

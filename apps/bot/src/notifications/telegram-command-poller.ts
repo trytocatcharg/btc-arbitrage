@@ -8,16 +8,23 @@ import {
   type ExchangeRegistryLike,
 } from "./trade-summary.js";
 import {
+  lastSixMonthsFrom,
+  loadMonthlyVolumeBreakdown,
+  loadVolumeTotals,
+  previousMonthRange,
+  type VolumeTotals,
+} from "../trading/volume-stats.js";
+import {
   isAllowedTelegramChat,
   isAllowedTelegramUser,
   normalizeTelegramChatId,
   type FetchLike,
 } from "./telegram-notifier.js";
-import { DbPreviewStore } from "../trading/db-preview-store.js";
-import {
+import { createOpenTradeService } from "../trading/open-trade-factory.js";
+import type {
   OpenTradeService,
-  type ConfirmOutcome,
-  type OpenTradePreview,
+  ConfirmOutcome,
+  OpenTradePreview,
 } from "../trading/open-trade.js";
 
 export interface TelegramUpdate {
@@ -65,6 +72,10 @@ const AVAILABLE_COMMANDS = [
   {
     command: "trade",
     description: "Show open trade summary",
+  },
+  {
+    command: "volume",
+    description: "Volumen generado (farmed): total, mes anterior, 6 meses",
   },
 ] as const;
 
@@ -195,6 +206,13 @@ export class TelegramCommandPoller {
             registry: this.registry,
           }),
         );
+        return;
+      }
+
+      if (isTelegramCommand(text, "volume")) {
+        await this.sendMessage(await buildVolumeMessage(this.db, "total"), {
+          inline_keyboard: [VOLUME_VIEW_BUTTONS],
+        });
         return;
       }
     } catch (error) {
@@ -366,6 +384,18 @@ export class TelegramCommandPoller {
               `definido. Revisá los logs antes de asumir que abrió.`,
           );
         }
+      } else if (data.startsWith("volume:")) {
+        const view = data.slice("volume:".length);
+        if (view === "total" || view === "prevmonth" || view === "6m") {
+          const messageId = callback.message?.message_id;
+          if (typeof messageId === "number") {
+            await this.editMessageText(
+              messageId,
+              await buildVolumeMessage(this.db, view),
+              { inline_keyboard: [VOLUME_VIEW_BUTTONS] },
+            );
+          }
+        }
       }
       await this.answerCallback(callback.id);
     } catch (error) {
@@ -384,49 +414,23 @@ export class TelegramCommandPoller {
   }
 
   private openTradeService(): OpenTradeService {
-    return new OpenTradeService(this.registry, new DbPreviewStore(this.db), {
-      notionalUsd: this.config.openTrade.notionalUsd,
-      leverage: this.config.leverage,
-      ttlMs: this.config.openTrade.previewTtlMs,
-      quoteMaxAgeMs: this.config.openTrade.quoteMaxAgeMs,
-      limitTimeoutMs: this.config.openTrade.limitTimeoutMs,
-      limitRepriceIntervalMs: this.config.openTrade.limitRepriceIntervalMs,
-      entryImproveTicks: this.config.openTrade.entryImproveTicks,
-      residualDeltaToleranceBase:
-        this.config.openTrade.residualDeltaToleranceBase,
-      takeProfitPercent: this.config.openTrade.takeProfitPercent,
-      stopLossPercent: this.config.openTrade.stopLossPercent,
-      minProfitUsd: this.config.openTrade.minProfitUsd,
-      maxLossUsd: this.config.openTrade.maxLossUsd,
-      slippageBps: this.config.openTrade.slippageBps,
-      notifyUrgent: (text) => this.sendMessage(text),
-      notifyLimitTimeout: async ({ token, message }) => {
-        await this.sendMessage(message, {
-          inline_keyboard: [
-            [
-              {
-                text: "Reintentar orden limit",
-                callback_data: `retrade:${token}`,
-              },
+    return createOpenTradeService({
+      config: this.config,
+      registry: this.registry,
+      db: this.db,
+      notify: {
+        notifyUrgent: (text) => this.sendMessage(text),
+        notifyLimitTimeout: async ({ token, message }) => {
+          await this.sendMessage(message, {
+            inline_keyboard: [
+              [
+                {
+                  text: "Reintentar orden limit",
+                  callback_data: `retrade:${token}`,
+                },
+              ],
             ],
-          ],
-        });
-      },
-      minSpreadUsd: this.config.minPriceDiffUsd,
-      priceSource: this.config.priceSource,
-      fees: {
-        risex: {
-          makerBps: this.config.openTrade.risexMakerFeeBps,
-          takerBps: this.config.openTrade.risexTakerFeeBps,
-        },
-        extended: {
-          makerBps: this.config.openTrade.extendedMakerFeeBps,
-          takerBps: this.config.openTrade.extendedTakerFeeBps,
-        },
-        arcus: { makerBps: "0", takerBps: "0" },
-        variational: {
-          makerBps: this.config.openTrade.variationalMakerFeeBps,
-          takerBps: this.config.openTrade.variationalTakerFeeBps,
+          });
         },
       },
     });
@@ -465,6 +469,7 @@ export class TelegramCommandPoller {
   private async editMessageText(
     messageId: number,
     text: string,
+    replyMarkup?: unknown,
   ): Promise<void> {
     const response = await this.fetchImpl(
       `https://api.telegram.org/bot${this.config.telegram.botToken}/editMessageText`,
@@ -476,6 +481,7 @@ export class TelegramCommandPoller {
           message_id: messageId,
           text,
           disable_web_page_preview: true,
+          ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
         }),
       },
     );
@@ -626,6 +632,90 @@ export class TelegramCommandPoller {
       }
     }
   }
+}
+
+type VolumeView = "total" | "prevmonth" | "6m";
+
+const VOLUME_VIEW_BUTTONS = [
+  { text: "Total", callback_data: "volume:total" },
+  { text: "Mes anterior", callback_data: "volume:prevmonth" },
+  { text: "6 meses", callback_data: "volume:6m" },
+] as const;
+
+const VOLUME_ATTRIBUTION_NOTE = "(atribuido por apertura del trade, UTC)";
+
+function formatExchangeVolumeLines(
+  byExchange: VolumeTotals["byExchange"],
+): string[] {
+  if (byExchange.length === 0) return [];
+  return [
+    "Por exchange:",
+    ...byExchange.map(
+      (entry) => `  ${entry.exchangeId}: $${entry.usd.toFixed(2)}`,
+    ),
+  ];
+}
+
+/** Renders one of the /volume views. Farmed volume = the filled_notional_usd
+ * increments (design D6); monthly views attribute volume to the trade's
+ * opening month. */
+async function buildVolumeMessage(
+  db: Awaited<ReturnType<typeof getDb>>,
+  view: VolumeView,
+): Promise<string> {
+  if (view === "prevmonth") {
+    const range = previousMonthRange();
+    const stats = await loadVolumeTotals(db, range);
+    return [
+      `📊 Volumen generado — ${range.label}`,
+      `Total: $${stats.totalUsd.toFixed(2)}`,
+      ...formatExchangeVolumeLines(stats.byExchange),
+      VOLUME_ATTRIBUTION_NOTE,
+    ].join("\n");
+  }
+  if (view === "6m") {
+    const from = lastSixMonthsFrom();
+    const months = await loadMonthlyVolumeBreakdown(db, from);
+    const stats = await loadVolumeTotals(db, { from });
+    const byMonth = new Map(months.map((row) => [row.month, row.usd]));
+    // Zero-fill the whole window so every calendar month shows a line,
+    // including months with no trades.
+    const monthLines: string[] = [];
+    const cursor = new Date(from.getTime());
+    const now = new Date();
+    while (
+      cursor.getUTCFullYear() < now.getUTCFullYear() ||
+      (cursor.getUTCFullYear() === now.getUTCFullYear() &&
+        cursor.getUTCMonth() <= now.getUTCMonth())
+    ) {
+      const label = `${cursor.getUTCFullYear()}-${String(
+        cursor.getUTCMonth() + 1,
+      ).padStart(2, "0")}`;
+      const suffix =
+        label ===
+        `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`
+          ? " (en curso)"
+          : "";
+      monthLines.push(
+        `${label}: $${(byMonth.get(label) ?? 0).toFixed(2)}${suffix}`,
+      );
+      cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+    }
+    return [
+      "📊 Volumen generado — últimos 6 meses",
+      ...monthLines,
+      `Total período: $${stats.totalUsd.toFixed(2)}`,
+      ...formatExchangeVolumeLines(stats.byExchange),
+      VOLUME_ATTRIBUTION_NOTE,
+    ].join("\n");
+  }
+  const stats = await loadVolumeTotals(db);
+  return [
+    "📊 Volumen generado (farmed)",
+    `Total histórico: $${stats.totalUsd.toFixed(2)}`,
+    ...formatExchangeVolumeLines(stats.byExchange),
+    VOLUME_ATTRIBUTION_NOTE,
+  ].join("\n");
 }
 
 export function formatActiveConfigSummary(config: BotConfig): string {
