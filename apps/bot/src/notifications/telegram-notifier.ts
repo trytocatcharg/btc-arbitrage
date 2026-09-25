@@ -114,6 +114,8 @@ export function formatTelegramSignal(signal: TradingSignal): string {
     "BTC arbitrage signal",
     `Symbol: ${signal.symbol}`,
     `Source: ${signal.priceSource}`,
+    `Price ${signal.exchangeA}: $${formatUsdAmount(signal.exchangeAPriceUsd)}`,
+    `Price ${signal.exchangeB}: $${formatUsdAmount(signal.exchangeBPriceUsd)}`,
     `Long  📈: ${signal.longExchange}`,
     `Short 📉: ${signal.shortExchange}`,
     `Spread: $${formatUsdAmount(signal.absoluteDiffUsd)}`,
