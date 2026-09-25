@@ -128,7 +128,10 @@ export function formatTelegramSignal(signal: TradingSignal): string {
 function formatUsdAmount(value: string): string {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return value;
-  return parsed.toFixed(2);
+  return parsed.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 }
 
 export function normalizeTelegramChatId(chatId: string | number): string {
