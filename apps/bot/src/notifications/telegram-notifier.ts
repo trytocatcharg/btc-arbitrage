@@ -1,6 +1,11 @@
 import type { TradingSignal } from "@btc-arbitrage/domain";
 import type { Notifier } from "./notifier.js";
 
+// 2026-09-28: a hung Telegram request froze the bot's polling loop forever
+// (no timeout anywhere in the bot). Every outbound call now aborts after
+// 10 s so the notifier fails fast instead of blocking the loop.
+const TELEGRAM_REQUEST_TIMEOUT_MS = 10_000;
+
 export interface TelegramConfig {
   enabled: boolean;
   botToken?: string;
@@ -45,7 +50,7 @@ export class TelegramNotifier implements Notifier {
       spreadUsd: signal.absoluteDiffUsd,
     });
 
-    const response = await this.fetchImpl(
+    const response = await this.fetchWithTimeout(
       `https://api.telegram.org/bot${this.config.botToken}/sendMessage`,
       {
         method: "POST",
@@ -81,7 +86,7 @@ export class TelegramNotifier implements Notifier {
   async notifyUrgent(text: string): Promise<void> {
     if (!this.config.enabled || !this.config.botToken || !this.config.chatId)
       return;
-    const response = await this.fetchImpl(
+    const response = await this.fetchWithTimeout(
       `https://api.telegram.org/bot${this.config.botToken}/sendMessage`,
       {
         method: "POST",
@@ -97,6 +102,13 @@ export class TelegramNotifier implements Notifier {
       throw new Error(
         `Telegram urgent message failed with HTTP ${response.status}`,
       );
+  }
+
+  private fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
+    return this.fetchImpl(url, {
+      ...init,
+      signal: init?.signal ?? AbortSignal.timeout(TELEGRAM_REQUEST_TIMEOUT_MS),
+    });
   }
 
   private isSuppressedByCooldown(): boolean {

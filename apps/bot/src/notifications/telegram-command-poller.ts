@@ -21,6 +21,11 @@ import {
   type FetchLike,
 } from "./telegram-notifier.js";
 import { createOpenTradeService } from "../trading/open-trade-factory.js";
+
+// 2026-09-28: a hung Telegram request froze the bot's polling loop forever
+// (no timeout anywhere in the bot). Every outbound call now aborts after
+// 10 s so the loop's per-tick catch can recover.
+const TELEGRAM_REQUEST_TIMEOUT_MS = 10_000;
 import type {
   OpenTradeService,
   ConfirmOutcome,
@@ -93,7 +98,7 @@ export class TelegramCommandPoller {
     if (!this.config.telegram.enabled) return;
     if (!this.config.telegram.botToken || !this.config.telegram.chatId) return;
 
-    const response = await this.fetchImpl(
+    const response = await this.fetchWithTimeout(
       `https://api.telegram.org/bot${this.config.telegram.botToken}/setMyCommands`,
       {
         method: "POST",
@@ -151,7 +156,7 @@ export class TelegramCommandPoller {
       JSON.stringify(["message", "callback_query"]),
     );
 
-    const response = await this.fetchImpl(url.toString());
+    const response = await this.fetchWithTimeout(url.toString());
     if (!response.ok) {
       throw new Error(
         `Telegram getUpdates failed with HTTP ${response.status}`,
@@ -437,7 +442,7 @@ export class TelegramCommandPoller {
   }
 
   private async answerCallback(id: string, text?: string): Promise<void> {
-    await this.fetchImpl(
+    await this.fetchWithTimeout(
       `https://api.telegram.org/bot${this.config.telegram.botToken}/answerCallbackQuery`,
       {
         method: "POST",
@@ -449,8 +454,15 @@ export class TelegramCommandPoller {
       },
     );
   }
+  private fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
+    return this.fetchImpl(url, {
+      ...init,
+      signal: init?.signal ?? AbortSignal.timeout(TELEGRAM_REQUEST_TIMEOUT_MS),
+    });
+  }
+
   private async deleteMessage(messageId: number): Promise<void> {
-    const response = await this.fetchImpl(
+    const response = await this.fetchWithTimeout(
       `https://api.telegram.org/bot${this.config.telegram.botToken}/deleteMessage`,
       {
         method: "POST",
@@ -471,7 +483,7 @@ export class TelegramCommandPoller {
     text: string,
     replyMarkup?: unknown,
   ): Promise<void> {
-    const response = await this.fetchImpl(
+    const response = await this.fetchWithTimeout(
       `https://api.telegram.org/bot${this.config.telegram.botToken}/editMessageText`,
       {
         method: "POST",
@@ -611,7 +623,7 @@ export class TelegramCommandPoller {
     replyMarkup?: unknown,
   ): Promise<void> {
     for (const chunk of splitTelegramMessage(text)) {
-      const response = await this.fetchImpl(
+      const response = await this.fetchWithTimeout(
         `https://api.telegram.org/bot${this.config.telegram.botToken}/sendMessage`,
         {
           method: "POST",

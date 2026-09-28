@@ -640,6 +640,10 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
           "averageFillPrice",
           "avg_fill_price",
           "avgFillPrice",
+          // RISEx /v1/orders records expose the VWAP as `avg_price`
+          // (verified 2026-09-28 against per-fill trade history).
+          "avg_price",
+          "avgPrice",
         ]);
         if (average) {
           console.log("RISEx order history average fill price", {
@@ -741,6 +745,11 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
     // NOTE: size must be read with the SIGNED deep helper — a short position
     // reports size "-0.00384", which primitiveDecimal (unsigned regex)
     // rejects; that silently killed this fallback on 2026-09-14.
+    // NOTE (2026-09-28): RISEx position `quote_amount` is NET OF TAKER FEE
+    // — derived quote/size came out exactly fee_bps below the true fill VWAP
+    // (82731.18 vs 82756.01, off by exactly the $0.1048 fee on a 3 bps
+    // taker fill). This fallback must stay a LAST resort: prefer the order's
+    // own `avg_price` (see readOrderHistoryFillPrice) whenever indexed.
     const size = optionalSignedDecimalDeep(record, [
       "size",
       "position_size",
@@ -1006,9 +1015,17 @@ function normalizeSubmittedOrder(
       "averageFillPrice",
       "avg_fill_price",
       "avgFillPrice",
-      "fill_price",
-      "fillPrice",
+      // RISEx order records expose the volume-weighted average fill as
+      // `avg_price` (observed 2026-09-28); without it this read misses and
+      // the flow falls back to the fee-skewed position average.
+      "avg_price",
+      "avgPrice",
     ]) ??
+    // Only fall back to the order's `price` for filled orders where no
+    // average field exists: for market orders `price` is the LAST fill's
+    // price, not the VWAP (observed 2026-09-28: off by ~$17 on a 2-fill
+    // market order). Limit-order `price` is the limit price, which equals
+    // the fill price and is safe here.
     (isFilledStatus(body)
       ? optionalDecimalDeep(body, ["price", "price_usd", "priceUsd"])
       : undefined);
@@ -1078,6 +1095,9 @@ function normalizeRawOpenOrder(
       "averageFillPrice",
       "avg_fill_price",
       "avgFillPrice",
+      // RISEx order records expose the VWAP as `avg_price`.
+      "avg_price",
+      "avgPrice",
     ]),
     raw: record,
   };

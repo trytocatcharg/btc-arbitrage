@@ -1,5 +1,10 @@
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
+// 2026-09-28: a single hung exchange request froze the bot's polling loop
+// forever (no timeout anywhere) — a RISEx leg closed by TP/SL and the
+// closure was never detected or notified. Every request now aborts.
+const REQUEST_TIMEOUT_MS = 10_000;
+
 export class RisexHttpClient {
   constructor(
     private readonly baseUrl: string,
@@ -22,6 +27,7 @@ export class RisexHttpClient {
     const response = await this.fetchImpl(url.toString(), {
       method: "GET",
       headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     return this.parse("GET", path, response);
   }
@@ -34,6 +40,7 @@ export class RisexHttpClient {
         "content-type": "application/json",
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     return this.parse("POST", path, response);
   }

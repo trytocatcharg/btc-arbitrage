@@ -1,5 +1,9 @@
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
+// 2026-09-28: hung exchange requests froze the bot's polling loop forever
+// (no timeout anywhere); every request now aborts after 10 s.
+const REQUEST_TIMEOUT_MS = 10_000;
+
 export interface ExtendedHttpRequestOptions {
   private?: boolean;
   query?: Record<
@@ -8,8 +12,7 @@ export interface ExtendedHttpRequestOptions {
   >;
 }
 
-type JsonScalar = string | number | boolean | null;
-type ParsedResponseBody =
+type JsonScalar = string | number | boolean | null;type ParsedResponseBody =
   | JsonScalar
   | JsonScalar[]
   | { [key: string]: ParsedResponseBody };
@@ -66,6 +69,7 @@ export class ExtendedHttpClient {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     const text = response.status === 204 ? "" : await response.text();
     const payload = parseResponseBody(text);
