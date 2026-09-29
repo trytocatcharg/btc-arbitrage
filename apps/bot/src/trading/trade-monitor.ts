@@ -46,15 +46,58 @@ export async function monitorTrades(input: {
       )
         continue;
 
+      // A venue-side TP/SL fire leaves the position record empty (RISEx
+      // drops it; Extended returns null), so getPosition carries no exit
+      // data. Recover it post-hoc from the protection order ids stored in
+      // the leg's raw JSON (best-effort, adapter-owned, never throws).
+      const protectionIds = readProtectionOrderIds(row.trade_legs.raw);
+      let resolved: Awaited<
+        ReturnType<NonNullable<typeof adapter.resolveLegClosure>>
+      > = null;
+      if (
+        (position?.exitPriceUsd == null || position?.realizedPnlUsd == null) &&
+        (protectionIds.tpOrderId != null || protectionIds.slOrderId != null) &&
+        adapter.resolveLegClosure
+      ) {
+        try {
+          resolved = await adapter.resolveLegClosure({
+            symbol: row.trades.symbol,
+            side: row.trade_legs.side,
+            tpOrderId: protectionIds.tpOrderId,
+            slOrderId: protectionIds.slOrderId,
+          });
+        } catch (error) {
+          console.warn(
+            "Leg closure resolution failed; continuing with position data",
+            {
+              tradeId: row.trades.id,
+              legId: row.trade_legs.id,
+              message: error instanceof Error ? error.message : String(error),
+            },
+          );
+        }
+      }
+      // Merge recovered data behind the position data: prices only when the
+      // position read left them null; the close reason only when unknown.
+      const exitPriceUsd = position?.exitPriceUsd ?? resolved?.exitPriceUsd;
+      const realizedPnlUsd =
+        position?.realizedPnlUsd ?? resolved?.realizedPnlUsd;
+      const positionCloseReason = position?.closeReason;
+      const closeReason =
+        positionCloseReason != null && positionCloseReason !== "unknown"
+          ? positionCloseReason
+          : (resolved?.closeReason ?? positionCloseReason ?? "unknown");
+
       // Farmed volume (design D6): a venue-side TP/SL closure farms volume
       // too. Increment the closing leg's and the trade's
       // filled_notional_usd by qty × exit price inside this transaction;
-      // skip the increment when the exit price is unknown.
+      // skip the increment when the exit price is unknown. Computed after
+      // the closure merge so a recovered exit price is used.
       const volumeDeltaUsd =
-        position?.exitPriceUsd != null && row.trade_legs.quantityBase != null
+        exitPriceUsd != null && row.trade_legs.quantityBase != null
           ? formatDecimal(
               parseDecimal(row.trade_legs.quantityBase) *
-                parseDecimal(position.exitPriceUsd),
+                parseDecimal(exitPriceUsd),
               8,
             )
           : null;
@@ -74,14 +117,15 @@ export async function monitorTrades(input: {
       await input.db.transaction(async (tx) => {
         const legUpdates: Partial<typeof tradeLegs.$inferInsert> = {
           status: "closed",
-          closeReason: position?.closeReason ?? "unknown",
+          closeReason,
           closedAt: new Date(),
           closureNotifiedAt: new Date(),
         };
-        if (position?.exitPriceUsd != null)
-          legUpdates.exitPriceUsd = position.exitPriceUsd;
-        if (position?.realizedPnlUsd != null)
-          legUpdates.realizedPnlUsd = position.realizedPnlUsd;
+        if (exitPriceUsd != null) legUpdates.exitPriceUsd = exitPriceUsd;
+        if (realizedPnlUsd != null)
+          legUpdates.realizedPnlUsd = realizedPnlUsd;
+        if (resolved?.exitOrderId != null)
+          legUpdates.exitOrderId = resolved.exitOrderId;
         await tx
           .update(tradeLegs)
           .set(legUpdates)
@@ -171,11 +215,11 @@ export async function monitorTrades(input: {
           side: row.trade_legs.side,
           exchangeId: row.trade_legs.exchangeId,
           entryPriceUsd: row.trade_legs.entryPriceUsd,
-          exitPriceUsd: position?.exitPriceUsd ?? null,
-          realizedPnlUsd: position?.realizedPnlUsd ?? null,
+          exitPriceUsd: exitPriceUsd ?? null,
+          realizedPnlUsd: realizedPnlUsd ?? null,
           quantityBase: row.trade_legs.quantityBase,
         },
-        closeReason: position?.closeReason ?? null,
+        closeReason: closeReason !== "unknown" ? closeReason : null,
         sibling: siblingSnapshot,
         siblingClosed: sibling?.status === "closed",
       });
@@ -187,6 +231,23 @@ export async function monitorTrades(input: {
       );
     }
   }
+}
+
+/** Defensive read of the protection order ids persisted in the leg's raw
+ * JSON (set when the venue TP/SL backstop was placed). Any other raw shape
+ * is ignored. */
+function readProtectionOrderIds(raw: unknown): {
+  tpOrderId?: string;
+  slOrderId?: string;
+} {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const record = raw as Record<string, unknown>;
+  return {
+    tpOrderId:
+      typeof record.tpOrderId === "string" ? record.tpOrderId : undefined,
+    slOrderId:
+      typeof record.slOrderId === "string" ? record.slOrderId : undefined,
+  };
 }
 
 interface LegClosureSnapshot {

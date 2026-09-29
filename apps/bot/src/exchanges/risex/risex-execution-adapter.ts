@@ -451,6 +451,194 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
     };
   }
 
+  /** Best-effort recovery of the exit data for a leg the position monitor
+   * already detected as flat (venue-side TP/SL fire): /v1/account/position
+   * drops the record once flat, so the closure is reconstructed from the
+   * stored TP/SL order ids instead — /v1/orders/tpsl for the fired trigger,
+   * /v1/orders for the triggered on-chain reduce-only order (VWAP fill
+   * price), /v1/trade-history for the realized PnL. Degrades to null on
+   * any endpoint failure (2026-09-29, trade #113). */
+  async resolveLegClosure(input: {
+    symbol: string;
+    side: "long" | "short";
+    tpOrderId?: string;
+    slOrderId?: string;
+  }): Promise<{
+    exitPriceUsd?: string;
+    realizedPnlUsd?: string;
+    exitOrderId?: string;
+    closeReason?: "tp" | "sl" | "manual" | "liquidation";
+  } | null> {
+    const wanted = new Map<string, "tp" | "sl">();
+    if (input.tpOrderId) wanted.set(normalizeHex(input.tpOrderId), "tp");
+    if (input.slOrderId) wanted.set(normalizeHex(input.slOrderId), "sl");
+    if (wanted.size === 0) return null;
+    try {
+      const account = this.requireAccountAddress();
+      const info = await this.getMarketInfo({
+        symbol: input.symbol,
+        marketType: "perpetual",
+        priceSource: "last",
+      });
+      const marketId = String(info.marketId);
+      const tpslPayload = await this.http.get("/v1/orders/tpsl", {
+        account,
+        market_id: marketId,
+      });
+      // A fired trigger reports TPSL_ORDER_STATUS_SUCCESS and a
+      // triggered_at (unix SECONDS). triggered_order_id is an off-chain
+      // numeric id — NOT the on-chain order id used downstream.
+      const fired = asRisexArrayPayload(tpslPayload)
+        .filter(isRecord)
+        .map((record) => ({
+          record,
+          id: stringField(record, ["order_id", "orderId"]) ?? "",
+          triggeredAt: Number(stringField(record, ["triggered_at", "triggeredAt"])),
+        }))
+        .filter(
+          (candidate) =>
+            candidate.id !== "" &&
+            wanted.has(normalizeHex(candidate.id)) &&
+            stringField(candidate.record, ["status"]) ===
+              "TPSL_ORDER_STATUS_SUCCESS" &&
+            Number.isFinite(candidate.triggeredAt) &&
+            candidate.triggeredAt > 0,
+        )
+        .sort((a, b) => a.triggeredAt - b.triggeredAt);
+      const trigger = fired[0];
+      if (!trigger) {
+        console.log("RISEx leg closure resolution: no fired TP/SL order", {
+          marketId,
+          orderIds: [...wanted.keys()],
+          source: "/v1/orders/tpsl",
+        });
+        return null;
+      }
+      const stopType = stringField(trigger.record, ["stop_type", "stopType"]);
+      const closeReason: "tp" | "sl" =
+        stopType === "TAKE_PROFIT" || stopType === "STOP_LOSS"
+          ? stopType === "TAKE_PROFIT"
+            ? "tp"
+            : "sl"
+          : wanted.get(normalizeHex(trigger.id))!;
+
+      // The triggered on-chain order appears in /v1/orders history as a
+      // filled reduce-only record created within ~60s of triggered_at.
+      const historyPayload = await this.http.get("/v1/orders", {
+        account,
+        market_id: marketId,
+        limit: "50",
+      });
+      const closingOrders = asRisexArrayPayload(historyPayload)
+        .filter(isRecord)
+        .map((record) => ({
+          record,
+          id: stringField(record, ["id", "order_id", "orderId"]) ?? "",
+          createdAtUs: Number(stringField(record, ["created_at", "createdAt"])),
+        }))
+        .filter(
+          (candidate) =>
+            candidate.id !== "" &&
+            isTruthyFlag(candidate.record, ["reduce_only", "reduceOnly"]) &&
+            stringField(candidate.record, ["status", "order_status", "orderStatus"]) ===
+              "ORDER_STATUS_FILLED" &&
+            Number.isFinite(candidate.createdAtUs) &&
+            Math.abs(candidate.createdAtUs / 1e6 - trigger.triggeredAt) <= 60,
+        )
+        .sort((a, b) => a.createdAtUs - b.createdAtUs);
+      const closingOrder = closingOrders[0];
+      // avg_price is the VWAP of the closing order (verified 2026-09-28);
+      // fall back to a price×size VWAP computed from /v1/trade-history.
+      let exitPriceUsd = closingOrder
+        ? optionalDecimalDeep(closingOrder.record, [
+            "average_fill_price",
+            "averageFillPrice",
+            "avg_fill_price",
+            "avgFillPrice",
+            "avg_price",
+            "avgPrice",
+          ])
+        : undefined;
+      let exitOrderId: string | undefined;
+      let realizedPnlUsd: string | undefined;
+      if (closingOrder) {
+        exitOrderId = closingOrder.id;
+        try {
+          const fillsPayload = await this.http.get("/v1/trade-history", {
+            account,
+            market_id: marketId,
+            limit: "50",
+          });
+          const fills = asRisexArrayPayload(fillsPayload)
+            .filter(isRecord)
+            .filter(
+              (fill) =>
+                stringField(fill, ["order_id", "orderId"]) === closingOrder.id ||
+                normalizeHex(
+                  stringField(fill, ["order_id", "orderId"]) ?? "",
+                ) === normalizeHex(closingOrder.id),
+            );
+          let realizedTotal = 0;
+          let realizedSeen = false;
+          let notional = 0;
+          let size = 0;
+          for (const fill of fills) {
+            const fillSize = signedPrimitive(
+              pickField(fill, ["size", "filled_size", "filledSize"]),
+            );
+            const fillPrice = signedPrimitive(
+              pickField(fill, ["price", "price_usd", "priceUsd"]),
+            );
+            if (fillSize && fillPrice) {
+              notional += parseDecimal(fillSize) * parseDecimal(fillPrice);
+              size += parseDecimal(fillSize);
+            }
+            const realized = signedPrimitive(
+              pickField(fill, ["realized_pnl", "realizedPnl"]),
+            );
+            if (realized) {
+              realizedSeen = true;
+              realizedTotal += parseDecimal(realized);
+            }
+          }
+          if (realizedSeen)
+            realizedPnlUsd = formatDecimal(realizedTotal, 8);
+          if (exitPriceUsd === undefined && size > 0)
+            exitPriceUsd = formatDecimal(notional / size, 8);
+        } catch (error) {
+          console.warn(
+            "RISEx leg closure trade history read failed; exit price only",
+            {
+              orderId: closingOrder.id,
+              message: error instanceof Error ? error.message : String(error),
+            },
+          );
+        }
+      }
+      console.log("RISEx leg closure resolved", {
+        marketId,
+        closeReason,
+        exitOrderId,
+        exitPriceUsd,
+        realizedPnlUsd,
+        triggeredAt: trigger.triggeredAt,
+        sources: ["/v1/orders/tpsl", "/v1/orders", "/v1/trade-history"],
+      });
+      return {
+        exitPriceUsd,
+        realizedPnlUsd,
+        exitOrderId,
+        closeReason,
+      };
+    } catch (error) {
+      console.warn("RISEx leg closure resolution failed; degrading to null", {
+        orderIds: [...wanted.keys()],
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
+  }
+
   async getOpenOrders(input?: { symbol?: string }): Promise<RisexOpenOrder[]> {
     const account = this.requireAccountAddress();
     let marketId: string | undefined;
@@ -1347,6 +1535,40 @@ function primitiveDecimal(value: unknown): string | undefined {
     return value;
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
   return undefined;
+}
+
+/** First direct field hit among keys (shallow; no recursive descent), for
+ * cases where a deep search could match the wrong nested record. */
+function pickField(
+  record: Record<string, unknown>,
+  keys: string[],
+): string | number | boolean | null | undefined {
+  for (const key of keys) {
+    if (key in record) return record[key] as string | number | boolean | null;
+  }
+  return undefined;
+}
+
+/** Signed decimal string/number accepted (trade-history `realized_pnl`
+ * arrives as a string, possibly negative); anything else rejected. */
+function signedPrimitive(value: unknown): string | undefined {
+  if (typeof value === "string" && /^[-+]?\d+(\.\d+)?$/.test(value.trim()))
+    return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return undefined;
+}
+
+/** True when a flag field is boolean true or the string/number "true"/"1"
+ * (RISEx mixes boolean and string encodings across endpoints). */
+function isTruthyFlag(
+  record: Record<string, unknown>,
+  keys: string[],
+): boolean {
+  const value = pickField(record, keys);
+  if (value === true) return true;
+  if (typeof value === "string")
+    return value.toLowerCase() === "true" || value === "1";
+  return value === 1;
 }
 
 function stringField(

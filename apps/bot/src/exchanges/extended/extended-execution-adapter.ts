@@ -308,6 +308,93 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
     };
   }
 
+  /** Best-effort recovery of the exit data for a leg the position monitor
+   * already detected as flat (venue-side TP/SL fire): /api/v1/user/positions
+   * returns null once flat, so the closure is reconstructed from the stored
+   * TP/SL order ids via GET /api/v1/user/orders/{id}. A trigger that fired
+   * reports a non-zero filledQty / averagePrice; anything else (UNTRIGGERED,
+   * zero-filled) is treated as not fired — undocumented statuses are never
+   * guessed. Degrades to null on 404s and endpoint failures (2026-09-29,
+   * trade #113). */
+  async resolveLegClosure(input: {
+    symbol: string;
+    side: "long" | "short";
+    tpOrderId?: string;
+    slOrderId?: string;
+  }): Promise<{
+    exitPriceUsd?: string;
+    realizedPnlUsd?: string;
+    exitOrderId?: string;
+    closeReason?: "tp" | "sl" | "manual" | "liquidation";
+  } | null> {
+    try {
+      this.requireApiKey();
+    } catch {
+      return null;
+    }
+    try {
+      const fired: Array<{
+        exitPriceUsd?: string;
+        exitOrderId?: string;
+        closeReason: "tp" | "sl";
+      }> = [];
+      for (const [kind, id] of [
+        ["tp", input.tpOrderId],
+        ["sl", input.slOrderId],
+      ] as const) {
+        if (!id) continue;
+        let order: Record<string, unknown>;
+        try {
+          order = requiredRecord(
+            unwrapData(
+              await this.http.get(
+                `/api/v1/user/orders/${encodeURIComponent(id)}`,
+                { private: true },
+              ),
+            ),
+            "Extended TPSL order",
+          );
+        } catch {
+          // Missing or cancelled order: this id has nothing to teach us.
+          continue;
+        }
+        const exitPriceUsd = positiveDecimal(
+          findDecimal(order, ["averagePrice", "averageFillPrice", "avgPrice"]),
+        );
+        const filledQty = Number(
+          findDecimal(order, ["filledQty", "filledQuantity", "cumQty"]) ?? "0",
+        );
+        if (exitPriceUsd === undefined && !(filledQty > 0)) continue;
+        // Reason from the embedded trigger sub-object when present, else
+        // from which top-level id showed the fill.
+        const closeReason: "tp" | "sl" = isRecord(order.takeProfit)
+          ? "tp"
+          : isRecord(order.stopLoss)
+            ? "sl"
+            : kind;
+        fired.push({
+          exitPriceUsd,
+          exitOrderId: optionalString(order.id),
+          closeReason,
+        });
+      }
+      if (fired.length === 0) return null;
+      const result = fired[0];
+      console.log("Extended leg closure resolved", {
+        closeReason: result.closeReason,
+        exitOrderId: result.exitOrderId,
+        exitPriceUsd: result.exitPriceUsd,
+        source: "/api/v1/user/orders/{id}",
+      });
+      return result;
+    } catch (error) {
+      console.warn("Extended leg closure resolution failed; degrading to null", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
+  }
+
   private async createOrderPayload(
     input: ExecutionOrderRequest,
     market: Record<string, unknown>,
@@ -666,6 +753,15 @@ function optionalDecimal(value: unknown): string | undefined {
   if (typeof value === "string" || typeof value === "number")
     return String(value);
   return undefined;
+}
+
+/** A decimal strictly greater than zero, else undefined (Extended reports
+ * unfilled TPSL orders as averagePrice "0", which must not read as an exit
+ * price). */
+function positiveDecimal(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? value : undefined;
 }
 
 function optionalString(value: unknown): string | undefined {

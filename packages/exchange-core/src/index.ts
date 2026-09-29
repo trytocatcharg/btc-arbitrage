@@ -88,6 +88,23 @@ export interface ExecutionAdapter {
     symbol: string;
     side: "long" | "short";
   }): Promise<ExchangePosition | null>;
+  /** Best-effort recovery of exit data for a leg already detected closed
+   * (e.g. a venue-side TP/SL trigger, where getPosition no longer reports
+   * close price / realized PnL once the venue position record is gone).
+   * Implementations resolve the closure from the protection order ids the
+   * caller stored when the TP/SL orders were placed. Returns null when the
+   * closure cannot be resolved; must never throw. */
+  resolveLegClosure?(input: {
+    symbol: string;
+    side: "long" | "short";
+    tpOrderId?: string;
+    slOrderId?: string;
+  }): Promise<{
+    exitPriceUsd?: string;
+    realizedPnlUsd?: string;
+    exitOrderId?: string;
+    closeReason?: "tp" | "sl" | "manual" | "liquidation";
+  } | null>;
 }
 
 export interface CancelOrderRequest {
