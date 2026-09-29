@@ -22,6 +22,7 @@ import {
 } from "./telegram-notifier.js";
 import { createOpenTradeService } from "../trading/open-trade-factory.js";
 import {
+  applyAutoConfirm,
   applyCooldownMinutes,
   applyMarginUsd,
   applyMinSpreadUsd,
@@ -226,7 +227,7 @@ export class TelegramCommandPoller {
       if (isTelegramCommand(text, "config")) {
         await this.sendMessage(
           formatActiveConfigSummary(this.config, this.settingsBaseline),
-          { inline_keyboard: [RUNTIME_SETTING_BUTTONS] },
+          { inline_keyboard: RUNTIME_SETTING_BUTTONS },
         );
         return;
       }
@@ -438,6 +439,72 @@ export class TelegramCommandPoller {
               message: error instanceof Error ? error.message : String(error),
             });
           });
+        }
+      } else if (data === "set:autoconfirm") {
+        // Two-step confirmation: this toggle turns the bot into an
+        // auto-trader (or back), so the first tap only shows a warning
+        // prompt and a second tap on the explicit action applies it.
+        const enabled = this.config.openTrade.autoConfirm;
+        const messageId = callback.message?.message_id;
+        if (typeof messageId === "number") {
+          await this.editMessageText(
+            messageId,
+            enabled
+              ? "🤖 Auto-confirm está ACTIVADO: el bot abre trades solo apenas " +
+                "aparece una señal, sin confirmación por Telegram.\n\n" +
+                "¿Está seguro que desea DESACTIVARLO? El bot volverá a esperar " +
+                "tu confirmación manual en cada señal."
+              : "🤖 AUTO-TRADING: si activás auto-confirm, el bot abrirá trades " +
+                "automáticamente apenas aparezca una señal, SIN confirmación " +
+                "por Telegram. Los entry guards siguen aplicando.\n\n" +
+                "¿Está seguro que desea realizar esta acción?",
+            {
+              inline_keyboard: [
+                [
+                  {
+                    text: enabled ? "✅ Sí, desactivar" : "✅ Sí, activar",
+                    callback_data: enabled ? "ac:off" : "ac:on",
+                  },
+                  { text: "❌ Cancelar", callback_data: "set:cancel" },
+                ],
+              ],
+            },
+          ).catch((error: unknown) => {
+            console.warn("Telegram auto-confirm prompt edit failed", {
+              messageId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
+      } else if (data === "ac:on" || data === "ac:off") {
+        const messageId = callback.message?.message_id;
+        try {
+          const change = applyAutoConfirm(this.config, data === "ac:on");
+          if (typeof messageId === "number") {
+            await this.editMessageText(messageId, `✅ ${change.summary}`).catch(
+              (error: unknown) => {
+                console.warn("Telegram auto-confirm-apply edit failed", {
+                  messageId,
+                  message:
+                    error instanceof Error ? error.message : String(error),
+                });
+              },
+            );
+          }
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          if (typeof messageId === "number") {
+            await this.editMessageText(messageId, `❌ ${message}`).catch(
+              (error: unknown) => {
+                console.warn("Telegram auto-confirm-error edit failed", {
+                  messageId,
+                  message:
+                    error instanceof Error ? error.message : String(error),
+                });
+              },
+            );
+          }
         }
       } else if (data.startsWith("open:")) {
         const signalId = Number(data.slice(5));
@@ -847,10 +914,15 @@ const VOLUME_VIEW_BUTTONS = [
   { text: "6 meses", callback_data: "volume:6m" },
 ] as const;
 
+// Two rows: the dangerous auto-trading toggle sits alone below the
+// everyday settings so it never renders glued to them.
 const RUNTIME_SETTING_BUTTONS = [
-  { text: "⏱ Cooldown", callback_data: "set:cooldown" },
-  { text: "📏 Min spread", callback_data: "set:spread" },
-  { text: "💰 Margin", callback_data: "set:margin" },
+  [
+    { text: "⏱ Cooldown", callback_data: "set:cooldown" },
+    { text: "📏 Min spread", callback_data: "set:spread" },
+    { text: "💰 Margin", callback_data: "set:margin" },
+  ],
+  [{ text: "🤖 Auto trade", callback_data: "set:autoconfirm" }],
 ] as const;
 
 const SETTING_CANCEL_MARKUP = {
@@ -946,6 +1018,9 @@ export function formatActiveConfigSummary(
   const cooldownOverridden =
     baseline != null &&
     isRuntimeSettingOverridden("cooldownMinutes", baseline, config);
+  const autoConfirmOverridden =
+    baseline != null &&
+    isRuntimeSettingOverridden("autoConfirm", baseline, config);
   const lines = [
     "⚙️ Active bot configuration",
     "",
@@ -961,13 +1036,19 @@ export function formatActiveConfigSummary(
     `Open trade TP/SL (exchange backstop, stop-market per leg): TP +${config.openTrade.takeProfitPercent}% / SL -${config.openTrade.stopLossPercent}% of margin (price distance = % ÷ leverage)`,
     `Time-stop: disabled (BOT_TIME_STOP_ENABLED=true to re-enable)`,
     `Edge band: disabled (EDGE_BAND_ENABLED in open-trade.ts to re-enable)`,
+    `Auto-confirm (auto-trading): ${config.openTrade.autoConfirm ? "ACTIVADO ⚠️" : "off"}${autoConfirmOverridden ? " *" : ""}`,
     `Exit slippage: ${config.openTrade.slippageBps} bps`,
     `Telegram cooldown: ${config.telegram.alertCooldownMs} ms${cooldownOverridden ? " *" : ""}`,
     "",
     formatExchangeLine("Exchange A", config.exchangeA, config),
     formatExchangeLine("Exchange B", config.exchangeB, config),
   ];
-  if (minSpreadOverridden || marginOverridden || cooldownOverridden) {
+  if (
+    minSpreadOverridden ||
+    marginOverridden ||
+    cooldownOverridden ||
+    autoConfirmOverridden
+  ) {
     lines.push("", "(* ajustado en caliente — no persiste al reiniciar)");
   }
   return lines.join("\n");

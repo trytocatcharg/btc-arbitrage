@@ -6,7 +6,11 @@ import type { BotConfig } from "@btc-arbitrage/config";
 // everywhere without a restart. Overrides are in-memory only and are lost on
 // bot restart.
 
-export type RuntimeSettingKey = "cooldownMinutes" | "minSpreadUsd" | "marginUsd";
+export type RuntimeSettingKey =
+  | "cooldownMinutes"
+  | "minSpreadUsd"
+  | "marginUsd"
+  | "autoConfirm";
 
 export interface RuntimeSettingChange {
   key: RuntimeSettingKey;
@@ -18,6 +22,7 @@ export interface RuntimeSettingsBaseline {
   cooldownMinutes: number;
   minSpreadUsd: string;
   marginUsd: string;
+  autoConfirm: boolean;
 }
 
 const MAX_COOLDOWN_MINUTES = 10_080; // 7 days
@@ -30,6 +35,7 @@ export function snapshotRuntimeSettings(
     cooldownMinutes: config.telegram.alertCooldownMs / 60_000,
     minSpreadUsd: config.minPriceDiffUsd,
     marginUsd: config.openTrade.marginUsd,
+    autoConfirm: config.openTrade.autoConfirm,
   };
 }
 
@@ -85,6 +91,25 @@ export function applyMarginUsd(
   };
 }
 
+export function applyAutoConfirm(
+  config: BotConfig,
+  enabled: boolean,
+): RuntimeSettingChange {
+  config.openTrade.autoConfirm = enabled;
+  // Mirrors the loud startup warning in main.ts: turning this on makes the
+  // bot an auto-trader, so the toggle must be visible in the logs.
+  if (enabled) {
+    console.warn(
+      "AUTO-TRADING ENABLED AT RUNTIME: the bot will open trades without " +
+        "Telegram confirmation. Entry guards still apply.",
+    );
+  }
+  return {
+    key: "autoConfirm",
+    summary: `Auto-confirm (auto-trading): ${enabled ? "ACTIVADO" : "desactivado"}`,
+  };
+}
+
 export function isRuntimeSettingOverridden(
   key: RuntimeSettingKey,
   baseline: RuntimeSettingsBaseline,
@@ -100,5 +125,7 @@ export function isRuntimeSettingOverridden(
       return config.minPriceDiffUsd !== baseline.minSpreadUsd;
     case "marginUsd":
       return config.openTrade.marginUsd !== baseline.marginUsd;
+    case "autoConfirm":
+      return config.openTrade.autoConfirm !== baseline.autoConfirm;
   }
 }
