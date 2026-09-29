@@ -21,6 +21,15 @@ import {
   type FetchLike,
 } from "./telegram-notifier.js";
 import { createOpenTradeService } from "../trading/open-trade-factory.js";
+import {
+  applyCooldownMinutes,
+  applyMarginUsd,
+  applyMinSpreadUsd,
+  isRuntimeSettingOverridden,
+  snapshotRuntimeSettings,
+  type RuntimeSettingChange,
+  type RuntimeSettingsBaseline,
+} from "../runtime/runtime-settings.js";
 
 // 2026-09-28: a hung Telegram request froze the bot's polling loop forever
 // (no timeout anywhere in the bot). Every outbound call now aborts after
@@ -87,12 +96,18 @@ const AVAILABLE_COMMANDS = [
 export class TelegramCommandPoller {
   private offset = 0;
 
+  private readonly settingsBaseline: RuntimeSettingsBaseline;
+  private pendingSettingPrompt: "cooldown" | "spread" | "margin" | null =
+    null;
+
   constructor(
     private readonly config: BotConfig,
     private readonly db: Awaited<ReturnType<typeof getDb>>,
     private readonly registry: ExchangeRegistryLike,
     private readonly fetchImpl: FetchLike = fetch,
-  ) {}
+  ) {
+    this.settingsBaseline = snapshotRuntimeSettings(config);
+  }
 
   async configureAvailableCommands(): Promise<void> {
     if (!this.config.telegram.enabled) return;
@@ -199,8 +214,20 @@ export class TelegramCommandPoller {
     }
 
     try {
+      if (this.pendingSettingPrompt) {
+        if (!text.startsWith("/")) {
+          await this.handleSettingValueInput(text, update.update_id);
+          return;
+        }
+        // A fresh command cancels the pending setting prompt.
+        this.pendingSettingPrompt = null;
+      }
+
       if (isTelegramCommand(text, "config")) {
-        await this.sendMessage(formatActiveConfigSummary(this.config));
+        await this.sendMessage(
+          formatActiveConfigSummary(this.config, this.settingsBaseline),
+          { inline_keyboard: [RUNTIME_SETTING_BUTTONS] },
+        );
         return;
       }
 
@@ -232,6 +259,49 @@ export class TelegramCommandPoller {
     }
   }
 
+  private async handleSettingValueInput(
+    text: string,
+    updateId: number,
+  ): Promise<void> {
+    const kind = this.pendingSettingPrompt;
+    if (!kind) return;
+    try {
+      const value = Number(text.replace(",", "."));
+      let change: RuntimeSettingChange;
+      try {
+        change =
+          kind === "cooldown"
+            ? applyCooldownMinutes(this.config, value)
+          : kind === "spread"
+            ? applyMinSpreadUsd(this.config, value)
+            : applyMarginUsd(this.config, value);
+      } catch (validationError) {
+        // Invalid value: keep the prompt open so the operator can retry.
+        const message =
+          validationError instanceof Error
+            ? validationError.message
+            : String(validationError);
+        await this.sendMessage(
+          `❌ ${message}\nProbá de nuevo, o tocá /config para empezar de nuevo.`,
+        );
+        return;
+      }
+      this.pendingSettingPrompt = null;
+      console.warn("Runtime setting updated", { updateId, kind, ...change });
+      await this.sendMessage(`✅ ${change.summary}`);
+    } catch (error) {
+      console.error("Telegram setting input failed", {
+        updateId,
+        kind,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      this.pendingSettingPrompt = null;
+      await this.sendMessage(
+        "❌ No se pudo actualizar el ajuste. Reintentá, o tocá /config para empezar de nuevo.",
+      );
+    }
+  }
+
   private async handleCallback(
     callback: NonNullable<TelegramUpdate["callback_query"]>,
   ): Promise<void> {
@@ -246,7 +316,130 @@ export class TelegramCommandPoller {
       return;
     const data = callback.data ?? "";
     try {
-      if (data.startsWith("open:")) {
+      if (data === "set:cancel") {
+        this.pendingSettingPrompt = null;
+        const messageId = callback.message?.message_id;
+        if (typeof messageId === "number") {
+          await this.editMessageText(messageId, "Cancelado.").catch(
+            (error: unknown) => {
+              console.warn("Telegram setting-cancel edit failed", {
+                messageId,
+                message:
+                  error instanceof Error ? error.message : String(error),
+              });
+            },
+          );
+        }
+      } else if (data === "set:cooldown") {
+        const messageId = callback.message?.message_id;
+        if (typeof messageId === "number") {
+          await this.editMessageText(
+            messageId,
+            "Elegí el cooldown de alertas:",
+            {
+              inline_keyboard: [
+                [
+                  { text: "5 min", callback_data: "cd:5" },
+                  { text: "30 min", callback_data: "cd:30" },
+                  { text: "60 min", callback_data: "cd:60" },
+                ],
+                [
+                  { text: "Custom…", callback_data: "cd:custom" },
+                  { text: "Cancelar", callback_data: "set:cancel" },
+                ],
+              ],
+            },
+          ).catch((error: unknown) => {
+            console.warn("Telegram cooldown-menu edit failed", {
+              messageId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
+      } else if (data.startsWith("cd:")) {
+        const option = data.slice(3);
+        const messageId = callback.message?.message_id;
+        if (option === "custom") {
+          this.pendingSettingPrompt = "cooldown";
+          if (typeof messageId === "number") {
+            await this.editMessageText(
+              messageId,
+              "Mandame el cooldown en minutos (número entre 1 y 10080).",
+              SETTING_CANCEL_MARKUP,
+            ).catch((error: unknown) => {
+              console.warn("Telegram cooldown-custom edit failed", {
+                messageId,
+                message:
+                  error instanceof Error ? error.message : String(error),
+              });
+            });
+          }
+        } else {
+          try {
+            const change = applyCooldownMinutes(
+              this.config,
+              Number(option),
+            );
+            this.pendingSettingPrompt = null;
+            if (typeof messageId === "number") {
+              await this.editMessageText(
+                messageId,
+                `✅ ${change.summary}`,
+              ).catch((error: unknown) => {
+                console.warn("Telegram cooldown-apply edit failed", {
+                  messageId,
+                  message:
+                    error instanceof Error ? error.message : String(error),
+                });
+              });
+            }
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : String(error);
+            if (typeof messageId === "number") {
+              await this.editMessageText(messageId, `❌ ${message}`).catch(
+                (error: unknown) => {
+                  console.warn("Telegram cooldown-error edit failed", {
+                    messageId,
+                    message:
+                      error instanceof Error ? error.message : String(error),
+                  });
+                },
+              );
+            }
+          }
+        }
+      } else if (data === "set:spread") {
+        this.pendingSettingPrompt = "spread";
+        const messageId = callback.message?.message_id;
+        if (typeof messageId === "number") {
+          await this.editMessageText(
+            messageId,
+            "Mandame el nuevo min spread en USD (ej: 40).",
+            SETTING_CANCEL_MARKUP,
+          ).catch((error: unknown) => {
+            console.warn("Telegram spread-prompt edit failed", {
+              messageId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
+      } else if (data === "set:margin") {
+        this.pendingSettingPrompt = "margin";
+        const messageId = callback.message?.message_id;
+        if (typeof messageId === "number") {
+          await this.editMessageText(
+            messageId,
+            `Mandame el nuevo margin por pata en USD (ej: 20). El notional se recalcula como margin × leverage (${this.config.leverage}x).`,
+            SETTING_CANCEL_MARKUP,
+          ).catch((error: unknown) => {
+            console.warn("Telegram margin-prompt edit failed", {
+              messageId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
+      } else if (data.startsWith("open:")) {
         const signalId = Number(data.slice(5));
         const signal = (
           await this.db.select().from(signals).where(eq(signals.id, signalId))
@@ -654,6 +847,16 @@ const VOLUME_VIEW_BUTTONS = [
   { text: "6 meses", callback_data: "volume:6m" },
 ] as const;
 
+const RUNTIME_SETTING_BUTTONS = [
+  { text: "⏱ Cooldown", callback_data: "set:cooldown" },
+  { text: "📏 Min spread", callback_data: "set:spread" },
+  { text: "💰 Margin", callback_data: "set:margin" },
+] as const;
+
+const SETTING_CANCEL_MARKUP = {
+  inline_keyboard: [[{ text: "Cancelar", callback_data: "set:cancel" }]],
+};
+
 const VOLUME_ATTRIBUTION_NOTE = "(atribuido por apertura del trade, UTC)";
 
 function formatExchangeVolumeLines(
@@ -730,28 +933,44 @@ async function buildVolumeMessage(
   ].join("\n");
 }
 
-export function formatActiveConfigSummary(config: BotConfig): string {
-  return [
+export function formatActiveConfigSummary(
+  config: BotConfig,
+  baseline?: RuntimeSettingsBaseline,
+): string {
+  const minSpreadOverridden =
+    baseline != null &&
+    isRuntimeSettingOverridden("minSpreadUsd", baseline, config);
+  const marginOverridden =
+    baseline != null &&
+    isRuntimeSettingOverridden("marginUsd", baseline, config);
+  const cooldownOverridden =
+    baseline != null &&
+    isRuntimeSettingOverridden("cooldownMinutes", baseline, config);
+  const lines = [
     "⚙️ Active bot configuration",
     "",
     `Symbol: ${config.btcSymbol}`,
     `Market: ${config.marketType}`,
     `Price source: ${config.priceSource}`,
     `Poll interval: ${config.pricePollIntervalMs} ms`,
-    `Min spread: $${formatUsd(config.minPriceDiffUsd)}`,
+    `Min spread: $${formatUsd(config.minPriceDiffUsd)}${minSpreadOverridden ? " *" : ""}`,
     `Leverage: ${config.leverage}x`,
     `Mode: ${config.botExecutionMode}`,
     `Order placement: ${config.enableOrderPlacement ? "enabled" : "disabled"}`,
-    `Open trade margin: $${formatUsd(config.openTrade.marginUsd)} per leg (notional $${formatUsd(config.openTrade.notionalUsd)} at ${config.leverage}x)`,
+    `Open trade margin: $${formatUsd(config.openTrade.marginUsd)} per leg (notional $${formatUsd(config.openTrade.notionalUsd)} at ${config.leverage}x)${marginOverridden ? " *" : ""}`,
     `Open trade TP/SL (exchange backstop, stop-market per leg): TP +${config.openTrade.takeProfitPercent}% / SL -${config.openTrade.stopLossPercent}% of margin (price distance = % ÷ leverage)`,
     `Time-stop: disabled (BOT_TIME_STOP_ENABLED=true to re-enable)`,
     `Edge band: disabled (EDGE_BAND_ENABLED in open-trade.ts to re-enable)`,
     `Exit slippage: ${config.openTrade.slippageBps} bps`,
-    `Telegram cooldown: ${config.telegram.alertCooldownMs} ms`,
+    `Telegram cooldown: ${config.telegram.alertCooldownMs} ms${cooldownOverridden ? " *" : ""}`,
     "",
     formatExchangeLine("Exchange A", config.exchangeA, config),
     formatExchangeLine("Exchange B", config.exchangeB, config),
-  ].join("\n");
+  ];
+  if (minSpreadOverridden || marginOverridden || cooldownOverridden) {
+    lines.push("", "(* ajustado en caliente — no persiste al reiniciar)");
+  }
+  return lines.join("\n");
 }
 
 function isTelegramCommand(text: string, command: string): boolean {

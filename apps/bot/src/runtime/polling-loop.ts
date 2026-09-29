@@ -29,10 +29,6 @@ export async function runPollingLoop(input: {
   db: Awaited<ReturnType<typeof getDb>>;
   commandPoller?: CommandPoller;
 }): Promise<void> {
-  const signalEngine = new SignalEngine({
-    thresholdUsd: input.config.minPriceDiffUsd,
-    leverage: input.config.leverage,
-  });
   const exchangeA = input.registry.get(input.config.exchangeA);
   const exchangeB = input.registry.get(input.config.exchangeB);
   let tick = 0;
@@ -119,6 +115,12 @@ export async function runPollingLoop(input: {
         );
       }
 
+      // SignalEngine is stateless; constructing it per tick lets runtime
+      // overrides of minPriceDiffUsd / leverage apply without a restart.
+      const signalEngine = new SignalEngine({
+        thresholdUsd: input.config.minPriceDiffUsd,
+        leverage: input.config.leverage,
+      });
       const spread = calculateSpread({
         exchangeA: priceA,
         exchangeB: priceB,
