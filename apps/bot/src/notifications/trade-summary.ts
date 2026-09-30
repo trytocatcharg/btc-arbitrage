@@ -1,4 +1,4 @@
-import { desc, inArray, sql } from "drizzle-orm";
+import { desc, inArray } from "drizzle-orm";
 import { getDb, tradeLegs, trades, openTradeStatuses } from "@btc-arbitrage/db";
 import type { ExchangeAdapter } from "@btc-arbitrage/exchange-core";
 import type { MarketType, PriceSource } from "@btc-arbitrage/domain";
@@ -20,8 +20,6 @@ interface ResolvedTradeSummary {
   id: number;
   status: string;
   symbol: string;
-  marketType: MarketType;
-  priceSource: PriceSource;
   createdAt: Date;
   openedAt: Date | null;
   updatedAt: Date;
@@ -51,14 +49,9 @@ interface QuoteSnapshot {
 export async function buildTradeSummaryMessage(
   deps: TradeSummaryDependencies,
 ): Promise<string> {
-  const farmedVolume = await loadFarmedVolumeUsd(deps.db);
-  const farmedLines = [
-    `Farmed volume (DB, lifetime): ${formatUsd(farmedVolume.lifetimeUsd)}`,
-    `Farmed volume (DB, 24h): ${formatUsd(farmedVolume.last24hUsd)}`,
-  ];
   const activeTrades = await loadActiveTrades(deps.db);
   if (activeTrades.length === 0) {
-    return ["📭 No active trades found.", ...farmedLines].join("\n");
+    return "📭 No active trades found.";
   }
 
   const legsByTradeId = await loadTradeLegsByTradeId(
@@ -74,25 +67,7 @@ export async function buildTradeSummaryMessage(
     }),
   );
 
-  return formatTradeSummaryMessage(summaries, farmedLines);
-}
-
-/** DB-backed farmed volume (volume-farming spec): lifetime total plus the
- * 24h trailing window pinned to trades.updatedAt (last fill activity). */
-async function loadFarmedVolumeUsd(
-  db: BotDatabase,
-): Promise<{ lifetimeUsd: number | null; last24hUsd: number | null }> {
-  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  const rows = await db
-    .select({
-      lifetimeUsd: sql<string>`coalesce(sum(${trades.filledNotionalUsd}), 0)`,
-      last24hUsd: sql<string>`coalesce(sum(case when ${trades.updatedAt} >= ${cutoff} then ${trades.filledNotionalUsd} else 0 end), 0)`,
-    })
-    .from(trades);
-  return {
-    lifetimeUsd: toNumber(rows[0]?.lifetimeUsd),
-    last24hUsd: toNumber(rows[0]?.last24hUsd),
-  };
+  return formatTradeSummaryMessage(summaries);
 }
 
 async function loadActiveTrades(db: BotDatabase): Promise<TradeRow[]> {
@@ -165,8 +140,6 @@ async function buildTradeSummary(
     id: trade.id,
     status: trade.status,
     symbol: trade.symbol,
-    marketType: trade.marketType as MarketType,
-    priceSource: trade.priceSource as PriceSource,
     createdAt: trade.createdAt,
     openedAt: trade.openedAt ?? null,
     updatedAt: trade.updatedAt,
@@ -269,10 +242,7 @@ function resolveEntrySpreadUsd(
   return shortEntry - longEntry;
 }
 
-function formatTradeSummaryMessage(
-  summaries: ResolvedTradeSummary[],
-  farmedLines: string[],
-): string {
+function formatTradeSummaryMessage(summaries: ResolvedTradeSummary[]): string {
   const globalEstimatedPnlUsd = summaries.reduce<number | null>(
     (total, summary) => {
       if (summary.totalEstimatedPnlUsd == null) return total;
@@ -284,27 +254,10 @@ function formatTradeSummaryMessage(
 
   lines.push(`Open trades: ${summaries.length}`);
   lines.push(`Global estimated PnL: ${formatPnl(globalEstimatedPnlUsd)}`);
-  lines.push(...farmedLines);
 
   for (const summary of summaries) {
-    const spreadMoveUsd =
-      summary.entrySpreadUsd != null && summary.liveSpreadUsd != null
-        ? summary.liveSpreadUsd - summary.entrySpreadUsd
-        : null;
-    const totalQuantityBase = sumKnown([
-      summary.longLeg.quantityBase,
-      summary.shortLeg.quantityBase,
-    ]);
-    const totalNotionalUsd = sumKnown([
-      calculateLegNotionalUsd(summary.longLeg),
-      calculateLegNotionalUsd(summary.shortLeg),
-    ]);
-
     lines.push("");
     lines.push(`Trade #${summary.id} · ${summary.symbol} · ${summary.status}`);
-    lines.push(
-      `Market: ${summary.marketType} · Source: ${summary.priceSource}`,
-    );
     lines.push(
       `Created: ${formatDate(summary.createdAt)}${summary.openedAt ? ` · Opened: ${formatDate(summary.openedAt)}` : ""}`,
     );
@@ -315,30 +268,15 @@ function formatTradeSummaryMessage(
     if (summary.liveSpreadUsd != null) {
       lines.push(`Live spread: ${formatSignedUsd(summary.liveSpreadUsd)}`);
     }
-    if (spreadMoveUsd != null) {
-      lines.push(
-        `Spread move: ${formatSignedUsd(spreadMoveUsd)} ${spreadMoveUsd <= 0 ? "(converging)" : "(widening)"}`,
-      );
-    }
     if (summary.totalEstimatedPnlUsd != null) {
       lines.push(
         `Trade estimated PnL: ${formatPnl(summary.totalEstimatedPnlUsd)}`,
       );
     }
-    if (totalQuantityBase != null) {
-      lines.push(`Total qty: ${formatQty(totalQuantityBase)} BTC`);
-    }
-    if (totalNotionalUsd != null) {
-      // Live-price estimate — explicitly labeled so it is never confused
-      // with the persisted farmed-volume lines above (Open Question 3:
-      // both are kept, labeled distinctly).
-      lines.push(
-        `Total notional (live-price estimate): ${formatUsd(totalNotionalUsd)}`,
-      );
-    }
 
     lines.push("");
     lines.push(formatLegSummary(summary.longLeg));
+    lines.push("");
     lines.push(formatLegSummary(summary.shortLeg));
 
     if (summary.notes.length > 0) {
@@ -362,7 +300,6 @@ function formatLegSummary(leg: ResolvedLegSummary): string {
     leg.entryPriceUsd != null && priceMoveUsd != null
       ? (priceMoveUsd / leg.entryPriceUsd) * 100
       : null;
-  const notionalUsd = calculateLegNotionalUsd(leg);
   const lines = [
     `${label} ${leg.exchangeId}`,
     `Status: ${leg.status}`,
@@ -374,12 +311,6 @@ function formatLegSummary(leg: ResolvedLegSummary): string {
     lines.push(
       `Price move: ${formatSignedUsd(priceMoveUsd)} (${formatSignedPercent(priceMovePercent)})`,
     );
-  }
-  if (leg.quantityBase != null) {
-    lines.push(`Qty: ${formatQty(leg.quantityBase)}`);
-  }
-  if (notionalUsd != null) {
-    lines.push(`Notional: ${formatUsd(notionalUsd)}`);
   }
 
   lines.push(`Leg PnL: ${formatPnl(leg.estimatedPnlUsd)}`);
@@ -402,10 +333,6 @@ function formatUsd(value: number | null): string {
   return `$${value.toFixed(2)}`;
 }
 
-function formatQty(value: number): string {
-  return value.toFixed(8).replace(/\.?0+$/, "");
-}
-
 function formatSignedUsd(value: number | null): string {
   if (value == null) return "n/a";
   const prefix = value >= 0 ? "+" : "-";
@@ -422,18 +349,6 @@ function formatPnl(value: number | null): string {
   if (value == null) return "n/a";
   const icon = value >= 0 ? "🟢" : "🔴";
   return `${icon} ${formatSignedUsd(value)}`;
-}
-
-function calculateLegNotionalUsd(leg: ResolvedLegSummary): number | null {
-  const priceUsd = leg.currentPriceUsd ?? leg.entryPriceUsd;
-  if (priceUsd == null || leg.quantityBase == null) return null;
-  return priceUsd * leg.quantityBase;
-}
-
-function sumKnown(values: Array<number | null>): number | null {
-  const known = values.filter((value): value is number => value != null);
-  if (known.length === 0) return null;
-  return known.reduce((sum, value) => sum + value, 0);
 }
 
 function toNumber(value: string | number | null | undefined): number | null {
