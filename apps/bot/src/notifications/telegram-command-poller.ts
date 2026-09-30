@@ -1,12 +1,15 @@
 import type { BotConfig } from "@btc-arbitrage/config";
 import type { getDb } from "@btc-arbitrage/db";
-import { signals, tradeLegs, tradePreviews } from "@btc-arbitrage/db";
+import { signals, tradePreviews } from "@btc-arbitrage/db";
 import { eq } from "drizzle-orm";
-import { parseDecimal } from "@btc-arbitrage/domain";
 import {
   buildTradeSummaryMessage,
   type ExchangeRegistryLike,
 } from "./trade-summary.js";
+import {
+  buildTradeOpenedSummary,
+  formatEdgeClosedNotice,
+} from "../trading/opened-trade-summary.js";
 import {
   lastSixMonthsFrom,
   loadMonthlyVolumeBreakdown,
@@ -639,7 +642,7 @@ export class TelegramCommandPoller {
           // first-attempt confirm would.
           await this.sendMessage(await this.buildFillSummary(token));
         } else if (retryOutcome?.outcome === "edge_closed") {
-          await this.sendMessage(this.formatEdgeClosedNotice(retryOutcome));
+          await this.sendMessage(formatEdgeClosedNotice(retryOutcome));
         } else if (retryOutcome?.outcome === "cancelled") {
           // The repeated timeout prompt (with a fresh retry button) was
           // already sent by notifyLimitTimeout; nothing else to report.
@@ -773,7 +776,7 @@ export class TelegramCommandPoller {
       if (typeof messageId === "number") {
         await this.editMessageText(
           messageId,
-          this.formatEdgeClosedNotice(confirmOutcome),
+          formatEdgeClosedNotice(confirmOutcome),
         ).catch((error: unknown) => {
           console.warn("Telegram edge-close edit failed", {
             messageId,
@@ -827,56 +830,8 @@ export class TelegramCommandPoller {
     }
   }
 
-  private formatEdgeClosedNotice(confirmOutcome: {
-    realizedPnlUsd: string | null;
-    capturedSpreadUsd: number;
-    minEdgeUsd: number;
-  }): string {
-    const pnlText =
-      confirmOutcome.realizedPnlUsd == null
-        ? "n/a"
-        : `$${Number(confirmOutcome.realizedPnlUsd).toFixed(2)}`;
-    return (
-      `⚖️ Edge insuficiente al llenar: spread capturado ` +
-      `$${confirmOutcome.capturedSpreadUsd.toFixed(2)} vs mínimo ` +
-      `$${confirmOutcome.minEdgeUsd.toFixed(2)}. Ambas patas ` +
-      `cerradas al momento. PnL realizado: ${pnlText}.`
-    );
-  }
-
   private async buildFillSummary(token: string): Promise<string> {
-    const previewRow = (
-      await this.db
-        .select({ tradeId: tradePreviews.tradeId })
-        .from(tradePreviews)
-        .where(eq(tradePreviews.token, token))
-    )[0];
-    if (!previewRow?.tradeId) return "✅ Trade execution completed.";
-    const legs = await this.db
-      .select()
-      .from(tradeLegs)
-      .where(eq(tradeLegs.tradeId, previewRow.tradeId));
-    const longLeg = legs.find((leg) => leg.side === "long");
-    const shortLeg = legs.find((leg) => leg.side === "short");
-    const lines = [`✅ Trade opened (${token.slice(0, 8)})`];
-    if (longLeg)
-      lines.push(
-        `Long: ${longLeg.exchangeId} @ $${longLeg.entryPriceUsd ?? "?"} ${longLeg.status}`,
-      );
-    if (shortLeg)
-      lines.push(
-        `Short: ${shortLeg.exchangeId} @ $${shortLeg.entryPriceUsd ?? "?"} ${shortLeg.status}`,
-      );
-    if (legs[0]) lines.push(`Quantity: ${legs[0].quantityBase} BTC`);
-    // Farmed volume surfaced from the persisted filled_notional_usd
-    // columns (design D6 / volume-farming spec), not a live-price estimate.
-    const farmedVolumeUsd = legs.reduce(
-      (sum, leg) => sum + parseDecimal(leg.filledNotionalUsd ?? "0"),
-      0,
-    );
-    lines.push(`Farmed volume: $${farmedVolumeUsd.toFixed(2)}`);
-    lines.push("TP/SL placed on both legs (percentages on margin).");
-    return lines.join("\n");
+    return buildTradeOpenedSummary(this.db, token);
   }
   private async sendMessage(
     text: string,

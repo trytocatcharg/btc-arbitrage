@@ -4,6 +4,10 @@ import type { ExchangeAdapter } from "@btc-arbitrage/exchange-core";
 import type { MarketType, ExchangeId } from "@btc-arbitrage/domain";
 import { OpenTradeService, type OpenTradeOptions } from "./open-trade.js";
 import { DbPreviewStore } from "./db-preview-store.js";
+import {
+  buildTradeOpenedSummary,
+  formatEdgeClosedNotice,
+} from "./opened-trade-summary.js";
 
 export interface OpenTradeNotify {
   notifyUrgent: (text: string) => Promise<void>;
@@ -118,10 +122,59 @@ export async function autoConfirmSignalTrade(input: {
       token: preview.token,
       outcome: outcome?.outcome ?? "undefined",
     });
+    // The Telegram-confirm path reports the outcome by editing the
+    // operator's message; auto-confirm has no such message, so every
+    // outcome must be pushed explicitly or the operator only learns
+    // about the trade when the legs close.
+    try {
+      if (outcome?.outcome === "opened") {
+        const summary = await buildTradeOpenedSummary(input.db, preview.token);
+        await input.notifier.notifyUrgent(`🤖 Auto-trade\n${summary}`);
+      } else if (outcome?.outcome === "edge_closed") {
+        await input.notifier.notifyUrgent(
+          `🤖 Auto-trade\n${formatEdgeClosedNotice(outcome)}`,
+        );
+      } else if (outcome?.outcome === "cancelled") {
+        await input.notifier.notifyUrgent(
+          `⏱ Auto-trade no abierto (${preview.token.slice(0, 8)}): la ` +
+            `orden límite expiró sin fill y el trade quedó cancelado.`,
+        );
+      } else {
+        await input.notifier.notifyUrgent(
+          `❌ Auto-trade ${preview.token.slice(0, 8)} terminó sin un ` +
+            `resultado definido. Revisá los logs antes de asumir que abrió.`,
+        );
+      }
+    } catch (notifyError) {
+      // A failed notification must not mark the trade itself as failed —
+      // the open already completed above.
+      console.error("Auto-confirm outcome notification failed", {
+        signalId: input.signalId,
+        token: preview.token,
+        message:
+          notifyError instanceof Error
+            ? notifyError.message
+            : String(notifyError),
+      });
+    }
   } catch (error) {
     console.error("Auto-confirm trade failed", {
       signalId: input.signalId,
       message: error instanceof Error ? error.message : String(error),
     });
+    try {
+      await input.notifier.notifyUrgent(
+        `❌ Auto-trade falló en la señal ${input.signalId}: ` +
+          (error instanceof Error ? error.message : String(error)),
+      );
+    } catch (notifyError) {
+      console.error("Auto-confirm failure notification failed", {
+        signalId: input.signalId,
+        message:
+          notifyError instanceof Error
+            ? notifyError.message
+            : String(notifyError),
+      });
+    }
   }
 }
