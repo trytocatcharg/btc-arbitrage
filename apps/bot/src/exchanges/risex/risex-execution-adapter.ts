@@ -486,8 +486,10 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
         market_id: marketId,
       });
       // A fired trigger reports TPSL_ORDER_STATUS_SUCCESS and a
-      // triggered_at (unix SECONDS). triggered_order_id is an off-chain
-      // numeric id — NOT the on-chain order id used downstream.
+      // triggered_at (unix SECONDS). triggered_order_id equals the on-chain
+      // record's wide_order_id (verified 2026-09-29, trade #128), but that
+      // id is a per-account sequence reused across orders — it only
+      // disambiguates together with the ±60s window, never alone.
       const fired = asRisexArrayPayload(tpslPayload)
         .filter(isRecord)
         .map((record) => ({
@@ -524,6 +526,16 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
 
       // The triggered on-chain order appears in /v1/orders history as a
       // filled reduce-only record created within ~60s of triggered_at.
+      // Match by that time window, and when the trigger reports a
+      // wide_order_id, require it too (see note above: never alone).
+      // NOTE: /v1/orders created_at is unix NANOSECONDS (e.g.
+      // "1790694358000000000"), not microseconds — the previous /1e6
+      // conversion never matched, so exit price and PnL were silently
+      // lost (production-verified 2026-09-29, trade #128).
+      const triggeredOrderId = stringField(trigger.record, [
+        "triggered_order_id",
+        "triggeredOrderId",
+      ]);
       const historyPayload = await this.http.get("/v1/orders", {
         account,
         market_id: marketId,
@@ -534,18 +546,39 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
         .map((record) => ({
           record,
           id: stringField(record, ["id", "order_id", "orderId"]) ?? "",
-          createdAtUs: Number(stringField(record, ["created_at", "createdAt"])),
+          createdAtSec: risexTimestampSeconds(
+            stringField(record, ["created_at", "createdAt"]),
+          ),
+          wideOrderId: stringField(record, ["wide_order_id", "wideOrderId"]),
         }))
-        .filter(
-          (candidate) =>
-            candidate.id !== "" &&
-            isTruthyFlag(candidate.record, ["reduce_only", "reduceOnly"]) &&
-            stringField(candidate.record, ["status", "order_status", "orderStatus"]) ===
-              "ORDER_STATUS_FILLED" &&
-            Number.isFinite(candidate.createdAtUs) &&
-            Math.abs(candidate.createdAtUs / 1e6 - trigger.triggeredAt) <= 60,
-        )
-        .sort((a, b) => a.createdAtUs - b.createdAtUs);
+        .filter((candidate) => {
+          if (candidate.id === "") return false;
+          if (!isTruthyFlag(candidate.record, ["reduce_only", "reduceOnly"]))
+            return false;
+          if (
+            stringField(candidate.record, [
+              "status",
+              "order_status",
+              "orderStatus",
+            ]) !== "ORDER_STATUS_FILLED"
+          )
+            return false;
+          if (
+            candidate.createdAtSec == null ||
+            Math.abs(candidate.createdAtSec - trigger.triggeredAt) > 60
+          )
+            return false;
+          return (
+            triggeredOrderId == null ||
+            triggeredOrderId === "0" ||
+            candidate.wideOrderId === triggeredOrderId
+          );
+        })
+        .sort(
+          (a, b) =>
+            (a.createdAtSec ?? Number.MAX_VALUE) -
+            (b.createdAtSec ?? Number.MAX_VALUE),
+        );
       const closingOrder = closingOrders[0];
       // avg_price is the VWAP of the closing order (verified 2026-09-28);
       // fall back to a price×size VWAP computed from /v1/trade-history.
@@ -1736,6 +1769,21 @@ function normalizeHex(value: string): string {
   return value.startsWith("0x")
     ? `0x${value.slice(2).toLowerCase()}`
     : value.toLowerCase();
+}
+
+/** Normalizes a RISEx order timestamp to unix SECONDS. /v1/orders and
+ * /v1/trade-history return nanoseconds since epoch (a ~19-digit string,
+ * e.g. "1790694358000000000"), while /v1/orders/tpsl returns seconds —
+ * comparing them raw never matches. Values above 2^53 lose float
+ * precision, but ±256ns is irrelevant once scaled to seconds. */
+function risexTimestampSeconds(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const raw = Number(value);
+  if (!Number.isFinite(raw) || raw <= 0) return undefined;
+  if (raw >= 1e17) return raw / 1e9; // nanoseconds
+  if (raw >= 1e14) return raw / 1e6; // microseconds
+  if (raw >= 1e11) return raw / 1e3; // milliseconds
+  return raw; // already seconds
 }
 
 function assertUint(value: number | bigint, bits: number, label: string): void {
