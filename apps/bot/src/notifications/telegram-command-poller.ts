@@ -12,11 +12,15 @@ import {
 } from "../trading/opened-trade-summary.js";
 import {
   lastSixMonthsFrom,
+  loadMonthlyNetPnlBreakdown,
   loadMonthlyVolumeBreakdown,
+  loadNetPnlTotals,
   loadVolumeTotals,
   previousMonthRange,
+  type NetPnlTotals,
   type VolumeTotals,
 } from "../trading/volume-stats.js";
+import { formatPnlColored } from "../trading/trade-close.js";
 import {
   isAllowedTelegramChat,
   isAllowedTelegramUser,
@@ -886,6 +890,24 @@ const SETTING_CANCEL_MARKUP = {
 
 const VOLUME_ATTRIBUTION_NOTE = "(atribuido por apertura del trade, UTC)";
 
+/** Two-line net-PnL block shown after the volume total in every /volume
+ * view. The label is load-bearing: only fees persisted since the
+ * fee-capture feature landed are summed (historical fees under-report),
+ * and funding is out of scope. */
+function formatNetPnlLines(net: NetPnlTotals): string[] {
+  return [
+    `PnL realizado: $${net.realizedUsd.toFixed(2)} · Fees: $${net.feesUsd.toFixed(2)}`,
+    `Neto: ${formatPnlColored(net.netUsd)} (trading fees conocidos, sin funding)`,
+  ];
+}
+
+/** Compact signed USD (no emoji) for inline per-month net suffixes. */
+function formatSignedUsd(value: number): string {
+  return value >= 0
+    ? `+$${value.toFixed(2)}`
+    : `-$${Math.abs(value).toFixed(2)}`;
+}
+
 function formatExchangeVolumeLines(
   byExchange: VolumeTotals["byExchange"],
 ): string[] {
@@ -900,7 +922,8 @@ function formatExchangeVolumeLines(
 
 /** Renders one of the /volume views. Farmed volume = the filled_notional_usd
  * increments (design D6); monthly views attribute volume to the trade's
- * opening month. */
+ * opening month. Every view also shows the net-PnL block (realized minus
+ * known trading fees; funding excluded, historical fees under-report). */
 async function buildVolumeMessage(
   db: Awaited<ReturnType<typeof getDb>>,
   view: VolumeView,
@@ -908,9 +931,11 @@ async function buildVolumeMessage(
   if (view === "prevmonth") {
     const range = previousMonthRange();
     const stats = await loadVolumeTotals(db, range);
+    const net = await loadNetPnlTotals(db, range);
     return [
       `📊 Volumen generado — ${range.label}`,
       `Total: $${stats.totalUsd.toFixed(2)}`,
+      ...formatNetPnlLines(net),
       ...formatExchangeVolumeLines(stats.byExchange),
       VOLUME_ATTRIBUTION_NOTE,
     ].join("\n");
@@ -918,8 +943,13 @@ async function buildVolumeMessage(
   if (view === "6m") {
     const from = lastSixMonthsFrom();
     const months = await loadMonthlyVolumeBreakdown(db, from);
+    const netMonths = await loadMonthlyNetPnlBreakdown(db, from);
     const stats = await loadVolumeTotals(db, { from });
+    const net = await loadNetPnlTotals(db, { from });
     const byMonth = new Map(months.map((row) => [row.month, row.usd]));
+    const netByMonth = new Map(
+      netMonths.map((row) => [row.month, row.netUsd]),
+    );
     // Zero-fill the whole window so every calendar month shows a line,
     // including months with no trades.
     const monthLines: string[] = [];
@@ -938,8 +968,13 @@ async function buildVolumeMessage(
         `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`
           ? " (en curso)"
           : "";
+      // Months with no realized PnL have no net row: no suffix, rather
+      // than a misleading "+0.00".
+      const netSuffix = netByMonth.has(label)
+        ? ` · neto ${formatSignedUsd(netByMonth.get(label) ?? 0)}`
+        : "";
       monthLines.push(
-        `${label}: $${(byMonth.get(label) ?? 0).toFixed(2)}${suffix}`,
+        `${label}: $${(byMonth.get(label) ?? 0).toFixed(2)}${suffix}${netSuffix}`,
       );
       cursor.setUTCMonth(cursor.getUTCMonth() + 1);
     }
@@ -947,14 +982,17 @@ async function buildVolumeMessage(
       "📊 Volumen generado — últimos 6 meses",
       ...monthLines,
       `Total período: $${stats.totalUsd.toFixed(2)}`,
+      ...formatNetPnlLines(net),
       ...formatExchangeVolumeLines(stats.byExchange),
       VOLUME_ATTRIBUTION_NOTE,
     ].join("\n");
   }
   const stats = await loadVolumeTotals(db);
+  const net = await loadNetPnlTotals(db);
   return [
     "📊 Volumen generado (farmed)",
     `Total histórico: $${stats.totalUsd.toFixed(2)}`,
+    ...formatNetPnlLines(net),
     ...formatExchangeVolumeLines(stats.byExchange),
     VOLUME_ATTRIBUTION_NOTE,
   ].join("\n");

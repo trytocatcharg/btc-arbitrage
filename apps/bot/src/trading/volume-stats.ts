@@ -1,4 +1,4 @@
-import { and, eq, gte, lt, sql } from "drizzle-orm";
+import { and, eq, gte, isNotNull, lt, sql } from "drizzle-orm";
 import { type getDb, trades, tradeLegs } from "@btc-arbitrage/db";
 
 type BotDatabase = Awaited<ReturnType<typeof getDb>>;
@@ -63,6 +63,52 @@ export interface PreviousMonthRange {
   label: string;
 }
 
+export interface NetPnlTotals {
+  realizedUsd: number;
+  /** Real trading fees captured on trade_legs (entry + exit) for the same
+   * trade set. Only fees persisted since the fee-capture feature landed are
+   * summed — historical fees under-report. */
+  feesUsd: number;
+  netUsd: number;
+}
+
+/** Net PnL (realized minus known trading fees) over a consistent trade set:
+ * a trade counts only when trades.realized_pnl_usd is not NULL — open trades
+ * carry no realized PnL and must not contribute fees either. Realized and
+ * fees are aggregated with the SAME where filter; the fees query joins
+ * trade_legs, so running one combined query would double-count the
+ * trade-level realized_pnl_usd across the two leg rows. Money stays a
+ * decimal string in SQL and is converted at the toNumber() boundary only. */
+export async function loadNetPnlTotals(
+  db: BotDatabase,
+  range?: VolumeRange,
+): Promise<NetPnlTotals> {
+  const rangeFilter = range
+    ? range.to
+      ? and(gte(trades.createdAt, range.from), lt(trades.createdAt, range.to))
+      : gte(trades.createdAt, range.from)
+    : undefined;
+  // Same realized-not-null gate on BOTH queries: one consistent trade set.
+  const realizedFilter = isNotNull(trades.realizedPnlUsd);
+  const where = rangeFilter ? and(rangeFilter, realizedFilter) : realizedFilter;
+  const [realizedRow] = await db
+    .select({
+      total: sql<string>`coalesce(sum(${trades.realizedPnlUsd}), 0)`,
+    })
+    .from(trades)
+    .where(where);
+  const [feesRow] = await db
+    .select({
+      total: sql<string>`coalesce(sum(coalesce(${tradeLegs.entryFeeUsd}, 0) + coalesce(${tradeLegs.exitFeeUsd}, 0)), 0)`,
+    })
+    .from(tradeLegs)
+    .innerJoin(trades, eq(tradeLegs.tradeId, trades.id))
+    .where(where);
+  const realizedUsd = toNumber(realizedRow?.total);
+  const feesUsd = toNumber(feesRow?.total);
+  return { realizedUsd, feesUsd, netUsd: realizedUsd - feesUsd };
+}
+
 /** Previous calendar month, UTC ("mes anterior"). */
 export function previousMonthRange(now: Date = new Date()): PreviousMonthRange {
   const year = now.getUTCFullYear();
@@ -103,4 +149,56 @@ export async function loadMonthlyVolumeBreakdown(
     .groupBy(monthExpr)
     .orderBy(monthExpr);
   return rows.map((row) => ({ month: row.month, usd: toNumber(row.usd) }));
+}
+
+export interface MonthlyNetPnl {
+  month: string;
+  realizedUsd: number;
+  feesUsd: number;
+  netUsd: number;
+}
+
+/** Per-calendar-month net PnL (UTC), attributed by trade creation month,
+ * for months starting at `from`. Same trade set as loadNetPnlTotals (only
+ * trades with realized PnL); realized and fees are queried separately and
+ * merged by month because a single trades⋈legs join would double-count the
+ * trade-level realized_pnl_usd across the two leg rows. */
+export async function loadMonthlyNetPnlBreakdown(
+  db: BotDatabase,
+  from: Date,
+): Promise<MonthlyNetPnl[]> {
+  const monthExpr = sql<string>`date_format(${trades.createdAt}, '%Y-%m')`;
+  const where = and(gte(trades.createdAt, from), isNotNull(trades.realizedPnlUsd));
+  const realizedRows = await db
+    .select({
+      month: monthExpr,
+      usd: sql<string>`coalesce(sum(${trades.realizedPnlUsd}), 0)`,
+    })
+    .from(trades)
+    .where(where)
+    .groupBy(monthExpr)
+    .orderBy(monthExpr);
+  const feeRows = await db
+    .select({
+      month: monthExpr,
+      usd: sql<string>`coalesce(sum(coalesce(${tradeLegs.entryFeeUsd}, 0) + coalesce(${tradeLegs.exitFeeUsd}, 0)), 0)`,
+    })
+    .from(tradeLegs)
+    .innerJoin(trades, eq(tradeLegs.tradeId, trades.id))
+    .where(where)
+    .groupBy(monthExpr)
+    .orderBy(monthExpr);
+  const feesByMonth = new Map(
+    feeRows.map((row) => [row.month, toNumber(row.usd)]),
+  );
+  return realizedRows.map((row) => {
+    const realizedUsd = toNumber(row.usd);
+    const feesUsd = feesByMonth.get(row.month) ?? 0;
+    return {
+      month: row.month,
+      realizedUsd,
+      feesUsd,
+      netUsd: realizedUsd - feesUsd,
+    };
+  });
 }
