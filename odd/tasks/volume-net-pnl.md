@@ -32,21 +32,24 @@ The user asked for a net-PnL summary in the same views. Product decisions (2026-
 
 ## Tasks
 
-1. [ ] Extend execution contracts with optional `feeUsd` on `ExecutionOrder`,
+1. [x] Extend execution contracts with optional `feeUsd` on `ExecutionOrder`,
    `ExchangePosition`, and the `resolveLegClosure` result
-   (packages/exchange-core/src/index.ts).
-2. [ ] RISEx adapter: sum per-fill `fee` from `/v1/trade-history` alongside the
+   (packages/exchange-core/src/index.ts). — commit 2838399
+2. [x] RISEx adapter: sum per-fill `fee` from `/v1/trade-history` alongside the
    existing VWAP read (entry fills) and in `resolveLegClosure` (exit fills).
-3. [ ] Extended adapter: best-effort `feeUsd` from order payload candidate fields
-   in `mapExecutionOrder` and any closure-resolution path.
-4. [ ] Persist leg fees: write `trade_legs.entry_fee_usd` on entry/hedge fills
+   — commit 2838399
+3. [x] Extended adapter: best-effort `feeUsd` from order payload candidate fields
+   in `mapExecutionOrder` and any closure-resolution path. — commit 2838399
+4. [x] Persist leg fees: write `trade_legs.entry_fee_usd` on entry/hedge fills
    (open-trade flow) and `exit_fee_usd` on closes (trade-close.ts + trade-monitor
    TP/SL path); update `trades.total_fees_usd` at trade close (sum of known leg fees).
-5. [ ] volume-stats.ts: `loadNetPnlTotals(db, range?)` (realized, known fees, net)
+   — commit 2838399
+5. [x] volume-stats.ts: `loadNetPnlTotals(db, range?)` (realized, known fees, net)
    with the same `createdAt` attribution; monthly net breakdown for the 6m view.
-6. [ ] /volume render: add net-PnL lines to all three views with label
-   "neto de trading fees conocidos (sin funding)".
-7. [ ] Checks: bot + exchange-core + db typecheck green; commit work units.
+   — commit 92a0587
+6. [x] /volume render: add net-PnL lines to all three views with label
+   "neto de trading fees conocidos (sin funding)". — commit 92a0587
+7. [x] Checks: bot + exchange-core typecheck green; work units committed.
 
 ## Non-goals
 
@@ -63,3 +66,7 @@ The user asked for a net-PnL summary in the same views. Product decisions (2026-
   total_fees_usd is maintained at close for future display use.
 
 Branch: feat/volume-net-pnl
+
+Commits: f99a075 (variational http client, prior task) · 2838399 (fee capture +
+persistence) · 92a0587 (net PnL aggregates + /volume render). Bot and
+exchange-core typecheck green; tests not run (paused by user instruction).
