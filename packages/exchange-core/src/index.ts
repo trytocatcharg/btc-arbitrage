@@ -62,6 +62,10 @@ export interface ExecutionOrder {
   status: "new" | "partially_filled" | "filled" | "cancelled" | "rejected";
   filledQuantityBase: string;
   averageFillPriceUsd?: string;
+  /** Real trading fee in USD (decimal string), summed over the fills this
+   * record covers. Undefined when the venue payload does not expose it —
+   * never estimated. */
+  feeUsd?: string;
 }
 export interface ExchangePosition {
   id?: string;
@@ -72,6 +76,10 @@ export interface ExchangePosition {
   closeReason?: "tp" | "sl" | "manual" | "liquidation" | "unknown";
   exitPriceUsd?: string;
   realizedPnlUsd?: string;
+  /** Real trading fee in USD (decimal string) incurred by the position
+   * records this snapshot covers. Undefined when the venue payload does
+   * not expose it — never estimated. */
+  feeUsd?: string;
 }
 export interface ExecutionAdapter {
   getBestBidOffer(input: PriceRequest): Promise<BestBidOffer>;
@@ -104,6 +112,10 @@ export interface ExecutionAdapter {
     realizedPnlUsd?: string;
     exitOrderId?: string;
     closeReason?: "tp" | "sl" | "manual" | "liquidation";
+    /** Real trading fee in USD (decimal string) summed over the exit fills
+     * the closure was resolved from. Undefined when the venue payload does
+     * not expose it — never estimated. */
+    feeUsd?: string;
   } | null>;
 }
 

@@ -106,6 +106,7 @@ export async function closeTradeBothLegs(
     leg: CloseLegInput;
     orderId?: string;
     averageFillPriceUsd?: string;
+    feeUsd?: string;
     error?: string;
   }> = [];
   for (const leg of input.legs) {
@@ -131,6 +132,7 @@ export async function closeTradeBothLegs(
         leg,
         orderId: ack.id,
         averageFillPriceUsd: ack.averageFillPriceUsd,
+        feeUsd: ack.feeUsd,
       });
       outcomes.push(`${leg.exchangeId} close submitted (${ack.id})`);
     } catch (error) {
@@ -176,6 +178,10 @@ export async function closeTradeBothLegs(
     let flat = false;
     let exitPriceUsd: string | null = null;
     let realizedPnlUsd: string | null = null;
+    // Real exit fee: prefer the close order's own reported fee, else a
+    // fee the position record carries; null keeps the column unset (never
+    // estimated).
+    let exitFeeUsd: string | null = close.feeUsd ?? null;
     if (adapter && close.orderId) {
       const deadline = now().getTime() + CLOSE_FLAT_TIMEOUT_MS;
       for (;;) {
@@ -201,6 +207,7 @@ export async function closeTradeBothLegs(
           if (position !== null) {
             exitPriceUsd = position.exitPriceUsd ?? null;
             realizedPnlUsd = position.realizedPnlUsd ?? null;
+            exitFeeUsd = exitFeeUsd ?? position.feeUsd ?? null;
           }
           flat = true;
           break;
@@ -220,6 +227,7 @@ export async function closeTradeBothLegs(
           if (position !== null) {
             exitPriceUsd = position.exitPriceUsd ?? null;
             realizedPnlUsd = position.realizedPnlUsd ?? null;
+            exitFeeUsd = exitFeeUsd ?? position.feeUsd ?? null;
           }
           flat = true;
           outcomes.push(
@@ -268,6 +276,7 @@ export async function closeTradeBothLegs(
       exitOrderId: close.orderId,
       exitPriceUsd: exit ?? undefined,
       realizedPnlUsd: realizedPnlUsd ?? undefined,
+      exitFeeUsd: exitFeeUsd ?? undefined,
       filledNotionalUsdDelta: closeVolumeDeltaUsd,
     });
   }

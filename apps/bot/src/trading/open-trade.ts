@@ -75,6 +75,14 @@ export interface TradeLegUpdate {
    * `coalesce(filled_notional_usd, 0) + delta` inside the transition's
    * transaction. */
   filledNotionalUsdDelta?: string;
+  /** Real entry fee (USD, decimal string) summed over the leg's entry
+   * fills, when the venue reported it. Undefined keeps the column NULL —
+   * fees are never estimated. */
+  entryFeeUsd?: string;
+  /** Real exit fee (USD, decimal string) summed over the leg's exit
+   * fills, when the venue reported it. Undefined keeps the column NULL —
+   * fees are never estimated. */
+  exitFeeUsd?: string;
   closeReason?: string;
   raw?: Record<string, unknown>;
 }
@@ -559,6 +567,11 @@ export class OpenTradeService {
         | undefined;
       let hedgeFillDerived = false;
       let hedgeNotionalUsd = 0;
+      // Real entry fee (USD) summed over the hedge fills the venue
+      // reported a fee for; hedgeFeeSeen stays false when no hedge fill
+      // carried a fee (column stays NULL — never estimated).
+      let hedgeFeeUsd = 0;
+      let hedgeFeeSeen = false;
       const marketSide =
         preview.marketExchange === preview.shortExchange ? "sell" : "buy";
       const started = this.now().getTime();
@@ -571,6 +584,26 @@ export class OpenTradeService {
       let settledFilledBase = 0;
       let settledNotionalUsd = 0;
       let activeNotionalUsd = 0;
+      // Real entry fee (USD) ledger for the limit leg. Venue fee fields are
+      // cumulative per order, and each reprice/timeout settle re-reads an
+      // order that may already have been swept — so every order's
+      // contribution is captured exactly once as (latest seen − previously
+      // seen for that order id). limitFeeSeen stays false when no order
+      // ever carried a fee (column stays NULL — never estimated).
+      const limitOrderFeesUsd = new Map<string, number>();
+      let limitFeeUsd = 0;
+      let limitFeeSeen = false;
+      const accumulateLimitOrderFee = (
+        order: Awaited<ReturnType<ExecutionAdapter["getExecutionOrder"]>>,
+      ): void => {
+        if (order.feeUsd == null) return;
+        const latest = parseDecimal(order.feeUsd);
+        const previous = limitOrderFeesUsd.get(order.id) ?? 0;
+        if (latest <= previous) return;
+        limitFeeUsd += latest - previous;
+        limitOrderFeesUsd.set(order.id, latest);
+        limitFeeSeen = true;
+      };
       let repriceCount = 0;
       let lastRepriceCheckAt = started;
       // Why a no-fill entry aborted: plain timeout, the anti-chase
@@ -678,6 +711,10 @@ export class OpenTradeService {
           )
             throw new Error("Market hedge was not immediately filled");
           marketFillPrice = resolvedHedge.averageFillPriceUsd;
+          if (resolvedHedge.feeUsd != null) {
+            hedgeFeeUsd += parseDecimal(resolvedHedge.feeUsd);
+            hedgeFeeSeen = true;
+          }
           await this.store.transition(token, "hedging", {
             legs: [
               {
@@ -726,6 +763,7 @@ export class OpenTradeService {
             activeLimit.id,
             current,
           );
+          accumulateLimitOrderFee(settled);
           if (
             parseDecimal(settled.filledQuantityBase) >
             parseDecimal(current.filledQuantityBase)
@@ -871,6 +909,7 @@ export class OpenTradeService {
                 activeLimit.id,
                 current,
               );
+              accumulateLimitOrderFee(settled);
               if (
                 parseDecimal(settled.filledQuantityBase) >
                 parseDecimal(current.filledQuantityBase)
@@ -964,6 +1003,7 @@ export class OpenTradeService {
               activeLimit.id,
               current,
             );
+            accumulateLimitOrderFee(settled);
             if (
               parseDecimal(settled.filledQuantityBase) >
               parseDecimal(current.filledQuantityBase)
@@ -999,6 +1039,7 @@ export class OpenTradeService {
             continue;
           }
           const settled = await limit.getExecutionOrder(activeLimit.id);
+          accumulateLimitOrderFee(settled);
           settledFilledBase += parseDecimal(settled.filledQuantityBase);
           if (settled.averageFillPriceUsd)
             settledNotionalUsd +=
@@ -1046,6 +1087,10 @@ export class OpenTradeService {
           }
         }
       }
+      // Sweep the final resting order's fee before the fill data feeds the
+      // transition below (the delta-per-order-id ledger makes re-sweeps of
+      // already-counted orders harmless).
+      accumulateLimitOrderFee(current);
       if (covered <= 0) {
         await this.store.transition(token, "cancelled", {
           closeReason: entryAbortReason,
@@ -1161,11 +1206,17 @@ export class OpenTradeService {
             exchangeId: preview.limitExchange,
             side: limitSide === "buy" ? "long" : "short",
             filledNotionalUsdDelta: formatDecimal(settledNotionalUsd, 8),
+            entryFeeUsd: limitFeeSeen
+              ? formatDecimal(limitFeeUsd, 8)
+              : undefined,
           },
           {
             exchangeId: preview.marketExchange,
             side: marketSide === "buy" ? "long" : "short",
             filledNotionalUsdDelta: formatDecimal(hedgeNotionalUsd, 8),
+            entryFeeUsd: hedgeFeeSeen
+              ? formatDecimal(hedgeFeeUsd, 8)
+              : undefined,
           },
         ],
       });

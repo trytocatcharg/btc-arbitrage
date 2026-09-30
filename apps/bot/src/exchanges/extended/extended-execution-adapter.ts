@@ -326,6 +326,7 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
     realizedPnlUsd?: string;
     exitOrderId?: string;
     closeReason?: "tp" | "sl" | "manual" | "liquidation";
+    feeUsd?: string;
   } | null> {
     try {
       this.requireApiKey();
@@ -337,6 +338,7 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
         exitPriceUsd?: string;
         exitOrderId?: string;
         closeReason: "tp" | "sl";
+        feeUsd?: string;
       }> = [];
       for (const [kind, id] of [
         ["tp", input.tpOrderId],
@@ -376,6 +378,9 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
           exitPriceUsd,
           exitOrderId: optionalString(order.id),
           closeReason,
+          // Best-effort real fee from the order payload (candidate fields);
+          // undefined when the venue does not report it — never estimated.
+          feeUsd: findDecimal(order, ["fee", "totalFee", "feeAmount", "execFee"]),
         });
       }
       if (fired.length === 0) return null;
@@ -384,6 +389,7 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
         closeReason: result.closeReason,
         exitOrderId: result.exitOrderId,
         exitPriceUsd: result.exitPriceUsd,
+        feeUsd: result.feeUsd,
         source: "/api/v1/user/orders/{id}",
       });
       return result;
@@ -667,6 +673,10 @@ function mapExecutionOrder(payload: unknown): ExecutionOrder {
       "averageFillPrice",
       "avgPrice",
     ]),
+    // Best-effort real per-order fee: Extended's order payload field is
+    // unverified, so candidate names are tried and the fee stays undefined
+    // when none is present (never estimated).
+    feeUsd: findDecimal(order, ["fee", "totalFee", "feeAmount", "execFee"]),
   };
 }
 

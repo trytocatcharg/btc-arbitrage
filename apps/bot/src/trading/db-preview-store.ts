@@ -7,7 +7,7 @@ import {
   tradeStatusHistory,
 } from "@btc-arbitrage/db";
 import type { getDb } from "@btc-arbitrage/db";
-import { formatDecimal } from "@btc-arbitrage/domain";
+import { formatDecimal, parseDecimal } from "@btc-arbitrage/domain";
 import type {
   OpenTradePreview,
   OpenTradeState,
@@ -288,6 +288,9 @@ export class DbPreviewStore implements PreviewStore {
           legSet.exitPriceUsd = leg.exitPriceUsd;
         if (leg.realizedPnlUsd !== undefined)
           legSet.realizedPnlUsd = leg.realizedPnlUsd;
+        if (leg.entryFeeUsd !== undefined)
+          legSet.entryFeeUsd = leg.entryFeeUsd;
+        if (leg.exitFeeUsd !== undefined) legSet.exitFeeUsd = leg.exitFeeUsd;
         if (leg.closeReason !== undefined) legSet.closeReason = leg.closeReason;
         if (leg.raw !== undefined) legSet.raw = leg.raw;
         // Legs that only carry filledNotionalUsdDelta leave legSet empty;
@@ -323,6 +326,34 @@ export class DbPreviewStore implements PreviewStore {
                 eq(tradeLegs.side, leg.side),
               ),
             );
+        }
+      }
+      if (state === "closed" || state === "failed") {
+        // trades.total_fees_usd = sum of KNOWN leg fees (entry + exit),
+        // computed inside the closing transaction so every store-mediated
+        // close path (spread close, edge abort, rollback) lands it the same
+        // way. NULL leg fees are skipped, never estimated.
+        const feeRows = await tx
+          .select({
+            entryFeeUsd: tradeLegs.entryFeeUsd,
+            exitFeeUsd: tradeLegs.exitFeeUsd,
+          })
+          .from(tradeLegs)
+          .where(eq(tradeLegs.tradeId, tradeId));
+        let totalFeesUsd = 0;
+        let feesSeen = false;
+        for (const row of feeRows) {
+          for (const fee of [row.entryFeeUsd, row.exitFeeUsd]) {
+            if (fee == null) continue;
+            totalFeesUsd += parseDecimal(fee);
+            feesSeen = true;
+          }
+        }
+        if (feesSeen) {
+          await tx
+            .update(trades)
+            .set({ totalFeesUsd: formatDecimal(totalFeesUsd, 8) })
+            .where(eq(trades.id, tradeId));
         }
       }
     });

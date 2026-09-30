@@ -82,6 +82,9 @@ export async function monitorTrades(input: {
       const exitPriceUsd = position?.exitPriceUsd ?? resolved?.exitPriceUsd;
       const realizedPnlUsd =
         position?.realizedPnlUsd ?? resolved?.realizedPnlUsd;
+      // Real exit fee: prefer the position record's fee, else the fee the
+      // closure resolution recovered from the protection order payload.
+      const exitFeeUsd = position?.feeUsd ?? resolved?.feeUsd;
       const positionCloseReason = position?.closeReason;
       const closeReason =
         positionCloseReason != null && positionCloseReason !== "unknown"
@@ -124,6 +127,7 @@ export async function monitorTrades(input: {
         if (exitPriceUsd != null) legUpdates.exitPriceUsd = exitPriceUsd;
         if (realizedPnlUsd != null)
           legUpdates.realizedPnlUsd = realizedPnlUsd;
+        if (exitFeeUsd != null) legUpdates.exitFeeUsd = exitFeeUsd;
         if (resolved?.exitOrderId != null)
           legUpdates.exitOrderId = resolved.exitOrderId;
         await tx
@@ -169,11 +173,25 @@ export async function monitorTrades(input: {
             }
             return sum;
           }, 0);
+          // trades.total_fees_usd = sum of KNOWN leg fees (entry + exit);
+          // NULL leg fees are skipped, never estimated.
+          let totalFeesUsd = 0;
+          let feesSeen = false;
+          for (const leg of allLegs) {
+            for (const fee of [leg.entryFeeUsd, leg.exitFeeUsd]) {
+              if (fee == null) continue;
+              totalFeesUsd += parseDecimal(fee);
+              feesSeen = true;
+            }
+          }
           await tx
             .update(trades)
             .set({
               status: "closed",
               realizedPnlUsd: formatDecimal(totalRealizedPnl, 8),
+              ...(feesSeen
+                ? { totalFeesUsd: formatDecimal(totalFeesUsd, 8) }
+                : {}),
               closedAt: new Date(),
               updatedAt: new Date(),
               ...(volumeDeltaUsd !== null

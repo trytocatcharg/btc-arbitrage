@@ -51,6 +51,10 @@ type FillPriceSource = "order_ack" | "order_history" | "position_average";
 interface MarketFillResult {
   priceUsd?: string;
   source: FillPriceSource;
+  /** Real fee in USD summed over the fills the price was derived from, when
+   * the venue payload exposes per-fill fees (RISEx trade history). Undefined
+   * when unknown — never estimated. */
+  feeUsd?: string;
   /** True when the price came from the signed-size/quote-amount derivation in
    * readPositionEntryPrice (a blended whole-position fallback, not a true
    * order fill). */
@@ -348,6 +352,7 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
         status: "filled",
         filledQuantityBase: input.quantityBase,
         averageFillPriceUsd: fill.priceUsd,
+        feeUsd: fill.feeUsd,
       },
       fill.source,
       fill.derived,
@@ -468,6 +473,7 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
     realizedPnlUsd?: string;
     exitOrderId?: string;
     closeReason?: "tp" | "sl" | "manual" | "liquidation";
+    feeUsd?: string;
   } | null> {
     const wanted = new Map<string, "tp" | "sl">();
     if (input.tpOrderId) wanted.set(normalizeHex(input.tpOrderId), "tp");
@@ -594,6 +600,11 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
         : undefined;
       let exitOrderId: string | undefined;
       let realizedPnlUsd: string | undefined;
+      // Exit fee accumulators: declared outside the closing-order block so
+      // the result/logging below can read them when the trade-history read
+      // succeeded.
+      let feeTotal = 0;
+      let feeSeen = false;
       if (closingOrder) {
         exitOrderId = closingOrder.id;
         try {
@@ -633,6 +644,15 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
               realizedSeen = true;
               realizedTotal += parseDecimal(realized);
             }
+            // Per-fill `fee` from trade history; fills without a parseable
+            // fee are skipped, never estimated.
+            const fee = signedPrimitive(
+              pickField(fill, ["fee", "fee_usd", "feeUsd"]),
+            );
+            if (fee) {
+              feeSeen = true;
+              feeTotal += parseDecimal(fee, "RISEx trade history fee");
+            }
           }
           if (realizedSeen)
             realizedPnlUsd = formatDecimal(realizedTotal, 8);
@@ -654,6 +674,7 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
         exitOrderId,
         exitPriceUsd,
         realizedPnlUsd,
+        feeUsd: feeSeen ? formatDecimal(feeTotal, 8) : undefined,
         triggeredAt: trigger.triggeredAt,
         sources: ["/v1/orders/tpsl", "/v1/orders", "/v1/trade-history"],
       });
@@ -662,6 +683,7 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
         realizedPnlUsd,
         exitOrderId,
         closeReason,
+        feeUsd: feeSeen ? formatDecimal(feeTotal, 8) : undefined,
       };
     } catch (error) {
       console.warn("RISEx leg closure resolution failed; degrading to null", {
@@ -901,12 +923,21 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
         );
       let notional = 0;
       let size = 0;
+      let feeTotal = 0;
+      let feeSeen = false;
       for (const fill of fills) {
         const fillSize = optionalDecimalDeep(fill, ["size", "filled_size"]);
         const fillPrice = optionalDecimalDeep(fill, ["price", "price_usd"]);
         if (!fillSize || !fillPrice) continue;
         notional += parseDecimal(fillSize) * parseDecimal(fillPrice);
         size += parseDecimal(fillSize);
+        // Per-fill `fee` (documented in docs/exchanges/risex-integration.md);
+        // fills without a parseable fee are skipped, never estimated.
+        const fee = signedPrimitive(pickField(fill, ["fee", "fee_usd", "feeUsd"]));
+        if (fee) {
+          feeTotal += parseDecimal(fee, "RISEx trade history fee");
+          feeSeen = true;
+        }
       }
       if (size > 0) {
         const average = formatDecimal(notional / size, 8);
@@ -914,12 +945,14 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
           orderId,
           fills: fills.length,
           averageFillPriceUsd: average,
+          feeUsd: feeSeen ? formatDecimal(feeTotal, 8) : undefined,
         });
         return {
           priceUsd: average,
           source: "order_history",
           derived: false,
           filled: true,
+          feeUsd: feeSeen ? formatDecimal(feeTotal, 8) : undefined,
         };
       }
     } catch (error) {
