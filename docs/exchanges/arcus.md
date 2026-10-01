@@ -82,7 +82,7 @@ Hard rules:
 
 - `goodTilTime` is required on **every** order including IOC/FOK, must be ≥ 1 month in the future; the engine cancels the order at expiry. Bot uses ~90 days (`ARCUS_ORDER_EXPIRATION_DAYS`).
 - MARKET orders require `price` as a protective slippage bound within 10% of current mark price; TPSL MARKET within 10% of `stopPrice`.
-- TPSL orders: `tpslType` + `stopPrice` + `reduceOnly: true` mandatory, `timeInForce` must be GTT. At most one position-level TP and one SL per account+market (`POSITION_TPSL_ALREADY_EXISTS`).
+- TPSL orders: `tpslType` + `stopPrice` + `reduceOnly: true` mandatory. TIF: MARKET TPSL must be `IOC` (Arcus rule: every MARKET order must be IOC — the trigger executes as market-IOC); only LIMIT TPSL may use `GTT`. At most one position-level TP and one SL per account+market (`POSITION_TPSL_ALREADY_EXISTS`). Verified live 2026-10-01: GTT on a MARKET TPSL was rejected HTTP 400.
 - Post-only is TIF `ALO`; crossing an ALO rejects with `POST_ONLY_WOULD_CROSS` (retryable, same semantics Extended uses).
 - Limit-price divisor is always top-level `tickSize`; `tickTiers` only constrain which prices are accepted.
 - Placement is async: HTTP 202 = ACK (no terminal state), HTTP 200 = best-effort definitive state. Definitive state requires polling `GET /v1/order/{orderId}` (no WebSocket in the bot yet).

@@ -597,7 +597,12 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
       );
       return {
         orderType: "MARKET",
-        timeInForce: "GTT",
+        // Arcus hard rule (placeOrder schema): MARKET orders must be IOC —
+        // including untriggered TPSL (op=4). GTT is only valid for LIMIT
+        // TPSL. Verified live 2026-10-01: GTT was rejected with HTTP 400
+        // "must be IOC for MARKET orders". goodTilTime is still sent
+        // separately (required on every order as replay protection).
+        timeInForce: "IOC",
         priceUsd: executionPriceUsd,
         reduceOnly: true,
         stopPriceUsd,
