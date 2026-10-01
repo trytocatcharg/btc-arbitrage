@@ -1,3 +1,5 @@
+import { sha256 } from "@noble/hashes/sha2";
+import { bytesToHex } from "@noble/hashes/utils";
 import type {
   BestBidOffer,
   ExecutionAdapter,
@@ -24,10 +26,17 @@ import {
 } from "./arcus-signing.js";
 
 /** Protective price bound for MARKET orders and TP/SL triggers, in basis
- * points beyond the reference price — Arcus requires the price within 10%
- * of mark (market orders) / stopPrice (TPSL MARKET); 150 bps satisfies that
- * with headroom while guaranteeing a fill (same constant Extended uses). */
+ * points beyond the reference price (BBO best for MARKET, stopPrice for
+ * TPSL). The bound is additionally clamped into the hard-rule band below,
+ * so 150 bps only needs to guarantee a fill, not to satisfy the 10% rule
+ * (same constant Extended uses). */
 const MARKET_CROSSING_BUFFER_BPS = 150;
+
+/** Hard-rule clamp: MARKET `price` must sit within 10% of MARK price and
+ * TPSL MARKET within 10% of `stopPrice`. Bounds are clamped to ±9.5% of
+ * the anchor so the post-clamp tick round can never breach the 10% limit.
+ * Basis points: 9.5% = 950 bps (same unit as MARKET_CROSSING_BUFFER_BPS). */
+const MARKET_BOUND_BAND_BPS = 950;
 
 /** Near-static market metadata (tick/step sizes) rotates rarely; a stale
  * entry is TTL-bounded and any resulting rejection surfaces loudly. Same
@@ -46,6 +55,7 @@ const NS_PER_MS = 1_000_000n;
 const US_PER_MS = 1_000n;
 const MS_PER_DAY = 86_400_000;
 const CLIENT_ID_PATTERN = /^[A-Za-z0-9_-]{1,36}$/;
+const CLIENT_ID_MAX_CHARS = 36;
 
 /** ExecutionAdapter for Arcus plus the extra startup hook (setLeverage)
  * the bot's execution setup calls once at boot. Not part of the
@@ -156,7 +166,9 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
   ): Promise<ExecutionOrder> {
     this.requireTradingEnabled();
     this.requireCredentials();
-    const clientId = validateClientId(input.clientOrderId);
+    const clientId = validateClientId(
+      normalizeArcusClientId(input.clientOrderId),
+    );
     const market = await this.getMarket(input.symbol);
     const marketId = arcusMarketId(market);
     const tickSize = decimalField(market, ["tickSize"], "market.tickSize");
@@ -231,8 +243,9 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
     }
 
     if (input.type === "market") {
-      // MARKET orders may fill immediately; poll for the definitive record
-      // like Extended does, degrading to the placement-time state.
+      // MARKET orders may fill immediately; make a single best-effort read
+      // for the definitive record, then degrade to the placement-time
+      // state.
       try {
         return await this.getExecutionOrder(mapped.id);
       } catch {
@@ -269,7 +282,19 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
       orderId,
     });
     const signature = signArcusTypedPayload(payload, this.config.privateKey!);
-    await this.http.post("/v1/cancelOrder", stripUndefined(payload), {
+    // The Scheme-1 payload (with `ct` as bigint) is the signing input ONLY
+    // — it must never travel as the REST body, or JSON.stringify throws
+    // "Do not know how to serialize a BigInt" on every cancel. Build a
+    // separate JSON-safe body, exactly like submitExecutionOrder does for
+    // placeOrder (long-form fields, string timestamp).
+    const body: Record<string, unknown> = {
+      address: this.config.accountAddress!,
+      marketId: arcusMarketId(market),
+      accountIndex: ARCUS_ACCOUNT_INDEX,
+      orderId,
+      timestamp: timestampNs.toString(10),
+    };
+    await this.http.post("/v1/cancelOrder", body, {
       query: { address: this.config.accountAddress! },
       signature: { timestampNs: timestampNs.toString(10), signature },
     });
@@ -475,7 +500,8 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
     }
     if (input.type === "market") {
       // MARKET orders carry a protective slippage bound within 10% of mark
-      // (Arcus hard rule); the BBO best + 150 bps buffer satisfies it.
+      // (Arcus hard rule); crossingPrice clamps the BBO best + 150 bps
+      // buffer into the mark ± 9.5% band.
       const bound = await this.crossingPrice(input.symbol, side, tickSize);
       return {
         orderType: "MARKET",
@@ -495,13 +521,19 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
         side === "buy" ? "up" : "down",
       );
       // TPSL MARKET: price bound within 10% of stopPrice via the Extended
-      // MARKET_CROSSING_BUFFER_BPS pattern.
+      // MARKET_CROSSING_BUFFER_BPS pattern, plus the same clamp discipline
+      // as the MARKET bound anchored to stopPrice — a no-op guard by
+      // construction (150 bps sits far inside the 10% hard rule).
       const executionPriceUsd = roundDecimalToStep(
-        applyBps(
-          input.triggerPriceUsd,
-          side === "buy"
-            ? 10_000 + MARKET_CROSSING_BUFFER_BPS
-            : 10_000 - MARKET_CROSSING_BUFFER_BPS,
+        clampIntoPriceBand(
+          applyBps(
+            input.triggerPriceUsd,
+            side === "buy"
+              ? 10_000 + MARKET_CROSSING_BUFFER_BPS
+              : 10_000 - MARKET_CROSSING_BUFFER_BPS,
+          ),
+          stopPriceUsd,
+          MARKET_BOUND_BAND_BPS,
         ),
         tickSize,
         side === "buy" ? "up" : "down",
@@ -524,22 +556,46 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
     side: "buy" | "sell",
     tickSize: string,
   ): Promise<string> {
-    const bbo = await this.getBestBidOffer({
-      symbol,
-      marketType: "perpetual",
-      priceSource: "last",
-    });
+    // The BBO best ± 150 bps buffer alone can drift outside Arcus's hard
+    // 10%-of-mark band on a thin or dislocated book, so the mark price
+    // (from the same TTL-cached /v1/markets metadata) anchors the bound:
+    // buffer first, then clamp into mark ± MARKET_BOUND_BAND_BPS.
+    const [bbo, markUsd] = await Promise.all([
+      this.getBestBidOffer({
+        symbol,
+        marketType: "perpetual",
+        priceSource: "last",
+      }),
+      this.getMarkPriceUsd(symbol),
+    ]);
     const best = side === "buy" ? bbo.askUsd : bbo.bidUsd;
     return roundDecimalToStep(
-      applyBps(
-        best,
-        side === "buy"
-          ? 10_000 + MARKET_CROSSING_BUFFER_BPS
-          : 10_000 - MARKET_CROSSING_BUFFER_BPS,
+      clampIntoPriceBand(
+        applyBps(
+          best,
+          side === "buy"
+            ? 10_000 + MARKET_CROSSING_BUFFER_BPS
+            : 10_000 - MARKET_CROSSING_BUFFER_BPS,
+        ),
+        markUsd,
+        MARKET_BOUND_BAND_BPS,
       ),
       tickSize,
       side === "buy" ? "up" : "down",
     );
+  }
+
+  /** Mark price from the TTL-cached /v1/markets metadata — the anchor for
+   * the MARKET protective bound. A missing or zero mark fails closed: a
+   * BBO-only bound is not contract-compliant. */
+  private async getMarkPriceUsd(symbol: string): Promise<string> {
+    const market = await this.getMarket(symbol);
+    const mark = findDecimal(market, ["markPrice", "markPx"]);
+    if (mark === undefined || compareDecimals(mark, "0") <= 0)
+      throw new Error(
+        "Arcus market metadata has no usable markPrice; refusing to build a MARKET bound without the mark-price anchor",
+      );
+    return mark;
   }
 
   private async getMarket(
@@ -623,10 +679,30 @@ function mapOrderStatus(status: string | undefined): ExecutionOrder["status"] {
       return "filled";
     case "CANCELED":
     case "CANCELLED":
+    // Exotic terminals that all end the order's life: the mass-cancel
+    // paths (CANCEL_ALL_* family), acknowledged cancel requests, TP/SL
+    // lifecycle cancellations, and forced exits (liquidation / ADL).
+    case "CANCEL_ALL_IN_FLIGHT":
+    case "CANCEL_ALL_PARTIALLY_FILLED":
+    case "CANCEL_ALL_FAILED":
+    case "CANCEL_ACKNOWLEDGED":
+    case "TPSL_CANCELED":
+    case "MARGIN_CANCELED":
+    case "LIQUIDATED":
+    case "ADL":
       return "cancelled";
     case "REJECTED":
+    case "ERROR":
       return "rejected";
+    // Trigger order accepted / stop fired with the reduce-only execution
+    // still live — legit live states, reported like any other open order.
+    case "TPSL_PLACED":
+    case "TPSL_TRIGGERED":
+      return "new";
     default:
+      // Unknown statuses degrade to live-state reporting on purpose: the
+      // executor keeps polling, and trade-monitor's resolveLegClosure
+      // reads fills, not status, so a wrong "new" cannot fake a closure.
       return "new";
   }
 }
@@ -673,6 +749,30 @@ function arcusBboPrice(level: unknown): string | undefined {
   return String(price);
 }
 
+/** Arcus caps clientId at 36 chars; the open-trade flow builds ids like
+ * `${uuid}-tp` / `-hedge-1` (up to 45+ chars), which the venue would
+ * reject outright. Normalize oversized ids deterministically at the
+ * adapter boundary: keep a short readable prefix plus a SHA-256 hex
+ * digest of the FULL original id.
+ *
+ * - Deterministic: the same logical order yields the same clientId on
+ *   retry, so idempotent placement/cancel keep matching the order.
+ * - Collision-resistant across suffixes of the same token: truncating
+ *   the head would collapse the tp/sl/hedge variants of one uuid into
+ *   DUPLICATE_CLIENT_ID; the digest separates them (~116 bits of entropy).
+ * - Charset stays [A-Za-z0-9_-], length ≤ 36.
+ *
+ * Ids that already satisfy the venue rule pass through untouched. */
+function normalizeArcusClientId(clientOrderId: string): string {
+  if (!clientOrderId || CLIENT_ID_PATTERN.test(clientOrderId))
+    return clientOrderId;
+  const prefix = clientOrderId.slice(0, 6).replace(/[^A-Za-z0-9_-]/g, "_");
+  const digest = bytesToHex(
+    sha256(new TextEncoder().encode(clientOrderId)),
+  ).slice(0, CLIENT_ID_MAX_CHARS - prefix.length - 1);
+  return `${prefix}-${digest}`;
+}
+
 function validateClientId(clientOrderId: string): string | undefined {
   if (!clientOrderId) return undefined;
   if (!CLIENT_ID_PATTERN.test(clientOrderId))
@@ -680,6 +780,42 @@ function validateClientId(clientOrderId: string): string | undefined {
       `Arcus clientId must match [A-Za-z0-9_-] and be at most 36 chars, got "${clientOrderId}"`,
     );
   return clientOrderId;
+}
+
+/** Clamp `priceUsd` into `anchorUsd ± bandBps` with exact BigInt math —
+ * string comparison is unsafe for decimals of differing magnitude. Arcus
+ * hard-rules MARKET bounds to within 10% of the anchor (mark price, or
+ * stopPrice for TPSL); the 9.5% band leaves headroom for the tick round
+ * that follows the clamp. */
+function clampIntoPriceBand(
+  priceUsd: string,
+  anchorUsd: string,
+  bandBps: number,
+): string {
+  const lower = applyBps(anchorUsd, 10_000 - bandBps);
+  const upper = applyBps(anchorUsd, 10_000 + bandBps);
+  if (compareDecimals(priceUsd, lower) < 0) return lower;
+  if (compareDecimals(priceUsd, upper) > 0) return upper;
+  return priceUsd;
+}
+
+/** Exact decimal comparison via scaled BigInt math (same discipline as
+ * applyBps — no floating point). */
+function compareDecimals(a: string, b: string): number {
+  const pa = decimalParts(a);
+  const pb = decimalParts(b);
+  const left = pa.mantissa * pb.scale;
+  const right = pb.mantissa * pa.scale;
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function decimalParts(value: string): { mantissa: bigint; scale: bigint } {
+  const match = /^(-?)(\d+)(?:\.(\d+))?$/.exec(value.trim());
+  if (!match) throw new Error(`Expected a decimal string, got ${value}`);
+  const mantissa = BigInt(
+    `${match[1] === "-" ? "-" : ""}${match[2]}${match[3] ?? ""}`,
+  );
+  return { mantissa, scale: 10n ** BigInt((match[3] ?? "").length) };
 }
 
 /** GET /v1/order/{orderId} may wrap the record in an envelope; unwrap the
@@ -706,15 +842,6 @@ function findPositionRecord(
   const records = Object.values(positions).filter(isRecord);
   if (records.length === 1) return records[0];
   return undefined;
-}
-
-function stripUndefined(
-  payload: Record<string, unknown>,
-): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(payload))
-    if (value !== undefined) out[key] = value;
-  return out;
 }
 
 /** A decimal strictly greater than zero, else undefined (Arcus reports
