@@ -51,14 +51,18 @@ risex/extended: passive maker entry, immediate taker hedge, TP/SL reduce-only pr
 
 ## Tasks
 
-- [ ] 1. Pin down Arcus API schemas + update docs/exchanges/arcus.md spec
-- [ ] 2. Add Arcus trading config + env vars
-- [ ] 3. Implement Ed25519 signing module
-- [ ] 4. Extend ArcusHttpClient with signed POST
-- [ ] 5. Implement arcus-execution-adapter.ts
-- [ ] 6. Wire execution into adapter/registry/startup
-- [ ] 7. Typecheck + final docs verification
+- [x] 1. Pin down Arcus API schemas + update docs/exchanges/arcus.md spec
+- [x] 2. Add Arcus trading config + env vars
+- [x] 3. Implement Ed25519 signing module
+- [x] 4. Extend ArcusHttpClient with signed POST
+- [x] 5. Implement arcus-execution-adapter.ts
+- [x] 6. Wire execution into adapter/registry/startup
+- [x] 7. Typecheck + final docs verification
 
 ## Evidence
 
-(commits appended per task)
+- `296f9d9` docs(arcus): pin execution API facts
+- `c26c8c3` feat(arcus): signing module, signed POST, execution adapter, trading config
+- `03427a3` feat(arcus): wiring (client, startup preflight, retry guard, routing fees)
+- `57cb211` fix(arcus): JSON-safe cancel body, clientId normalization, mark-anchored bound (post-verify)
+- Final `yarn typecheck`: exit 0. Independent verify: PASS after fixes; signing verified against `ed25519.verify`.
