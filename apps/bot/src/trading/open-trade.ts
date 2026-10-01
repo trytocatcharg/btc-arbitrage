@@ -1657,10 +1657,7 @@ export class OpenTradeService {
           attempt,
           message,
         });
-        if (
-          !message.includes("PostOnlyOrderMatched()") ||
-          attempt === PASSIVE_LIMIT_RETRY_COUNT
-        )
+        if (!isPostOnlyRejection(message) || attempt === PASSIVE_LIMIT_RETRY_COUNT)
           throw error;
       }
     }
@@ -1816,6 +1813,17 @@ export class OpenTradeService {
     if (this.now().getTime() - at.getTime() > this.options.quoteMaxAgeMs)
       throw new Error("Executable BBO quote is stale");
   }
+}
+
+/** Post-only rejects surface as venue-specific literals: RISEx reverts
+ * with `PostOnlyOrderMatched()`, Arcus rejects with
+ * `POST_ONLY_WOULD_CROSS`. Only these two mean the passive limit would
+ * have crossed and a reprice-and-retry is safe. */
+function isPostOnlyRejection(message: string): boolean {
+  return (
+    message.includes("PostOnlyOrderMatched()") ||
+    message.includes("POST_ONLY_WOULD_CROSS")
+  );
 }
 
 function applyPercentChange(

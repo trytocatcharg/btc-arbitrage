@@ -51,7 +51,10 @@ export function buildOpenTradeOptions(
         makerBps: config.openTrade.extendedMakerFeeBps,
         takerBps: config.openTrade.extendedTakerFeeBps,
       },
-      arcus: { makerBps: "0", takerBps: "0" },
+      arcus: {
+        makerBps: String(config.arcus.makerFeeBps),
+        takerBps: String(config.arcus.takerFeeBps),
+      },
       variational: {
         makerBps: config.openTrade.variationalMakerFeeBps,
         takerBps: config.openTrade.variationalTakerFeeBps,

@@ -51,9 +51,12 @@ async function main() {
   }
   if (config.arcus.tradingEnabled) {
     console.warn(
-      "Arcus trading flag is enabled but live execution remains unreviewed for this exchange",
+      "Arcus live execution adapter is enabled; signed REST mutations require API key, Ed25519 private key and account address",
       {
         arcusTradingEnabled: true,
+        hasArcusApiKey: Boolean(config.arcus.apiKey),
+        hasArcusPrivateKey: Boolean(config.arcus.privateKey),
+        hasArcusAccountAddress: Boolean(config.arcus.accountAddress),
         botExecutionMode: config.botExecutionMode,
       },
     );

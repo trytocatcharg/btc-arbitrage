@@ -4,6 +4,7 @@ import { normalizeSymbol } from '@btc-arbitrage/exchange-core';
 import { findMarket, getMarketId } from '../market-normalization.js';
 import { ArcusHttpClient } from './arcus-http-client.js';
 import type { ArcusBboResponse, ArcusConfig, ArcusMarketInfo, ArcusPriceEntry, ArcusPricesResponse } from './arcus.types.js';
+import { createArcusExecutionAdapter } from './arcus-execution-adapter.js';
 
 const DEFAULT_ARCUS_MARKET = 'BTC-USD';
 
@@ -11,7 +12,8 @@ export function createArcusAdapter(config: ArcusConfig, http = new ArcusHttpClie
   return {
     id: 'arcus',
     displayName: 'Arcus',
-    capabilities: { nativeFetch: true, websocket: 'polling-only', orderPlacement: false },
+    capabilities: { nativeFetch: true, websocket: 'polling-only', orderPlacement: config.tradingEnabled },
+    execution: createArcusExecutionAdapter(config, http),
     async getMarkets(): Promise<ExchangeMarket[]> {
       const payload = await http.get('/v1/markets', { market: DEFAULT_ARCUS_MARKET });
       const market = findArcusMarket(payload, 'BTCUSDT');
@@ -56,7 +58,7 @@ export function createArcusAdapter(config: ArcusConfig, http = new ArcusHttpClie
         symbol: 'BTCUSDT',
         leverage: 0,
         status: 'blocked',
-        guardrailReason: 'Arcus live order placement is out of scope; requires ARCUS_TRADING_ENABLED=true and Ed25519 signed order payloads.',
+        guardrailReason: 'Arcus live order placement is implemented behind ARCUS_TRADING_ENABLED=true plus Ed25519 signed credentials.',
         createdAt: new Date()
       };
     }

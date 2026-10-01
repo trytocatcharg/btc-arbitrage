@@ -144,6 +144,11 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
     void metadata; // metadata fetch doubles as the readiness probe
     if (Number(availableMargin) <= 0)
       throw new Error("Arcus available margin (freeCollateral) is zero");
+    // Process-lifetime setup hoisted to startup (main.ts runs preflight
+    // once at boot), mirroring the RISEx pattern: apply the configured
+    // leverage before the first order. setLeverage resolves the market id
+    // from the same cached /v1/markets metadata fetched above.
+    await this.setLeverage({ symbol: input.symbol, leverage: input.leverage });
   }
 
   async submitExecutionOrder(
