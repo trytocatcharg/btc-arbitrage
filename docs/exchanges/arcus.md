@@ -86,6 +86,8 @@ Hard rules:
 - Post-only is TIF `ALO`; crossing an ALO rejects with `POST_ONLY_WOULD_CROSS` (retryable, same semantics Extended uses).
 - Limit-price divisor is always top-level `tickSize`; `tickTiers` only constrain which prices are accepted.
 - Placement is async: HTTP 202 = ACK (no terminal state), HTTP 200 = best-effort definitive state. Definitive state requires polling `GET /v1/order/{orderId}` (no WebSocket in the bot yet).
+- `clientId` max 36 chars — the bot's `${uuid}-tp`/`-limit2` ids (39–45 chars) are normalized at the adapter boundary to a deterministic `prefix-digest` form (sha256, charset-safe, retry-stable); never truncate the head (tp/sl/hedge of one token would collide).
+- Single-order REST bodies (place/cancel) are long-form human-readable fields with `timestamp` as a nanosecond **string**; the Scheme-1 payload is signing input only and never travels as the HTTP body.
 
 ### Read endpoints used by execution
 
