@@ -240,6 +240,43 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
     if (orderSpec.stopPriceUsd) body.stopPrice = orderSpec.stopPriceUsd;
     if (orderSpec.tpslType) body.tpslType = orderSpec.tpslType;
 
+    const isTpsl =
+      input.type === "take-profit-market" || input.type === "stop-market";
+
+    if (isTpsl) {
+      // Arcus does not support single-order TP/SL: placeOrder with a
+      // tpslType returns 501 NotImplemented (verified live 2026-10-01).
+      // TPSL legs must travel as POST /v1/batchPlaceOrders with grouping
+      // "partialTpsl" — 1–2 legs per batch, so a single TP or SL per call
+      // matches the executor's per-order flow. Each element embeds its own
+      // Scheme 1 op=4 signature; the X-Signature header must be present
+      // (any element's signature); the top-level grouping is not signed.
+      const element = { ...body, signature };
+      const batch = requiredRecord(
+        await this.http.post(
+          "/v1/batchPlaceOrders",
+          { grouping: "partialTpsl", orders: [element] },
+          {
+            query: { address: this.config.accountAddress! },
+            signature: { timestampNs: timestampNs.toString(10), signature },
+          },
+        ),
+        "Arcus batchPlaceOrders response",
+      );
+      const rows = Array.isArray(batch.responses) ? batch.responses : undefined;
+      const row = isRecord(rows?.[0]) ? rows[0] : undefined;
+      if (!row)
+        throw new Error("Arcus batchPlaceOrders returned no response rows");
+      const rowError = optionalString(row.error);
+      if (rowError) throw new Error(`Arcus TPSL order rejected: ${rowError}`);
+      const mapped = mapExecutionOrder(row);
+      if (mapped.status === "rejected") {
+        const reason = optionalString(row.rejectionReason);
+        throw new Error(`Arcus order rejected${reason ? `: ${reason}` : ""}`);
+      }
+      return mapped;
+    }
+
     const placed = requiredRecord(
       await this.http.post("/v1/placeOrder", body, {
         query: { address: this.config.accountAddress! },
