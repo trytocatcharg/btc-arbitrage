@@ -5,6 +5,7 @@ import {
 } from "@btc-arbitrage/config";
 import { getDb } from "@btc-arbitrage/db";
 import { createExchangeRegistry } from "./exchanges/registry.js";
+import type { ArcusExecutionHandle } from "./exchanges/arcus/arcus-execution-adapter.js";
 import { TelegramCommandPoller } from "./notifications/telegram-command-poller.js";
 import { TelegramNotifier } from "./notifications/telegram-notifier.js";
 import { runPollingLoop } from "./runtime/polling-loop.js";
@@ -127,6 +128,57 @@ async function main() {
     console.log("Execution preflight completed at startup", {
       exchange: exchangeId,
     });
+  }
+
+  // Arcus routing fees: perp fees MUST be read from the public live
+  // GET /v1/feetiers table (docs/exchanges/arcus.md). There is no
+  // per-account tier endpoint, so the base tier (level 0 — the most
+  // expensive, conservative tier) is used. Explicit env overrides
+  // (ARCUS_MAKER_FEE_BPS/ARCUS_TAKER_FEE_BPS) win and skip the fetch.
+  // Fail fast: an unreachable fee table must die at boot, not mid-trade.
+  if (
+    (config.exchangeA === "arcus" || config.exchangeB === "arcus") &&
+    config.arcus.tradingEnabled
+  ) {
+    if (
+      config.arcus.makerFeeBps !== undefined &&
+      config.arcus.takerFeeBps !== undefined
+    ) {
+      console.log("Arcus fee schedule using env overrides", {
+        source: "ARCUS_MAKER_FEE_BPS/ARCUS_TAKER_FEE_BPS",
+        makerFeeBps: config.arcus.makerFeeBps,
+        takerFeeBps: config.arcus.takerFeeBps,
+      });
+    } else {
+      const arcusExecution = registry.get("arcus")
+        .execution as ArcusExecutionHandle | undefined;
+      if (!arcusExecution)
+        throw new Error(
+          "Arcus execution adapter is unavailable; " +
+            "set ARCUS_MAKER_FEE_BPS/ARCUS_TAKER_FEE_BPS to bypass live resolution",
+        );
+      try {
+        const schedule = await arcusExecution.getBaseFeeSchedule();
+        config.arcus.makerFeeBps = Number(schedule.makerBps);
+        config.arcus.takerFeeBps = Number(schedule.takerBps);
+        console.log(
+          "Arcus base-tier fee schedule resolved from live fee table",
+          {
+            source: "/v1/feetiers",
+            tier: "base (level 0)",
+            makerFeeBps: config.arcus.makerFeeBps,
+            takerFeeBps: config.arcus.takerFeeBps,
+          },
+        );
+      } catch (error) {
+        throw new Error(
+          "Failed to resolve Arcus fees from GET /v1/feetiers: " +
+            (error instanceof Error ? error.message : String(error)) +
+            "; set ARCUS_MAKER_FEE_BPS/ARCUS_TAKER_FEE_BPS to bypass " +
+            "live resolution",
+        );
+      }
+    }
   }
   const notifier = new TelegramNotifier(config.telegram);
   const commandPoller = config.telegram.enabled

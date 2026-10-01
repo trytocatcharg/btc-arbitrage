@@ -100,10 +100,11 @@ export interface BotConfig {
     accountAddress?: string;
     tradingEnabled: boolean;
     userAgent: string;
-    /** Routing fee inputs in basis points (default 0). Must be reconciled
-     * against GET /v1/feetiers before enabling live trading. */
-    makerFeeBps: number;
-    takerFeeBps: number;
+    /** OPTIONAL explicit operator overrides in basis points. When unset,
+     * main.ts resolves the base tier from the public live
+     * GET /v1/feetiers table at startup (docs/exchanges/arcus.md). */
+    makerFeeBps?: number;
+    takerFeeBps?: number;
     /** goodTilTime lifetime for placed orders in days (default 90).
      * Arcus requires goodTilTime at least 1 month in the future, so the
      * valid range is 31..2160. */
@@ -416,12 +417,15 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       userAgent: env.ARCUS_USER_AGENT?.trim()
         ? env.ARCUS_USER_AGENT.trim()
         : "btc-arbitrage-bot/0.1",
-      makerFeeBps: parseNonNegativeInteger(
-        env.ARCUS_MAKER_FEE_BPS ?? "0",
+      // Optional explicit operator overrides (basis points). When unset,
+      // main.ts resolves the base fee tier from the public live
+      // GET /v1/feetiers table at startup.
+      makerFeeBps: parseOptionalNonNegativeInteger(
+        emptyToUndefined(env.ARCUS_MAKER_FEE_BPS?.trim()),
         "ARCUS_MAKER_FEE_BPS",
       ),
-      takerFeeBps: parseNonNegativeInteger(
-        env.ARCUS_TAKER_FEE_BPS ?? "0",
+      takerFeeBps: parseOptionalNonNegativeInteger(
+        emptyToUndefined(env.ARCUS_TAKER_FEE_BPS?.trim()),
         "ARCUS_TAKER_FEE_BPS",
       ),
       orderExpirationDays: arcusOrderExpirationDays,
@@ -579,6 +583,14 @@ function parseNonNegativeInteger(value: string, field: string): number {
   if (!Number.isInteger(parsed) || parsed < 0)
     throw new Error(`${field} must be a non-negative integer`);
   return parsed;
+}
+
+function parseOptionalNonNegativeInteger(
+  value: string | undefined,
+  field: string,
+): number | undefined {
+  if (value === undefined) return undefined;
+  return parseNonNegativeInteger(value, field);
 }
 
 function parsePositiveDecimalString(value: string, field: string): string {

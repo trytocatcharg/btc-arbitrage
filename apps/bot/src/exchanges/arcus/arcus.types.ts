@@ -8,10 +8,12 @@ export interface ArcusConfig {
   accountAddress?: string;
   tradingEnabled: boolean;
   userAgent: string;
-  /** Routing fee inputs in basis points (default 0). Reconcile against
-   * GET /v1/feetiers before enabling live trading. */
-  makerFeeBps: number;
-  takerFeeBps: number;
+  /** Routing fee inputs in basis points. OPTIONAL explicit operator
+   * overrides: when undefined, main.ts resolves the base tier (level 0 —
+   * the most expensive, conservative tier) from the public live
+   * GET /v1/feetiers table at startup. */
+  makerFeeBps?: number;
+  takerFeeBps?: number;
   /** goodTilTime lifetime for placed orders in days (default 90; Arcus
    * requires at least 1 month in the future, validated 31..2160). */
   orderExpirationDays: number;

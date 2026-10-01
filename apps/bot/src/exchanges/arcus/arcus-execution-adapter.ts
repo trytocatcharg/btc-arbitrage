@@ -58,11 +58,24 @@ const MS_PER_DAY = 86_400_000;
 const CLIENT_ID_PATTERN = /^[A-Za-z0-9_-]{1,36}$/;
 const CLIENT_ID_MAX_CHARS = 36;
 
-/** ExecutionAdapter for Arcus plus the extra startup hook (setLeverage)
- * the bot's execution setup calls once at boot. Not part of the
+/** Arcus base-tier fee schedule, resolved from the public
+ * GET /v1/feetiers table. Basis points as exact decimal strings (maker
+ * can be negative — a rebate). */
+export interface ArcusFeeSchedule {
+  makerBps: string;
+  takerBps: string;
+}
+
+/** ExecutionAdapter for Arcus plus the extra startup hooks the bot's
+ * execution setup calls once at boot: setLeverage (signed) and
+ * getBaseFeeSchedule (public fee-tier table). Not part of the
  * ExecutionAdapter contract. */
 export interface ArcusExecutionHandle extends ExecutionAdapter {
   setLeverage(input: { symbol: string; leverage: number }): Promise<void>;
+  /** Public, unauthenticated: reads GET /v1/feetiers and returns the base
+   * tier (level 0, volume_threshold 0 — the most expensive, conservative
+   * tier) as exact bps strings. TTL-cached like other static data. */
+  getBaseFeeSchedule(): Promise<ArcusFeeSchedule>;
 }
 
 export function createArcusExecutionAdapter(
@@ -77,6 +90,9 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
     string,
     { value: Record<string, unknown>; expiresAt: number }
   >();
+  private feeScheduleCache:
+    | { value: ArcusFeeSchedule; expiresAt: number }
+    | undefined;
 
   constructor(
     private readonly config: ArcusConfig,
@@ -424,6 +440,46 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
       });
       return null;
     }
+  }
+
+  /** Startup hook (not part of the ExecutionAdapter contract): resolves
+   * the Arcus routing fees from the public GET /v1/feetiers table. The
+   * endpoint is unauthenticated (no apiKey/tradingEnabled requirement)
+   * and perp fees MUST be read from it (docs/exchanges/arcus.md). There
+   * is no per-account tier endpoint, so the BASE tier (level 0,
+   * volume_threshold 0) is used — the most expensive tier, a conservative
+   * cost estimate. ppm → bps via exact integer math, no floating point.
+   * TTL-cached like the market metadata. */
+  async getBaseFeeSchedule(): Promise<ArcusFeeSchedule> {
+    const cached = this.feeScheduleCache;
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    const payload = requiredRecord(
+      await this.http.get("/v1/feetiers"),
+      "Arcus fee tiers",
+    );
+    const tiers = Array.isArray(payload.tiers) ? payload.tiers : undefined;
+    if (!tiers || tiers.length === 0)
+      throw new Error(
+        "Arcus GET /v1/feetiers returned no fee tiers; " +
+          "set ARCUS_MAKER_FEE_BPS/ARCUS_TAKER_FEE_BPS to bypass live resolution",
+      );
+    const base = selectBaseFeeTier(tiers);
+    const makerPpm = findFeePpm(base, ["maker_fee_ppm", "makerFeePpm"]);
+    const takerPpm = findFeePpm(base, ["taker_fee_ppm", "takerFeePpm"]);
+    if (makerPpm === undefined || takerPpm === undefined)
+      throw new Error(
+        "Arcus base fee tier (level 0) has no numeric maker/taker ppm; " +
+          "set ARCUS_MAKER_FEE_BPS/ARCUS_TAKER_FEE_BPS to bypass live resolution",
+      );
+    const value: ArcusFeeSchedule = {
+      makerBps: ppmToBps(makerPpm),
+      takerBps: ppmToBps(takerPpm),
+    };
+    this.feeScheduleCache = {
+      value,
+      expiresAt: Date.now() + EXCHANGE_STATIC_DATA_TTL_MS,
+    };
+    return value;
   }
 
   /** Startup hook (not part of the ExecutionAdapter contract): sets the
@@ -815,6 +871,68 @@ function decimalParts(value: string): { mantissa: bigint; scale: bigint } {
     `${match[1] === "-" ? "-" : ""}${match[2]}${match[3] ?? ""}`,
   );
   return { mantissa, scale: 10n ** BigInt((match[3] ?? "").length) };
+}
+
+/** Fee tiers arrive sorted ascending by level; the base tier is level 0
+ * (volume_threshold 0 — the most expensive, conservative tier). When no
+ * tier carries a numeric level, the first row is the base. */
+function selectBaseFeeTier(tiers: unknown[]): Record<string, unknown> {
+  let base: Record<string, unknown> | undefined;
+  let lowestLevel = Number.POSITIVE_INFINITY;
+  for (const tier of tiers) {
+    if (!isRecord(tier)) continue;
+    const level = tier.level;
+    if (typeof level !== "number" || !Number.isFinite(level)) continue;
+    if (level < lowestLevel) {
+      lowestLevel = level;
+      base = tier;
+    }
+    if (level === 0) return tier;
+  }
+  if (base) return base;
+  const first = tiers[0];
+  if (isRecord(first)) return first;
+  throw new Error("Arcus GET /v1/feetiers returned no usable fee tier records");
+}
+
+/** A fee tier's ppm field as a normalized decimal string, else undefined.
+ * Accepts both snake_case (doc shape) and camelCase payload variants. */
+function findFeePpm(
+  tier: Record<string, unknown>,
+  keys: string[],
+): string | undefined {
+  for (const key of keys) {
+    const entry = tier[key];
+    if (typeof entry !== "string" && typeof entry !== "number") continue;
+    const asString = String(entry).trim();
+    if (/^-?\d+(\.\d+)?$/.test(asString)) return asString;
+  }
+  return undefined;
+}
+
+/** ppm → bps with exact integer math: bps = ppm / 100, built from scaled
+ * BigInt parts so 150 → "1.5", 205 → "2.05", 200 → "2", -50 → "-0.5", 0 →
+ * "0" — no floating point formatting drift, negatives (maker rebates)
+ * preserved. */
+function ppmToBps(ppm: string): string {
+  const match = /^(-?)(\d+)(?:\.(\d+))?$/.exec(ppm);
+  if (!match) throw new Error(`Expected a ppm decimal string, got ${ppm}`);
+  const mantissa = BigInt(`${match[2]}${match[3] ?? ""}`);
+  if (mantissa === 0n) return "0";
+  const denominator = 10n ** BigInt((match[3] ?? "").length) * 100n;
+  const integer = mantissa / denominator;
+  let remainder = mantissa % denominator;
+  let fraction = "";
+  while (remainder !== 0n && fraction.length < 40) {
+    remainder *= 10n;
+    fraction += (remainder / denominator).toString(10);
+    remainder %= denominator;
+  }
+  const digits =
+    fraction === ""
+      ? integer.toString(10)
+      : `${integer.toString(10)}.${fraction.replace(/0+$/, "")}`;
+  return match[1] === "-" ? `-${digits}` : digits;
 }
 
 /** GET /v1/order/{orderId} may wrap the record in an envelope; unwrap the

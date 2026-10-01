@@ -52,8 +52,17 @@ export function buildOpenTradeOptions(
         takerBps: config.openTrade.extendedTakerFeeBps,
       },
       arcus: {
-        makerBps: String(config.arcus.makerFeeBps),
-        takerBps: String(config.arcus.takerFeeBps),
+        // When Arcus trading is enabled, main.ts startup resolves these
+        // from GET /v1/feetiers (or an env override) before any trade can
+        // open; dry-run monitoring uses "0" and does not execute.
+        makerBps:
+          config.arcus.makerFeeBps !== undefined
+            ? String(config.arcus.makerFeeBps)
+            : "0",
+        takerBps:
+          config.arcus.takerFeeBps !== undefined
+            ? String(config.arcus.takerFeeBps)
+            : "0",
       },
       variational: {
         makerBps: config.openTrade.variationalMakerFeeBps,

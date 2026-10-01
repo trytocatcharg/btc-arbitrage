@@ -101,7 +101,7 @@ Hard rules:
 
 ### Fees
 
-Perp fee tiers are not yet final on Arcus; the live schedule is `GET /v1/feetiers`. Routing fee inputs come from env (`ARCUS_MAKER_FEE_BPS` / `ARCUS_TAKER_FEE_BPS`) and must be reconciled against `/v1/feetiers` before enabling live trading.
+Perp fees MUST be read from the public, unauthenticated `GET /v1/feetiers` table (response: `{ tiers: [{ level, name, volume_threshold, maker_fee_ppm, taker_fee_ppm }] }`, sorted ascending by level; ppm = parts-per-million of notional — 200 ppm = 0.02% = 2 bps; maker can be negative (rebate), taker ≥ 0). There is no per-account tier endpoint via REST, so the bot uses the BASE tier (level 0, `volume_threshold` 0) — the most expensive tier, a conservative cost estimate. At bot startup, when Arcus is in the monitored pair and `ARCUS_TRADING_ENABLED=true`, `main.ts` fetches the base tier once (TTL-cached 10 min in the execution adapter), converts ppm → bps with exact integer math, and fills `config.arcus.makerFeeBps`/`takerFeeBps` for every downstream consumer; a failed fetch fails fast at boot with a message telling the operator to set the env overrides. `ARCUS_MAKER_FEE_BPS` / `ARCUS_TAKER_FEE_BPS` remain as OPTIONAL explicit operator overrides — when set, they win and the fetch is skipped. When Arcus trading is disabled (dry-run monitoring), the fee inputs stay undefined and map to "0" (no execution).
 
 ## Endpoint behavior to preserve
 
@@ -122,7 +122,7 @@ Perp fee tiers are not yet final on Arcus; the live schedule is `GET /v1/feetier
 | `src/exchanges/arcus/arcus-http-client.ts` | Native `fetch` HTTP client: GET (public/private), signed POST with `X-API-Key`/`X-Timestamp`/`X-Signature`, 10 s timeout. |
 | `src/exchanges/arcus/arcus.types.ts` | Request/response shapes used by the adapter. |
 | `src/exchanges/arcus/arcus-signing.ts` | Ed25519 signing: canonical Scheme 1 typed payloads (op 1/2/4) and Scheme 2 legacy messages, BigInt-safe canonical JSON. |
-| `src/exchanges/arcus/arcus-execution-adapter.ts` | `ExecutionAdapter` implementation: BBO, metadata, margin, preflight, submit/get/cancel, position, leg-closure recovery. |
+| `src/exchanges/arcus/arcus-execution-adapter.ts` | `ExecutionAdapter` implementation: BBO, metadata, margin, preflight, submit/get/cancel, position, leg-closure recovery, base-tier fee schedule (`GET /v1/feetiers`, TTL-cached). |
 
 ## Before live trading
 
@@ -130,6 +130,6 @@ Perp fee tiers are not yet final on Arcus; the live schedule is `GET /v1/feetier
 - [x] Telegram confirmation step (bot-wide preview confirm flow, Arcus included).
 - [ ] Register and validate Ed25519 API key flow on testnet (key registration itself is a manual/web-app step: `POST /v1/createApiKey` is ECDSA-signed by the master Ethereum address and not implemented in the bot).
 - [ ] Verify order sizing with Arcus tick size, step size, margin fractions on testnet.
-- [ ] Reconcile `ARCUS_MAKER_FEE_BPS`/`ARCUS_TAKER_FEE_BPS` against `GET /v1/feetiers`.
+- [x] Reconcile `ARCUS_MAKER_FEE_BPS`/`ARCUS_TAKER_FEE_BPS` against `GET /v1/feetiers` — resolved automatically at startup from the live base tier when the env overrides are unset.
 - [ ] Subscribe to WebSocket `orders`/`userFills` before treating orders as terminal (until then the bot polls `GET /v1/order/{orderId}`).
 - [ ] Keep `ARCUS_TRADING_ENABLED=false` until testnet order open/close is verified end-to-end.
