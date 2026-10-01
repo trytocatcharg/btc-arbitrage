@@ -94,9 +94,20 @@ export interface BotConfig {
   arcus: {
     apiBaseUrl: string;
     apiKey?: string;
+    /** Ed25519 signing seed as 64 hex chars (32 bytes). Required when
+     * ARCUS_TRADING_ENABLED=true — the API key alone cannot sign orders. */
+    privateKey?: string;
     accountAddress?: string;
     tradingEnabled: boolean;
     userAgent: string;
+    /** Routing fee inputs in basis points (default 0). Must be reconciled
+     * against GET /v1/feetiers before enabling live trading. */
+    makerFeeBps: number;
+    takerFeeBps: number;
+    /** goodTilTime lifetime for placed orders in days (default 90).
+     * Arcus requires goodTilTime at least 1 month in the future, so the
+     * valid range is 31..2160. */
+    orderExpirationDays: number;
   };
   variational: {
     apiBaseUrl: string;
@@ -183,6 +194,31 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   const arcusTradingEnabled = parseBoolean(
     env.ARCUS_TRADING_ENABLED ?? "false",
   );
+  // goodTilTime lifetime for Arcus orders. Arcus cancels resting orders at
+  // expiry and requires goodTilTime at least 1 month in the future on every
+  // order (including IOC/FOK), so the floor is 31 days (docs/exchanges/arcus.md,
+  // "Execution facts" pinned 2026-09). Bot default ~90 days.
+  const arcusOrderExpirationDays = parsePositiveInteger(
+    env.ARCUS_ORDER_EXPIRATION_DAYS ?? "90",
+    "ARCUS_ORDER_EXPIRATION_DAYS",
+  );
+  if (arcusOrderExpirationDays < 31 || arcusOrderExpirationDays > 2160) {
+    throw new Error(
+      "ARCUS_ORDER_EXPIRATION_DAYS must be between 31 and 2160 (90 days); Arcus requires goodTilTime at least 1 month in the future",
+    );
+  }
+  if (arcusTradingEnabled) {
+    if (!env.ARCUS_API_KEY?.trim())
+      throw new Error("ARCUS_API_KEY is required when ARCUS_TRADING_ENABLED=true");
+    if (!/^[0-9a-fA-F]{64}$/.test(env.ARCUS_API_PRIVATE_KEY ?? ""))
+      throw new Error(
+        "ARCUS_API_PRIVATE_KEY must be a 64-hex-char Ed25519 seed when ARCUS_TRADING_ENABLED=true",
+      );
+    if (!env.ARCUS_ACCOUNT_ADDRESS?.trim())
+      throw new Error(
+        "ARCUS_ACCOUNT_ADDRESS is required when ARCUS_TRADING_ENABLED=true",
+      );
+  }
   const variationalTradingEnabled = parseBoolean(
     env.VARIATIONAL_TRADING_ENABLED ?? "false",
   );
@@ -372,9 +408,23 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
         env.ARCUS_API_BASE_URL ?? "https://api.arcus.xyz",
       ),
       apiKey: emptyToUndefined(env.ARCUS_API_KEY),
+      privateKey: emptyToUndefined(env.ARCUS_API_PRIVATE_KEY),
       accountAddress: emptyToUndefined(env.ARCUS_ACCOUNT_ADDRESS),
       tradingEnabled: arcusTradingEnabled,
-      userAgent: env.ARCUS_USER_AGENT ?? "btc-arbitrage-bot/0.1",
+      // Blank/whitespace values fall back to the default instead of passing
+      // an empty User-Agent through to every request.
+      userAgent: env.ARCUS_USER_AGENT?.trim()
+        ? env.ARCUS_USER_AGENT.trim()
+        : "btc-arbitrage-bot/0.1",
+      makerFeeBps: parseNonNegativeInteger(
+        env.ARCUS_MAKER_FEE_BPS ?? "0",
+        "ARCUS_MAKER_FEE_BPS",
+      ),
+      takerFeeBps: parseNonNegativeInteger(
+        env.ARCUS_TAKER_FEE_BPS ?? "0",
+        "ARCUS_TAKER_FEE_BPS",
+      ),
+      orderExpirationDays: arcusOrderExpirationDays,
     },
     variational: {
       apiBaseUrl: trimTrailingSlash(

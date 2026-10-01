@@ -1,9 +1,20 @@
 export interface ArcusConfig {
   apiBaseUrl: string;
   apiKey?: string;
+  /** Ed25519 signing seed, 64 hex chars (32 bytes). Required when
+   * tradingEnabled — the API key alone cannot sign orders. Secret: never
+   * log. */
+  privateKey?: string;
   accountAddress?: string;
   tradingEnabled: boolean;
   userAgent: string;
+  /** Routing fee inputs in basis points (default 0). Reconcile against
+   * GET /v1/feetiers before enabling live trading. */
+  makerFeeBps: number;
+  takerFeeBps: number;
+  /** goodTilTime lifetime for placed orders in days (default 90; Arcus
+   * requires at least 1 month in the future, validated 31..2160). */
+  orderExpirationDays: number;
 }
 
 export interface ArcusMarketInfo {
