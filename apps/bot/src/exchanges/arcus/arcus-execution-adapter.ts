@@ -11,6 +11,7 @@ import type {
 } from "@btc-arbitrage/exchange-core";
 import { ArcusHttpClient, ArcusHttpError } from "./arcus-http-client.js";
 import type { ArcusConfig } from "./arcus.types.js";
+import { findMarket } from "../market-normalization.js";
 import {
   buildCancelOrderPayload,
   buildPlaceOrderPayload,
@@ -728,18 +729,16 @@ function findArcusMarket(
   payload: Record<string, unknown>,
   symbol: string,
 ): Record<string, unknown> {
-  const markets = payload.markets;
-  if (!Array.isArray(markets))
-    throw new Error("Arcus markets response did not include a markets array");
-  const target = symbol.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
-  for (const item of markets) {
-    if (!isRecord(item)) continue;
-    const candidates = [item.marketDisplayName, item.market, item.name, item.id]
-      .filter((v): v is string | number => typeof v === "string" || typeof v === "number")
-      .map((v) => String(v).replace(/[^a-zA-Z0-9]/g, "").toUpperCase());
-    if (candidates.includes(target)) return item;
+  // The shared matcher maps bot symbols to venue markets via exact match
+  // first, then base-asset fallback (BTCUSDT -> BTC matches Arcus's
+  // BTC-USD / baseAsset "BTC") — the same resolution the market-data
+  // client relies on. A local exact-only matcher rejected BTCUSDT here
+  // (observed 2026-10-01: preflight died at boot).
+  const market = findMarket(payload, symbol, "perpetual");
+  if (market.status && String(market.status).toUpperCase() !== "ONLINE") {
+    throw new Error(`Arcus market ${symbol} is not ONLINE`);
   }
-  throw new Error(`Arcus market ${symbol} was not found in markets response`);
+  return market;
 }
 
 function arcusBboPrice(level: unknown): string | undefined {
