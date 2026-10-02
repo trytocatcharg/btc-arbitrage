@@ -44,6 +44,17 @@ const MARKET_BOUND_BAND_BPS = 950;
  * TTL discipline as the Extended execution adapter. */
 const EXCHANGE_STATIC_DATA_TTL_MS = 10 * 60 * 1000;
 
+/** Lookback window for the leg-closure fills fallback (the epoch-µs `from`
+ * query on GET /v1/fills): wide enough to cover monitor downtime and the
+ * stale-closing recovery sweep, since a manual close or a moved trigger
+ * only leaves fills behind. */
+const FILLS_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+
+/** Closure reconstruction tolerance: a fill run whose cumulative size lands
+ * within this epsilon of the leg quantity is accepted as fully closed
+ * (venue-reported sizes can carry rounding). */
+const CLOSURE_QTY_EPSILON = "0.000000001";
+
 /** Arcus account index is fixed at 0 — the bot operates a single account
  * and there is no env knob for this (docs/exchanges/arcus.md). */
 const ARCUS_ACCOUNT_INDEX = 0;
@@ -400,12 +411,19 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
    * from the stored TP/SL order ids via GET /v1/order/{orderId}. A fired
    * trigger reports filledSize > 0 / avgFillPrice > 0; anything else
    * (UNTRIGGERED, zero-filled) is treated as not fired — undocumented
-   * statuses are never guessed. Degrades to null on any failure. */
+   * statuses are never guessed. When the stored ids resolve nothing
+   * (operator moved/replaced the trigger, or closed by hand), falls back
+   * to the public GET /v1/fills history: close fills (positionEffect
+   * CLOSE_<side>, side-mapped when absent) inside a 24 h window are walked
+   * newest-first until the cumulative size reaches the leg quantity
+   * (VWAP exit price, summed fee/closedPnl), or the single newest fill
+   * when no quantity is known. Degrades to null on any failure. */
   async resolveLegClosure(input: {
     symbol: string;
     side: "long" | "short";
     tpOrderId?: string;
     slOrderId?: string;
+    quantityBase?: string;
   }): Promise<{
     exitPriceUsd?: string;
     realizedPnlUsd?: string;
@@ -461,22 +479,150 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
           feeUsd: undefined,
         });
       }
-      if (fired.length === 0) return null;
-      const result = fired[0];
-      console.log("Arcus leg closure resolved", {
-        closeReason: result.closeReason,
-        exitOrderId: result.exitOrderId,
-        exitPriceUsd: result.exitPriceUsd,
-        feeUsd: result.feeUsd,
-        source: "/v1/order/{orderId}",
-      });
-      return result;
+      if (fired.length > 0) {
+        const result = fired[0];
+        console.log("Arcus leg closure resolved", {
+          closeReason: result.closeReason,
+          exitOrderId: result.exitOrderId,
+          exitPriceUsd: result.exitPriceUsd,
+          feeUsd: result.feeUsd,
+          source: "/v1/order/{orderId}",
+        });
+        return result;
+      }
+      // Stored ids resolved nothing — the trigger was moved/replaced or the
+      // position was closed by hand. The exit then exists ONLY in the public
+      // fill history (the position record is already gone), so reconstruct
+      // the closure from GET /v1/fills. Any failure here degrades to null:
+      // the historical n/a behavior stays the floor.
+      const recovered = await this.resolveClosureFromFills(input);
+      if (recovered !== null) {
+        console.log("Arcus leg closure resolved from fills", {
+          closeReason: recovered.closeReason,
+          exitOrderId: recovered.exitOrderId,
+          exitPriceUsd: recovered.exitPriceUsd,
+          feeUsd: recovered.feeUsd,
+          fills: recovered.fills,
+        });
+      }
+      return recovered;
     } catch (error) {
       console.warn("Arcus leg closure resolution failed; degrading to null", {
         message: error instanceof Error ? error.message : String(error),
       });
       return null;
     }
+  }
+
+  /** Fills-history fallback for resolveLegClosure: public, unauthenticated
+   * GET /v1/fills (newest-first) holds the only record of a closure the
+   * stored TP/SL ids cannot explain. Close fills are matched by
+   * positionEffect (side-mapped when the field is absent), then walked
+   * newest-first accumulating size until the leg quantity is covered —
+   * exit price as an exact-decimal VWAP, fee/PnL summed over the accepted
+   * fills — or the single newest fill when no quantity is known. A partial
+   * run under 50% of the leg quantity is too speculative and yields null.
+   * Throws on unexpected shapes; the caller's try degrades that to null. */
+  private async resolveClosureFromFills(input: {
+    symbol: string;
+    side: "long" | "short";
+    quantityBase?: string;
+  }): Promise<{
+    exitPriceUsd?: string;
+    realizedPnlUsd?: string;
+    exitOrderId?: string;
+    closeReason?: "tp" | "sl" | "manual" | "liquidation";
+    feeUsd?: string;
+    fills: number;
+  } | null> {
+    this.requireAccountAddress();
+    // Same market resolution as getPosition: arcusMarketName derives the
+    // display name the fills endpoint filters on; getMarket additionally
+    // validates the market exists (and warms the TTL cache).
+    await this.getMarket(input.symbol);
+    const marketName = arcusMarketName(input.symbol);
+    const payload = requiredRecord(
+      await this.http.get("/v1/fills", {
+        address: this.config.accountAddress!,
+        market: marketName,
+        from: String(BigInt(Date.now() - FILLS_LOOKBACK_MS) * 1000n),
+      }),
+      "Arcus fills",
+    );
+    // The venue guarantees newest-first order (docs.arcus.xyz
+    // /api-reference/public/get-fills) — the accumulation below relies on
+    // it so the FIRST accepted fill is the newest (exit order id source).
+    const fills = Array.isArray(payload.fills) ? payload.fills : [];
+    const closeEffect = input.side === "long" ? "CLOSE_LONG" : "CLOSE_SHORT";
+    // Fallback when positionEffect is absent: a long closes by selling, a
+    // short by buying.
+    const closingSide = input.side === "long" ? "SELL" : "BUY";
+    const matched: Record<string, unknown>[] = [];
+    for (const fill of fills) {
+      if (!isRecord(fill)) continue;
+      const effect = optionalString(fill.positionEffect)?.toUpperCase();
+      if (effect !== undefined) {
+        if (effect === closeEffect) matched.push(fill);
+        continue;
+      }
+      if (optionalString(fill.side)?.toUpperCase() === closingSide)
+        matched.push(fill);
+    }
+
+    let cumulative = "0";
+    let notional = "0";
+    let feeUsd: string | undefined;
+    let realizedPnlUsd: string | undefined;
+    let sawLiquidation = false;
+    let exitOrderId: string | undefined;
+    let accepted = 0;
+    for (const fill of matched) {
+      if (
+        input.quantityBase !== undefined &&
+        closureQtyReached(cumulative, input.quantityBase)
+      )
+        break;
+      const size = positiveDecimal(findDecimal(fill, ["size"]));
+      const price = positiveDecimal(findDecimal(fill, ["price"]));
+      // A fill without a usable size/price cannot contribute to the VWAP
+      // and is skipped wholesale — never estimated.
+      if (size === undefined || price === undefined) continue;
+      if (accepted === 0)
+        exitOrderId = optionalString(fill.orderId) ?? undefined;
+      accepted += 1;
+      cumulative = addDecimalStrings(cumulative, size);
+      notional = addDecimalStrings(notional, mulDecimalStrings(size, price));
+      // Fills expose a REAL per-fill fee (docs/exchanges/arcus.md) — a
+      // maker rebate arrives negative and is preserved as-is.
+      const fee = findDecimal(fill, ["fee"]);
+      if (fee !== undefined) feeUsd = addDecimalStrings(feeUsd ?? "0", fee);
+      const closedPnl = findDecimal(fill, ["closedPnl"]);
+      if (closedPnl !== undefined)
+        realizedPnlUsd = addDecimalStrings(realizedPnlUsd ?? "0", closedPnl);
+      if (fill.liquidation) sawLiquidation = true;
+      // No leg quantity known: the single newest matching fill is the
+      // whole story.
+      if (input.quantityBase === undefined) break;
+    }
+    if (accepted === 0) return null;
+    if (
+      input.quantityBase !== undefined &&
+      !closureQtyReached(cumulative, input.quantityBase) &&
+      // Partial coverage is accepted only at ≥ 50% of the leg quantity;
+      // below that the reconstruction is too speculative.
+      compareDecimals(mulDecimalStrings(cumulative, "2"), input.quantityBase) < 0
+    )
+      return null;
+
+    const exitPriceUsd = divideScaledDecimal(notional, cumulative);
+    return {
+      exitPriceUsd,
+      exitOrderId,
+      closeReason: sawLiquidation ? "liquidation" : "manual",
+      ...(realizedPnlUsd !== undefined ? { realizedPnlUsd } : {}),
+      ...(feeUsd !== undefined ? { feeUsd } : {}),
+      fills: accepted,
+    };
   }
 
   /** Startup hook (not part of the ExecutionAdapter contract): resolves
@@ -1010,6 +1156,83 @@ function positiveDecimal(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? value : undefined;
+}
+
+/** Cumulative close-fill size reaching the leg quantity — exact decimal
+ * comparison first, then the CLOSURE_QTY_EPSILON band for venue-reported
+ * sizes that land a hair under (rounding). */
+function closureQtyReached(cumulative: string, target: string): boolean {
+  if (compareDecimals(cumulative, target) >= 0) return true;
+  return (
+    compareDecimals(subtractDecimalStrings(target, cumulative), CLOSURE_QTY_EPSILON) <= 0
+  );
+}
+
+/** Exact decimal addition of two string operands via scaled BigInt parts —
+ * no floating point, same discipline as applyBps/compareDecimals. */
+function addDecimalStrings(a: string, b: string): string {
+  const pa = decimalParts(a);
+  const pb = decimalParts(b);
+  return formatScaledDecimal(
+    pa.mantissa * pb.scale + pb.mantissa * pa.scale,
+    pa.scale * pb.scale,
+  );
+}
+
+/** Exact decimal subtraction (a − b) via scaled BigInt parts. */
+function subtractDecimalStrings(a: string, b: string): string {
+  const pb = decimalParts(b);
+  return addDecimalStrings(a, formatScaledDecimal(-pb.mantissa, pb.scale));
+}
+
+/** Exact decimal product of two string operands (scaled BigInt). */
+function mulDecimalStrings(a: string, b: string): string {
+  const pa = decimalParts(a);
+  const pb = decimalParts(b);
+  return formatScaledDecimal(pa.mantissa * pb.mantissa, pa.scale * pb.scale);
+}
+
+/** Exact decimal division (numerator ÷ denominator) with long division —
+ * the VWAP over the accepted close fills. No floating point; a zero
+ * denominator throws (cumulative is only ever positive here). */
+function divideScaledDecimal(numerator: string, denominator: string): string {
+  const n = decimalParts(numerator);
+  const d = decimalParts(denominator);
+  if (d.mantissa === 0n) throw new Error("division by zero decimal");
+  const negative = (n.mantissa < 0n) !== (d.mantissa < 0n);
+  let remainder = (n.mantissa < 0n ? -n.mantissa : n.mantissa) * d.scale;
+  const divisor = (d.mantissa < 0n ? -d.mantissa : d.mantissa) * n.scale;
+  const integer = remainder / divisor;
+  remainder %= divisor;
+  if (remainder === 0n)
+    return negative ? `-${integer.toString(10)}` : integer.toString(10);
+  let fraction = "";
+  while (remainder !== 0n && fraction.length < 40) {
+    remainder *= 10n;
+    fraction += (remainder / divisor).toString(10);
+    remainder %= divisor;
+  }
+  return negative
+    ? `-${integer.toString(10)}.${fraction.replace(/0+$/, "")}`
+    : `${integer.toString(10)}.${fraction.replace(/0+$/, "")}`;
+}
+
+/** Normalize scaled BigInt parts back into a trimmed decimal string
+ * (trailing zeros stripped; negatives preserved). */
+function formatScaledDecimal(mantissa: bigint, scale: bigint): string {
+  if (mantissa === 0n) return "0";
+  const negative = mantissa < 0n;
+  const abs = negative ? -mantissa : mantissa;
+  const integer = abs / scale;
+  const remainder = abs % scale;
+  if (remainder === 0n)
+    return negative ? `-${integer.toString(10)}` : integer.toString(10);
+  const width = scale.toString(10).length - 1;
+  const fraction = remainder
+    .toString(10)
+    .padStart(width, "0")
+    .replace(/0+$/, "");
+  return `${negative ? "-" : ""}${integer.toString(10)}.${fraction}`;
 }
 
 function requiredRecord(

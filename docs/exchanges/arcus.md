@@ -87,6 +87,7 @@ Hard rules:
 - Post-only is TIF `ALO`; crossing an ALO rejects with `POST_ONLY_WOULD_CROSS` (retryable, same semantics Extended uses).
 - Limit-price divisor is always top-level `tickSize`; `tickTiers` only constrain which prices are accepted.
 - Placement is async: HTTP 202 = ACK (no terminal state), HTTP 200 = best-effort definitive state. Definitive state requires polling `GET /v1/order/{orderId}` (no WebSocket in the bot yet).
+- Unlike `/v1/order/{orderId}`, `GET /v1/fills` exposes a per-fill `fee` — exit fees for closures resolved from fill history are real, not estimated (maker rebates arrive negative).
 - `clientId` max 36 chars — the bot's `${uuid}-tp`/`-limit2` ids (39–45 chars) are normalized at the adapter boundary to a deterministic `prefix-digest` form (sha256, charset-safe, retry-stable); never truncate the head (tp/sl/hedge of one token would collide).
 - Single-order REST bodies (place/cancel) are long-form human-readable fields with `timestamp` as a nanosecond **string**; the Scheme-1 payload is signing input only and never travels as the HTTP body.
 
@@ -97,6 +98,7 @@ Hard rules:
 | `GET /v1/account?address=` | Available margin | `freeCollateral`, `equity` (404 until first deposit) |
 | `GET /v1/positions?address=&market=BTC-USD` | Position polling | `positions` map keyed by marketId: `size` (signed), `averageEntryPrice`, `markPx`, `leverage`, `marginMode` |
 | `GET /v1/order/{orderId}?address=` | Order polling + leg-closure recovery | `status` (OPEN/PARTIALLY_FILLED/FILLED/CANCELED/REJECTED/UNTRIGGERED/TPSL_*), `originalSize`, `filledSize`, `remainingSize`, `avgFillPrice`, `rejectionReason`. No per-order fee field → `feeUsd` stays undefined, never estimated. |
+| `GET /v1/fills?address=` | Leg-closure recovery fallback for manual/moved TP/SL closes | Public, no auth: `address` (required), optional `market` (display name, e.g. `BTC-USD`), `from`/`to` (epoch µs, same unit as `createdAt`), `accountIndex`, `role`, `side`. Newest-first `fills[]`: `tradeId`, `orderId`, `marketDisplayName`, `side` (BUY/SELL), `size`, `price`, `fee`, `closedPnl`, `positionEffect` (`CLOSE_LONG`/`CLOSE_SHORT` mark close fills), `createdAt` (µs), `liquidation`. |
 | `GET /v1/markets?market=BTC-USD` | Metadata | `tickSize`, `stepSize`, `minOrderSize`, `maxOrderSize`, `minOrderNotional` (opening orders only; reduce-only exempt). No `maxLeverage` field — leave `maxLeverage` undefined. |
 | `POST /v1/setLeverage?address=` | Startup leverage set | Body `{address, marketId, leverage, accountIndex?}`; Scheme 2; response `status` APPLIED/ACK/REJECTED (202 ACK is not failure). |
 

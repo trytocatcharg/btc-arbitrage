@@ -100,13 +100,21 @@ export interface ExecutionAdapter {
    * (e.g. a venue-side TP/SL trigger, where getPosition no longer reports
    * close price / realized PnL once the venue position record is gone).
    * Implementations resolve the closure from the protection order ids the
-   * caller stored when the TP/SL orders were placed. Returns null when the
+   * caller stored when the TP/SL orders were placed, keeping those ids as
+   * the primary path, and may fall back to venue fill/order HISTORY when
+   * the stored ids no longer resolve (an operator-moved trigger or a
+   * manual close leaves only history behind). Returns null when the
    * closure cannot be resolved; must never throw. */
   resolveLegClosure?(input: {
     symbol: string;
     side: "long" | "short";
     tpOrderId?: string;
     slOrderId?: string;
+    /** Leg quantity in base units (decimal string). When provided,
+     * implementations that query fill history should match close fills
+     * until the cumulative size reaches this quantity and price the exit
+     * as a VWAP over those fills. */
+    quantityBase?: string;
   }): Promise<{
     exitPriceUsd?: string;
     realizedPnlUsd?: string;

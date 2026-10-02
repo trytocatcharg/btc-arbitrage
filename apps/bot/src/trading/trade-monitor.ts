@@ -46,17 +46,18 @@ export async function monitorTrades(input: {
       )
         continue;
 
-      // A venue-side TP/SL fire leaves the position record empty (RISEx
-      // drops it; Extended returns null), so getPosition carries no exit
-      // data. Recover it post-hoc from the protection order ids stored in
-      // the leg's raw JSON (best-effort, adapter-owned, never throws).
+      // A venue-side TP/SL fire (or a manual close / moved trigger) leaves
+      // the position record empty (RISEx drops it; Extended returns null),
+      // so getPosition carries no exit data. Recover it post-hoc from the
+      // protection order ids stored in the leg's raw JSON — or, when those
+      // ids resolve nothing, from venue fill history (Arcus) —
+      // (best-effort, adapter-owned, never throws).
       const protectionIds = readProtectionOrderIds(row.trade_legs.raw);
       let resolved: Awaited<
         ReturnType<NonNullable<typeof adapter.resolveLegClosure>>
       > = null;
       if (
         (position?.exitPriceUsd == null || position?.realizedPnlUsd == null) &&
-        (protectionIds.tpOrderId != null || protectionIds.slOrderId != null) &&
         adapter.resolveLegClosure
       ) {
         try {
@@ -65,6 +66,7 @@ export async function monitorTrades(input: {
             side: row.trade_legs.side,
             tpOrderId: protectionIds.tpOrderId,
             slOrderId: protectionIds.slOrderId,
+            quantityBase: row.trade_legs.quantityBase ?? undefined,
           });
         } catch (error) {
           console.warn(
