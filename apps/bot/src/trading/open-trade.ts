@@ -156,6 +156,11 @@ export interface OpenTradeOptions {
     token: string;
     message: string;
   }) => Promise<void>;
+  /** OPEN_TRADE_AUTO_CONFIRM mode: when true, entry-abort notices
+   * ("Entrada abortada…") are not pushed to the operator — in auto-trading
+   * there is no one to act on the "¿Reintentar?" prompt and the volume
+   * would spam the chat. Plain limit-timeout notices still fire. */
+  autoConfirm?: boolean;
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -1137,10 +1142,19 @@ export class OpenTradeService {
             `⏱ Limit order en ${preview.limitExchange} (${limitSideForNotice} ` +
             `${preview.quantityBase} ${preview.symbol}) no se llenó en ` +
             `${this.options.limitTimeoutMs}ms y fue cancelada. ¿Reintentar?`;
-        await this.options.notifyLimitTimeout?.({
-          token,
-          message: abortNotice,
-        });
+        // In auto-confirm mode the operator is not watching the chat for
+        // abort decisions (the "¿Reintentar?" prompt has no actor), so the
+        // Entrada abortada notices are suppressed; the plain limit-timeout
+        // notice below still fires.
+        const isAbortNotice =
+          entryAbortReason === "spread_inverted" ||
+          entryAbortReason === "spread_dropped";
+        if (!(isAbortNotice && this.options.autoConfirm)) {
+          await this.options.notifyLimitTimeout?.({
+            token,
+            message: abortNotice,
+          });
+        }
         return { outcome: "cancelled" as const };
       }
       const limitFillPrice =

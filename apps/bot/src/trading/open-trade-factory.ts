@@ -71,6 +71,7 @@ export function buildOpenTradeOptions(
     },
     notifyUrgent: notify.notifyUrgent,
     notifyLimitTimeout: notify.notifyLimitTimeout,
+    autoConfirm: config.openTrade.autoConfirm,
   };
 }
 
@@ -147,10 +148,13 @@ export async function autoConfirmSignalTrade(input: {
           `🤖 Auto-trade\n${formatEdgeClosedNotice(outcome)}`,
         );
       } else if (outcome?.outcome === "cancelled") {
-        await input.notifier.notifyUrgent(
-          `⏱ Auto-trade no abierto (${preview.token.slice(0, 8)}): la ` +
-            `orden límite expiró sin fill y el trade quedó cancelado.`,
-        );
+        // Auto-trading: el aviso de límite expirado sin fill queda
+        // silenciado a propósito — un chat sin operador solo acumula
+        // ruido. El cambio de estado igual queda en la DB/logs.
+        console.log("Auto-confirm: trade cancelado (el límite expiró sin fill)", {
+          signalId: input.signalId,
+          token: preview.token,
+        });
       } else {
         await input.notifier.notifyUrgent(
           `❌ Auto-trade ${preview.token.slice(0, 8)} terminó sin un ` +
