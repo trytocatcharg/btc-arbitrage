@@ -121,10 +121,25 @@ async function main() {
     if (!tradingEnabled) continue;
     const adapter = registry.get(exchangeId);
     if (!adapter.execution) continue;
-    await adapter.execution.validateExecutionPreflight({
+    // Log before the await so a stalled boot shows exactly which exchange
+    // and which step (network calls carry a 10 s timeout) is in flight.
+    console.log("Running execution preflight at startup", {
+      exchange: exchangeId,
       symbol: config.btcSymbol,
       leverage: config.leverage,
     });
+    try {
+      await adapter.execution.validateExecutionPreflight({
+        symbol: config.btcSymbol,
+        leverage: config.leverage,
+      });
+    } catch (error) {
+      console.error("Execution preflight failed at startup", {
+        exchange: exchangeId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
     console.log("Execution preflight completed at startup", {
       exchange: exchangeId,
     });
