@@ -8,6 +8,7 @@ import type {
   PriceRequest,
 } from "@btc-arbitrage/exchange-core";
 import { findMarket, getMarketId } from "../market-normalization.js";
+import { logExchangeResponse } from "../exchange-response-logger.js";
 import type { ExtendedConfig } from "./extended.types.js";
 import {
   createExtendedOrderContext,
@@ -222,9 +223,27 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
       quantity,
       ctx,
     );
-    const placed = unwrapData(
-      await this.http.post("/api/v1/user/order", order, { private: true }),
-    );
+    const placedResponse = await this.http.post("/api/v1/user/order", order, {
+      private: true,
+    });
+    logExchangeResponse({
+      exchange: "extended",
+      event:
+        input.type === "take-profit-market" || input.type === "stop-market"
+          ? "tpsl_place"
+          : "order_submit",
+      context: {
+        symbol: input.symbol,
+        side: input.side,
+        type: input.type,
+        reduceOnly: input.reduceOnly === true,
+        quantityBase: input.quantityBase,
+        priceUsd: input.priceUsd,
+        triggerPriceUsd: input.triggerPriceUsd,
+      },
+      response: placedResponse,
+    });
+    const placed = unwrapData(placedResponse);
     const placedId = stringField(placed, ["id"], "Extended order placement id");
 
     if (input.type === "market") {
@@ -239,13 +258,23 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
 
   async getExecutionOrder(orderId: string): Promise<ExecutionOrder> {
     this.requireApiKey();
-    const order = unwrapData(
-      await this.http.get(
-        `/api/v1/user/orders/${encodeURIComponent(orderId)}`,
-        { private: true },
-      ),
+    const response = await this.http.get(
+      `/api/v1/user/orders/${encodeURIComponent(orderId)}`,
+      { private: true },
     );
-    return mapExecutionOrder(order);
+    const order = unwrapData(response);
+    const mapped = mapExecutionOrder(order);
+    // Hot-pathed while a resting limit waits for its fill: log only reads
+    // that carry fill or terminal state, not every poll tick.
+    if (mapped.status !== "new" || Number(mapped.filledQuantityBase) > 0) {
+      logExchangeResponse({
+        exchange: "extended",
+        event: "order_read",
+        context: { orderId, status: mapped.status },
+        response,
+      });
+    }
+    return mapped;
   }
 
   async cancelExecutionOrder(orderId: string): Promise<void> {
