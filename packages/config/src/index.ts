@@ -125,6 +125,11 @@ export interface BotConfig {
     botToken?: string;
     chatId?: string;
     alertCooldownMs: number;
+    /** IANA timezone (e.g. Europe/Madrid) used to render operator-facing
+     * Telegram output (/lastsignal) in local time. Telegram does not send
+     * the sender's device timezone with messages, so it must be configured
+     * explicitly via TELEGRAM_OPERATOR_TIMEZONE. */
+    operatorTimezone: string;
   };
   dataRetention: {
     enabled: boolean;
@@ -244,6 +249,10 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       "TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required when TELEGRAM_ENABLED=true",
     );
   }
+  const telegramOperatorTimezone = parseTimeZone(
+    env.TELEGRAM_OPERATOR_TIMEZONE ?? "Europe/Madrid",
+    "TELEGRAM_OPERATOR_TIMEZONE",
+  );
   const dataRetentionEnabled = parseBoolean(
     env.DATA_RETENTION_ENABLED ?? "true",
   );
@@ -453,6 +462,7 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       botToken: emptyToUndefined(env.TELEGRAM_BOT_TOKEN),
       chatId: emptyToUndefined(env.TELEGRAM_CHAT_ID),
       alertCooldownMs: telegramAlertCooldownMs,
+      operatorTimezone: telegramOperatorTimezone,
     },
     dataRetention: {
       enabled: dataRetentionEnabled,
@@ -557,6 +567,18 @@ function parsePriceSource(value: string): PriceSource {
 function parseMarketType(value: string): MarketType {
   if (value === "perpetual" || value === "futures") return value;
   throw new Error("MARKET_TYPE must be one of: perpetual, futures");
+}
+
+function parseTimeZone(value: string, field: string): string {
+  try {
+    // Intl validates IANA timezone names and throws on unknown ones.
+    new Intl.DateTimeFormat("en-US", { timeZone: value });
+  } catch {
+    throw new Error(
+      `${field} must be a valid IANA timezone (e.g. Europe/Madrid), got "${value}"`,
+    );
+  }
+  return value;
 }
 
 function parseExecutionMode(value: string): ExecutionMode {

@@ -6,6 +6,7 @@ import {
   buildTradeSummaryMessage,
   type ExchangeRegistryLike,
 } from "./trade-summary.js";
+import { buildLastSignalsMessage } from "./last-signals-summary.js";
 import {
   buildTradeOpenedSummary,
   formatEdgeClosedNotice,
@@ -98,6 +99,10 @@ const AVAILABLE_COMMANDS = [
   {
     command: "volume",
     description: "Volumen generado (farmed): total, mes anterior, 6 meses",
+  },
+  {
+    command: "lastsignal",
+    description: "Últimas 10 señales (hora local)",
   },
 ] as const;
 
@@ -253,6 +258,16 @@ export class TelegramCommandPoller {
         await this.sendMessage(await buildVolumeMessage(this.db, "total"), {
           inline_keyboard: [VOLUME_VIEW_BUTTONS],
         });
+        return;
+      }
+
+      if (isTelegramCommand(text, "lastsignal")) {
+        await this.sendMessage(
+          await buildLastSignalsMessage(
+            this.db,
+            this.config.telegram.operatorTimezone,
+          ),
+        );
         return;
       }
     } catch (error) {

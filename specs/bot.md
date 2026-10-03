@@ -75,6 +75,11 @@ Current chat commands:
 
 - `/config`
 - `/trade`
+- `/volume`
+- `/lastsignal` — last 10 signals from DB, timestamps rendered in
+  `TELEGRAM_OPERATOR_TIMEZONE` (IANA, default Europe/Madrid) with a
+  relative age suffix ("hace 2 minutos"). Telegram never sends the
+  sender's device timezone, so the zone is configured explicitly.
 
 ### Inline callback flow
 
