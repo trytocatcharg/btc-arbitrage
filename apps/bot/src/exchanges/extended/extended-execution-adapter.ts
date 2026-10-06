@@ -407,9 +407,11 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
           exitPriceUsd,
           exitOrderId: optionalString(order.id),
           closeReason,
-          // Best-effort real fee from the order payload (candidate fields);
-          // undefined when the venue does not report it — never estimated.
-          feeUsd: findDecimal(order, ["fee", "totalFee", "feeAmount", "execFee"]),
+          // Best-effort real fee from the order payload. Extended reports
+          // it as `payedFee` (the API's own spelling — verified against
+          // live responses, 2026-10-05); older candidate names kept as
+          // fallback. undefined when absent — never estimated.
+          feeUsd: findDecimal(order, ["payedFee", "fee", "totalFee", "feeAmount", "execFee"]),
         });
       }
       if (fired.length === 0) return null;
@@ -702,10 +704,11 @@ function mapExecutionOrder(payload: unknown): ExecutionOrder {
       "averageFillPrice",
       "avgPrice",
     ]),
-    // Best-effort real per-order fee: Extended's order payload field is
-    // unverified, so candidate names are tried and the fee stays undefined
-    // when none is present (never estimated).
-    feeUsd: findDecimal(order, ["fee", "totalFee", "feeAmount", "execFee"]),
+    // Best-effort real per-order fee: Extended reports it as `payedFee`
+    // (the API's own spelling — verified against live responses,
+    // 2026-10-05, maker fill showed "0.0000000000000000"); older candidate
+    // names kept as fallback. Stays undefined when absent — never estimated.
+    feeUsd: findDecimal(order, ["payedFee", "fee", "totalFee", "feeAmount", "execFee"]),
   };
 }
 

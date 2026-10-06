@@ -10,6 +10,7 @@ import type {
   PriceRequest,
 } from "@btc-arbitrage/exchange-core";
 import { ArcusHttpClient, ArcusHttpError } from "./arcus-http-client.js";
+import { logExchangeResponse } from "../exchange-response-logger.js";
 import type { ArcusConfig } from "./arcus.types.js";
 import { findMarket } from "../market-normalization.js";
 import {
@@ -285,6 +286,19 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
         const reason = optionalString(row.rejectionReason);
         throw new Error(`Arcus order rejected${reason ? `: ${reason}` : ""}`);
       }
+      logExchangeResponse({
+        exchange: "arcus",
+        event: "tpsl_place",
+        context: {
+          symbol: input.symbol,
+          side: input.side,
+          type: input.type,
+          reduceOnly: orderSpec.reduceOnly,
+          quantityBase: input.quantityBase,
+          stopPriceUsd: orderSpec.stopPriceUsd,
+        },
+        response: row,
+      });
       return mapped;
     }
 
@@ -306,6 +320,19 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
         `Arcus order rejected${reason ? `: ${reason}` : ""}`,
       );
     }
+    logExchangeResponse({
+      exchange: "arcus",
+      event: "order_submit",
+      context: {
+        symbol: input.symbol,
+        side: input.side,
+        type: input.type,
+        reduceOnly: orderSpec.reduceOnly,
+        quantityBase: input.quantityBase,
+        priceUsd: orderSpec.priceUsd,
+      },
+      response: placed,
+    });
 
     if (input.type === "market") {
       // MARKET orders may fill immediately; make a single best-effort read
@@ -322,14 +349,28 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
 
   async getExecutionOrder(orderId: string): Promise<ExecutionOrder> {
     this.requireAccountAddress();
-    return mapExecutionOrder(
-      unwrapOrderRecord(
-        await this.http.get(
-          `/v1/order/${encodeURIComponent(orderId)}`,
-          { address: this.config.accountAddress! },
-        ),
+    const record = unwrapOrderRecord(
+      await this.http.get(
+        `/v1/order/${encodeURIComponent(orderId)}`,
+        { address: this.config.accountAddress! },
       ),
     );
+    const mapped = mapExecutionOrder(record);
+    // Polled every tick while a leg rests open — log only fill/terminal
+    // states (same discipline as the RISEx/Extended adapters).
+    if (
+      mapped.status === "filled" ||
+      mapped.status === "rejected" ||
+      mapped.status === "cancelled"
+    ) {
+      logExchangeResponse({
+        exchange: "arcus",
+        event: "order_read",
+        context: { orderId, status: mapped.status },
+        response: record,
+      });
+    }
+    return mapped;
   }
 
   async cancelExecutionOrder(orderId: string): Promise<void> {
@@ -442,6 +483,7 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
         exitOrderId?: string;
         closeReason: "tp" | "sl";
         feeUsd?: string;
+        realizedPnlUsd?: string;
       }> = [];
       for (const [kind, id] of [
         ["tp", input.tpOrderId],
@@ -450,15 +492,18 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
         if (!id) continue;
         let order: Record<string, unknown>;
         try {
-          order = requiredRecord(
-            unwrapOrderRecord(
-              await this.http.get(
-                `/v1/order/${encodeURIComponent(id)}`,
-                { address: this.config.accountAddress! },
-              ),
-            ),
-            "Arcus TPSL order",
+          const rawOrder = await this.http.get(
+            `/v1/order/${encodeURIComponent(id)}`,
+            { address: this.config.accountAddress! },
           );
+          order = requiredRecord(unwrapOrderRecord(rawOrder), "Arcus TPSL order");
+          // A closure reads each stored trigger at most once — log always.
+          logExchangeResponse({
+            exchange: "arcus",
+            event: "closure_order_read",
+            context: { orderId: id, kind },
+            response: rawOrder,
+          });
         } catch {
           // Missing order: this id has nothing to teach us.
           continue;
@@ -481,12 +526,31 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
       }
       if (fired.length > 0) {
         const result = fired[0];
+        // Arcus order records carry no fee field, but the public fills
+        // history does: when the exit order id is known, recover the real
+        // per-fill fee and realized PnL matched by orderId (one extra
+        // request per closure; any failure degrades to the fee-less
+        // result — never estimated).
+        if (result.exitOrderId) {
+          try {
+            const byOrder = await this.resolveExitByOrderId(
+              input.symbol,
+              result.exitOrderId,
+            );
+            if (byOrder?.feeUsd !== undefined) result.feeUsd = byOrder.feeUsd;
+            if (byOrder?.realizedPnlUsd !== undefined)
+              result.realizedPnlUsd = byOrder.realizedPnlUsd;
+          } catch {
+            // Fee recovery is best-effort; the closure result stands alone.
+          }
+        }
         console.log("Arcus leg closure resolved", {
           closeReason: result.closeReason,
           exitOrderId: result.exitOrderId,
           exitPriceUsd: result.exitPriceUsd,
           feeUsd: result.feeUsd,
-          source: "/v1/order/{orderId}",
+          realizedPnlUsd: result.realizedPnlUsd,
+          source: "/v1/order/{orderId} + /v1/fills",
         });
         return result;
       }
@@ -536,23 +600,7 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
     fills: number;
   } | null> {
     this.requireAccountAddress();
-    // Same market resolution as getPosition: arcusMarketName derives the
-    // display name the fills endpoint filters on; getMarket additionally
-    // validates the market exists (and warms the TTL cache).
-    await this.getMarket(input.symbol);
-    const marketName = arcusMarketName(input.symbol);
-    const payload = requiredRecord(
-      await this.http.get("/v1/fills", {
-        address: this.config.accountAddress!,
-        market: marketName,
-        from: String(BigInt(Date.now() - FILLS_LOOKBACK_MS) * 1000n),
-      }),
-      "Arcus fills",
-    );
-    // The venue guarantees newest-first order (docs.arcus.xyz
-    // /api-reference/public/get-fills) — the accumulation below relies on
-    // it so the FIRST accepted fill is the newest (exit order id source).
-    const fills = Array.isArray(payload.fills) ? payload.fills : [];
+    const fills = await this.fetchFills(input.symbol);
     const closeEffect = input.side === "long" ? "CLOSE_LONG" : "CLOSE_SHORT";
     // Fallback when positionEffect is absent: a long closes by selling, a
     // short by buying.
@@ -604,6 +652,13 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
       // whole story.
       if (input.quantityBase === undefined) break;
     }
+    // Close fills only — a bounded set (never the raw 24 h history).
+    logExchangeResponse({
+      exchange: "arcus",
+      event: "closure_order_history_read",
+      context: { symbol: input.symbol, side: input.side, quantityBase: input.quantityBase },
+      response: { fills: matched },
+    });
     if (accepted === 0) return null;
     if (
       input.quantityBase !== undefined &&
@@ -622,6 +677,62 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
       ...(realizedPnlUsd !== undefined ? { realizedPnlUsd } : {}),
       ...(feeUsd !== undefined ? { feeUsd } : {}),
       fills: accepted,
+    };
+  }
+
+  /** Fetch the public fills history for a symbol (24 h lookback,
+   * newest-first per the venue doc). Shared by the closure reconstruction
+   * and the exit-order fee recovery. */
+  private async fetchFills(symbol: string): Promise<Record<string, unknown>[]> {
+    this.requireAccountAddress();
+    // Same market resolution as getPosition: arcusMarketName derives the
+    // display name the fills endpoint filters on; getMarket additionally
+    // validates the market exists (and warms the TTL cache).
+    await this.getMarket(symbol);
+    const marketName = arcusMarketName(symbol);
+    const payload = requiredRecord(
+      await this.http.get("/v1/fills", {
+        address: this.config.accountAddress!,
+        market: marketName,
+        from: String(BigInt(Date.now() - FILLS_LOOKBACK_MS) * 1000n),
+      }),
+      "Arcus fills",
+    );
+    // The venue guarantees newest-first order (docs.arcus.xyz
+    // /api-reference/public/get-fills) — the accumulation below relies on
+    // it so the FIRST accepted fill is the newest (exit order id source).
+    const fills = Array.isArray(payload.fills) ? payload.fills : [];
+    return fills.filter(isRecord);
+  }
+
+  /** Recover the real per-fill fee and realized PnL of a single exit
+   * order from the public fills history (Arcus order records carry no fee
+   * field — docs/exchanges/arcus.md "Execution facts"). Matched strictly
+   * by orderId. Returns null when no fill of the order is present; throws
+   * on unexpected shapes, so callers must degrade. */
+  private async resolveExitByOrderId(
+    symbol: string,
+    orderId: string,
+  ): Promise<{ feeUsd?: string; realizedPnlUsd?: string } | null> {
+    const fills = await this.fetchFills(symbol);
+    let feeUsd: string | undefined;
+    let realizedPnlUsd: string | undefined;
+    let matched = 0;
+    for (const fill of fills) {
+      if (optionalString(fill.orderId) !== orderId) continue;
+      matched += 1;
+      // Fills expose a REAL per-fill fee (docs/exchanges/arcus.md) — a
+      // maker rebate arrives negative and is preserved as-is.
+      const fee = findDecimal(fill, ["fee"]);
+      if (fee !== undefined) feeUsd = addDecimalStrings(feeUsd ?? "0", fee);
+      const closedPnl = findDecimal(fill, ["closedPnl"]);
+      if (closedPnl !== undefined)
+        realizedPnlUsd = addDecimalStrings(realizedPnlUsd ?? "0", closedPnl);
+    }
+    if (matched === 0) return null;
+    return {
+      ...(feeUsd !== undefined ? { feeUsd } : {}),
+      ...(realizedPnlUsd !== undefined ? { realizedPnlUsd } : {}),
     };
   }
 
