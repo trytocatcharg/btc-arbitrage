@@ -127,7 +127,9 @@ timer libs). Five tests:
 
 ## Roadmap (this doc is step 1 of 4)
 
-- [ ] Step 1 — this queue (decouple execution).
+- [x] Step 1 — this queue (decouple execution). **Implemented 2026-10-07**
+      in the working tree (unstaged, not committed — the operator
+      commits); verified: typecheck exit 0, execution-queue tests 5/5.**
 - [ ] Step 2 — move `monitorTrades` + `monitorTimeoutClosures` to their
       own interval, decoupled from the signal tick.
 - [ ] Step 3 — data retention off the hot path (daily scheduler at a

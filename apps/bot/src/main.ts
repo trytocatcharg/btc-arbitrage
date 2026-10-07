@@ -9,6 +9,7 @@ import type { ArcusExecutionHandle } from "./exchanges/arcus/arcus-execution-ada
 import { TelegramCommandPoller } from "./notifications/telegram-command-poller.js";
 import { TelegramNotifier } from "./notifications/telegram-notifier.js";
 import { runPollingLoop } from "./runtime/polling-loop.js";
+import { ExecutionQueue } from "./trading/execution-queue.js";
 
 async function main() {
   console.log("btc-arbitrage bot process booting", {
@@ -196,8 +197,13 @@ async function main() {
     }
   }
   const notifier = new TelegramNotifier(config.telegram);
+  // One serial queue shared by the polling loop (auto-confirm on signals)
+  // and the Telegram command poller (open:/retrade: callbacks), so trade
+  // execution never blocks the monitoring tick and two executions can
+  // never overlap.
+  const executionQueue = new ExecutionQueue();
   const commandPoller = config.telegram.enabled
-    ? new TelegramCommandPoller(config, db, registry)
+    ? new TelegramCommandPoller(config, db, registry, fetch, executionQueue)
     : undefined;
   if (commandPoller) {
     try {
@@ -215,7 +221,14 @@ async function main() {
   }
 
   console.log("Starting monitoring loop");
-  await runPollingLoop({ config, registry, notifier, db, commandPoller });
+  await runPollingLoop({
+    config,
+    registry,
+    notifier,
+    db,
+    commandPoller,
+    executionQueue,
+  });
   console.log("Monitoring loop stopped", {
     stoppedAt: new Date().toISOString(),
   });

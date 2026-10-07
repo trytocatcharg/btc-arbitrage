@@ -11,6 +11,7 @@ import { monitorTrades } from "../trading/trade-monitor.js";
 import { monitorTimeoutClosures } from "../trading/timeout-close-monitor.js";
 import { runDataRetention } from "../retention/data-retention.js";
 import { shouldSuppressSignalForActiveTrades } from "../trading/trade-guards.js";
+import type { ExecutionQueue } from "../trading/execution-queue.js";
 import { autoConfirmSignalTrade } from "../trading/open-trade-factory.js";
 import { extractInsertId } from "../db-result.js";
 
@@ -28,6 +29,7 @@ export async function runPollingLoop(input: {
   notifier: Notifier;
   db: Awaited<ReturnType<typeof getDb>>;
   commandPoller?: CommandPoller;
+  executionQueue: ExecutionQueue;
 }): Promise<void> {
   const exchangeA = input.registry.get(input.config.exchangeA);
   const exchangeB = input.registry.get(input.config.exchangeB);
@@ -183,23 +185,30 @@ export async function runPollingLoop(input: {
           id: signalId ? String(signalId) : undefined,
         });
         if (input.config.openTrade.autoConfirm) {
-          await autoConfirmSignalTrade({
-            config: input.config,
-            registry: input.registry,
-            db: input.db,
-            notifier: {
-              notifyUrgent: (text) => input.notifier.notifyUrgent(text),
-              notifyLimitTimeout: async ({ message }) => {
-                await input.notifier.notifyUrgent(message);
-              },
-            },
-            signalId: signalId ?? 0,
-            signal: {
-              symbol: signal.symbol,
-              marketType: input.config.marketType,
-              longExchange: signal.longExchange,
-              shortExchange: signal.shortExchange,
-            },
+          // Decoupled from the tick: execution runs on the shared serial
+          // queue so price polling and monitoring continue while the
+          // entry fills; the queue's per-job catch logs any failure.
+          input.executionQueue.enqueue({
+            description: `auto-confirm:signal-${signalId ?? 0}`,
+            run: () =>
+              autoConfirmSignalTrade({
+                config: input.config,
+                registry: input.registry,
+                db: input.db,
+                notifier: {
+                  notifyUrgent: (text) => input.notifier.notifyUrgent(text),
+                  notifyLimitTimeout: async ({ message }) => {
+                    await input.notifier.notifyUrgent(message);
+                  },
+                },
+                signalId: signalId ?? 0,
+                signal: {
+                  symbol: signal.symbol,
+                  marketType: input.config.marketType,
+                  longExchange: signal.longExchange,
+                  shortExchange: signal.shortExchange,
+                },
+              }),
           });
         }
       }

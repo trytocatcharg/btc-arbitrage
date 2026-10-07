@@ -28,6 +28,7 @@ import {
   normalizeTelegramChatId,
   type FetchLike,
 } from "./telegram-notifier.js";
+import type { ExecutionQueue } from "../trading/execution-queue.js";
 import { createOpenTradeService } from "../trading/open-trade-factory.js";
 import {
   applyAutoConfirm,
@@ -118,6 +119,7 @@ export class TelegramCommandPoller {
     private readonly db: Awaited<ReturnType<typeof getDb>>,
     private readonly registry: ExchangeRegistryLike,
     private readonly fetchImpl: FetchLike = fetch,
+    private readonly executionQueue: ExecutionQueue,
   ) {
     this.settingsBaseline = snapshotRuntimeSettings(config);
   }
@@ -561,28 +563,45 @@ export class TelegramCommandPoller {
             });
           });
         }
-        let confirmOutcome;
-        try {
-          confirmOutcome = await service.confirm(preview.token);
-        } catch (confirmError) {
-          const confirmMessage =
-            confirmError instanceof Error
-              ? confirmError.message
-              : "Trade execution failed";
-          if (typeof messageId === "number") {
-            await this.editMessageText(
-              messageId,
-              `❌ Trade failed: ${confirmMessage}`,
-            ).catch((error: unknown) => {
-              console.warn("Telegram failure edit failed", {
+        // Decoupled from the polling tick: the confirm (limit entry fill
+        // wait + hedge + TP/SL, 30–45 s typical) runs on the shared
+        // serial execution queue so price polling and monitoring keep
+        // ticking. Synchronous preview errors above still reach the
+        // callback catch below for the friendly toast.
+        this.executionQueue.enqueue({
+          description: `open-trade:${preview.token.slice(0, 8)}`,
+          run: async () => {
+            try {
+              const confirmOutcome = await service.confirm(preview.token);
+              await this.reportTradeOutcome(
+                preview.token,
                 messageId,
-                message: error instanceof Error ? error.message : String(error),
+                confirmOutcome,
+              );
+            } catch (confirmError) {
+              const confirmMessage =
+                confirmError instanceof Error
+                  ? confirmError.message
+                  : "Trade execution failed";
+              console.error("Open trade job failed", {
+                token: preview.token.slice(0, 8),
+                message: confirmMessage,
               });
-            });
-          }
-          throw confirmError;
-        }
-        await this.reportTradeOutcome(preview.token, messageId, confirmOutcome);
+              if (typeof messageId === "number") {
+                await this.editMessageText(
+                  messageId,
+                  `❌ Trade failed: ${confirmMessage}`,
+                ).catch((error: unknown) => {
+                  console.warn("Telegram failure edit failed", {
+                    messageId,
+                    message:
+                      error instanceof Error ? error.message : String(error),
+                  });
+                });
+              }
+            }
+          },
+        });
       } else if (data.startsWith("confirm:")) {
         /*
          * CONFIRMATION STEP DISABLED (requested 2026-09-16): trades now open
@@ -655,22 +674,46 @@ export class TelegramCommandPoller {
         // SAFETY: the payload JSON column was written by createPreview()
         // from a verified OpenTradePreview object; shape is invariant.
         const preview = row.payload as unknown as OpenTradePreview;
-        const retryOutcome = await this.openTradeService().retryEntry(preview);
-        if (retryOutcome?.outcome === "opened") {
-          // The retried limit entry filled; report the open exactly like a
-          // first-attempt confirm would.
-          await this.sendMessage(await this.buildFillSummary(token));
-        } else if (retryOutcome?.outcome === "edge_closed") {
-          await this.sendMessage(formatEdgeClosedNotice(retryOutcome));
-        } else if (retryOutcome?.outcome === "cancelled") {
-          // The repeated timeout prompt (with a fresh retry button) was
-          // already sent by notifyLimitTimeout; nothing else to report.
-        } else {
-          await this.sendMessage(
-            `❌ Retry ${token.slice(0, 8)} terminó sin un resultado ` +
-              `definido. Revisá los logs antes de asumir que abrió.`,
-          );
-        }
+        // Retry execution is decoupled from the polling tick onto the
+        // shared serial queue, exactly like the open: branch above.
+        this.executionQueue.enqueue({
+          description: `retrade:${token.slice(0, 8)}`,
+          run: async () => {
+            try {
+              const retryOutcome =
+                await this.openTradeService().retryEntry(preview);
+              if (retryOutcome?.outcome === "opened") {
+                // The retried limit entry filled; report the open exactly
+                // like a first-attempt confirm would.
+                await this.sendMessage(await this.buildFillSummary(token));
+              } else if (retryOutcome?.outcome === "edge_closed") {
+                await this.sendMessage(formatEdgeClosedNotice(retryOutcome));
+              } else if (retryOutcome?.outcome === "cancelled") {
+                // The repeated timeout prompt (with a fresh retry button)
+                // was already sent by notifyLimitTimeout; nothing else to
+                // report.
+              } else {
+                await this.sendMessage(
+                  `❌ Retry ${token.slice(0, 8)} terminó sin un resultado ` +
+                    `definido. Revisá los logs antes de asumir que abrió.`,
+                );
+              }
+            } catch (retryError) {
+              const retryMessage =
+                retryError instanceof Error
+                  ? retryError.message
+                  : "Trade execution failed";
+              console.error("Retrade job failed", {
+                token: token.slice(0, 8),
+                message: retryMessage,
+              });
+              // The retry trigger message may already carry the timeout
+              // prompt, so the failure notice goes out as a fresh message
+              // to the operator instead of an edit.
+              await this.sendMessage(`❌ Retry failed: ${retryMessage}`);
+            }
+          },
+        });
       } else if (data.startsWith("volume:")) {
         const view = data.slice("volume:".length);
         if (view === "total" || view === "prevmonth" || view === "6m") {
