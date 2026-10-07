@@ -343,13 +343,19 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
    * TP/SL order ids via GET /api/v1/user/orders/{id}. A trigger that fired
    * reports a non-zero filledQty / averagePrice; anything else (UNTRIGGERED,
    * zero-filled) is treated as not fired — undocumented statuses are never
-   * guessed. Degrades to null on 404s and endpoint failures (2026-09-29,
-   * trade #113). */
+   * guessed. When the stored ids resolve nothing (a manual close or an
+   * operator-moved trigger cancels them unfired — trade #447), falls back
+   * to private GET /api/v1/user/trades history (Arcus parity): closing
+   * trades matched by side are walked newest-first until the leg quantity
+   * is covered (exact-decimal VWAP exit price, summed fee), or the single
+   * newest trade when no quantity is known. Degrades to null on 404s and
+   * endpoint failures (2026-09-29, trade #113). */
   async resolveLegClosure(input: {
     symbol: string;
     side: "long" | "short";
     tpOrderId?: string;
     slOrderId?: string;
+    quantityBase?: string;
   }): Promise<{
     exitPriceUsd?: string;
     realizedPnlUsd?: string;
@@ -414,22 +420,154 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
           feeUsd: findDecimal(order, ["payedFee", "fee", "totalFee", "feeAmount", "execFee"]),
         });
       }
-      if (fired.length === 0) return null;
-      const result = fired[0];
-      console.log("Extended leg closure resolved", {
-        closeReason: result.closeReason,
-        exitOrderId: result.exitOrderId,
-        exitPriceUsd: result.exitPriceUsd,
-        feeUsd: result.feeUsd,
-        source: "/api/v1/user/orders/{id}",
-      });
-      return result;
+      if (fired.length > 0) {
+        const result = fired[0];
+        console.log("Extended leg closure resolved", {
+          closeReason: result.closeReason,
+          exitOrderId: result.exitOrderId,
+          exitPriceUsd: result.exitPriceUsd,
+          feeUsd: result.feeUsd,
+          source: "/api/v1/user/orders/{id}",
+        });
+        return result;
+      }
+      // Stored ids resolved nothing — a manual close or an operator-moved
+      // trigger cancels the protection orders unfired, so the exit exists
+      // ONLY in the user trades history (trade #447). Same fallback
+      // posture as the Arcus adapter; any failure here degrades to null:
+      // the historical n/a behavior stays the floor.
+      const recovered = await this.resolveClosureFromFills(input);
+      if (recovered !== null) {
+        console.log("Extended leg closure resolved from fills", {
+          closeReason: recovered.closeReason,
+          exitOrderId: recovered.exitOrderId,
+          exitPriceUsd: recovered.exitPriceUsd,
+          feeUsd: recovered.feeUsd,
+          fills: recovered.fills,
+        });
+      }
+      return recovered;
     } catch (error) {
       console.warn("Extended leg closure resolution failed; degrading to null", {
         message: error instanceof Error ? error.message : String(error),
       });
       return null;
     }
+  }
+
+  /** Fills-history fallback for resolveLegClosure: private
+   * GET /api/v1/user/trades (up to 10,000 records, newest-first per
+   * Extended's pagination model) holds the only record of a closure the
+   * stored TP/SL ids cannot explain — a manual close or an operator-moved
+   * trigger cancels the protection orders unfired, so the order-read loop
+   * above resolves nothing (trade #447). Closing trades are matched by
+   * side (a long closes with SELL, a short with BUY — Arcus convention),
+   * then walked newest-first accumulating filledQty (qty only as
+   * fallback) until the leg quantity is covered — exit price as an
+   * exact-decimal VWAP, fee summed over the accepted trades (real values
+   * only; Extended exposes no per-trade realizedPnl, so it stays
+   * undefined and the monitor derives PnL from entry/exit/qty). A partial
+   * run under 50% of the leg quantity is too speculative and yields null.
+   * Throws on unexpected shapes; the caller's try degrades that to null. */
+  private async resolveClosureFromFills(input: {
+    symbol: string;
+    side: "long" | "short";
+    quantityBase?: string;
+  }): Promise<{
+    exitPriceUsd?: string;
+    exitOrderId?: string;
+    closeReason?: "manual" | "liquidation";
+    feeUsd?: string;
+    fills: number;
+  } | null> {
+    this.requireApiKey();
+    // Market filter via the same resolution getPosition uses.
+    const market = await this.getMarket({
+      symbol: input.symbol,
+      marketType: "perpetual",
+      priceSource: "last",
+    });
+    const closingSide = input.side === "long" ? "SELL" : "BUY";
+    // The `type` query filter is deliberately NOT sent: LIQUIDATION and
+    // DELEVERAGE closes must stay visible so the closeReason can be
+    // recovered from each trade's tradeType.
+    const trades = asRecords(
+      unwrapData(
+        await this.http.get("/api/v1/user/trades", {
+          private: true,
+          query: { market: getMarketName(market), side: closingSide },
+        }),
+      ),
+    );
+    // Extended fills carry no positionEffect — the closing side IS the
+    // match (already server-side filtered above).
+    const matched = trades;
+
+    let cumulative = "0";
+    let notional = "0";
+    let feeUsd: string | undefined;
+    let sawLiquidation = false;
+    let exitOrderId: string | undefined;
+    let accepted = 0;
+    for (const trade of matched) {
+      if (
+        input.quantityBase !== undefined &&
+        compareDecimals(cumulative, input.quantityBase) >= 0
+      )
+        break;
+      const size = positiveDecimal(
+        findDecimal(trade, ["filledQty"]) ?? findDecimal(trade, ["qty"]),
+      );
+      const price = positiveDecimal(
+        findDecimal(trade, ["averagePrice"]) ?? findDecimal(trade, ["price"]),
+      );
+      // A trade without a usable size/price cannot contribute to the
+      // VWAP and is skipped wholesale — never estimated.
+      if (size === undefined || price === undefined) continue;
+      if (accepted === 0)
+        exitOrderId = optionalString(trade.orderId) ?? undefined;
+      accepted += 1;
+      cumulative = addDecimalStrings(cumulative, size);
+      notional = addDecimalStrings(notional, mulDecimalStrings(size, price));
+      // Trades expose a REAL fee field — summed as-is, never estimated.
+      const fee = findDecimal(trade, ["fee"]);
+      if (fee !== undefined) feeUsd = addDecimalStrings(feeUsd ?? "0", fee);
+      if (optionalString(trade.tradeType)?.toUpperCase() === "LIQUIDATION")
+        sawLiquidation = true;
+      // No leg quantity known: the single newest matching trade is the
+      // whole story.
+      if (input.quantityBase === undefined) break;
+    }
+    // Closing trades only — a bounded set (never the raw history).
+    logExchangeResponse({
+      exchange: "extended",
+      event: "closure_order_history_read",
+      context: {
+        symbol: input.symbol,
+        side: input.side,
+        quantityBase: input.quantityBase,
+      },
+      response: { trades: matched },
+    });
+    if (accepted === 0) return null;
+    if (
+      input.quantityBase !== undefined &&
+      compareDecimals(cumulative, input.quantityBase) < 0 &&
+      // Partial coverage is accepted only at ≥ 50% of the leg quantity;
+      // below that the reconstruction is too speculative.
+      compareDecimals(mulDecimalStrings(cumulative, "2"), input.quantityBase) <
+        0
+    )
+      return null;
+
+    const exitPriceUsd = divideScaledDecimal(notional, cumulative);
+    return {
+      exitPriceUsd,
+      exitOrderId,
+      closeReason: sawLiquidation ? "liquidation" : "manual",
+      ...(feeUsd !== undefined ? { feeUsd } : {}),
+      fills: accepted,
+    };
   }
 
   private async createOrderPayload(
@@ -887,6 +1025,86 @@ function applyBps(value: string, bps: number): string {
     remainder %= denominator;
   }
   return `${integer.toString(10)}.${fraction.replace(/0+$/, "")}`;
+}
+
+/** Exact decimal comparison via scaled BigInt math (same discipline as
+ * applyBps — no floating point). */
+function compareDecimals(a: string, b: string): number {
+  const pa = decimalParts(a);
+  const pb = decimalParts(b);
+  const left = pa.mantissa * pb.scale;
+  const right = pb.mantissa * pa.scale;
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function decimalParts(value: string): { mantissa: bigint; scale: bigint } {
+  const match = /^(-?)(\d+)(?:\.(\d+))?$/.exec(value.trim());
+  if (!match) throw new Error(`Expected a decimal string, got ${value}`);
+  const mantissa = BigInt(
+    `${match[1] === "-" ? "-" : ""}${match[2]}${match[3] ?? ""}`,
+  );
+  return { mantissa, scale: 10n ** BigInt((match[3] ?? "").length) };
+}
+
+/** Exact decimal addition of two string operands via scaled BigInt parts —
+ * no floating point, same discipline as applyBps. */
+function addDecimalStrings(a: string, b: string): string {
+  const pa = decimalParts(a);
+  const pb = decimalParts(b);
+  return formatScaledDecimal(
+    pa.mantissa * pb.scale + pb.mantissa * pa.scale,
+    pa.scale * pb.scale,
+  );
+}
+
+/** Exact decimal product of two string operands (scaled BigInt). */
+function mulDecimalStrings(a: string, b: string): string {
+  const pa = decimalParts(a);
+  const pb = decimalParts(b);
+  return formatScaledDecimal(pa.mantissa * pb.mantissa, pa.scale * pb.scale);
+}
+
+/** Exact decimal division (numerator ÷ denominator) with long division —
+ * the VWAP over the accepted closing trades. No floating point; a zero
+ * denominator throws (cumulative is only ever positive here). */
+function divideScaledDecimal(numerator: string, denominator: string): string {
+  const n = decimalParts(numerator);
+  const d = decimalParts(denominator);
+  if (d.mantissa === 0n) throw new Error("division by zero decimal");
+  const negative = (n.mantissa < 0n) !== (d.mantissa < 0n);
+  let remainder = (n.mantissa < 0n ? -n.mantissa : n.mantissa) * d.scale;
+  const divisor = (d.mantissa < 0n ? -d.mantissa : d.mantissa) * n.scale;
+  const integer = remainder / divisor;
+  remainder %= divisor;
+  if (remainder === 0n)
+    return negative ? `-${integer.toString(10)}` : integer.toString(10);
+  let fraction = "";
+  while (remainder !== 0n && fraction.length < 40) {
+    remainder *= 10n;
+    fraction += (remainder / divisor).toString(10);
+    remainder %= divisor;
+  }
+  return negative
+    ? `-${integer.toString(10)}.${fraction.replace(/0+$/, "")}`
+    : `${integer.toString(10)}.${fraction.replace(/0+$/, "")}`;
+}
+
+/** Normalize scaled BigInt parts back into a trimmed decimal string
+ * (trailing zeros stripped; negatives preserved). */
+function formatScaledDecimal(mantissa: bigint, scale: bigint): string {
+  if (mantissa === 0n) return "0";
+  const negative = mantissa < 0n;
+  const abs = negative ? -mantissa : mantissa;
+  const integer = abs / scale;
+  const remainder = abs % scale;
+  if (remainder === 0n)
+    return negative ? `-${integer.toString(10)}` : integer.toString(10);
+  const width = scale.toString(10).length - 1;
+  const fraction = remainder
+    .toString(10)
+    .padStart(width, "0")
+    .replace(/0+$/, "");
+  return `${negative ? "-" : ""}${integer.toString(10)}.${fraction}`;
 }
 
 function fail(message: string): never {

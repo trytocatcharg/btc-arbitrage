@@ -105,6 +105,12 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
   private feeScheduleCache:
     | { value: ArcusFeeSchedule; expiresAt: number }
     | undefined;
+  /** Memoized per-orderId fee recovery for getExecutionOrder (see
+   * resolveOrderFeeCached): a filled order's fee never changes, so the
+   * hedge re-poll loop re-reads the cache instead of /v1/fills. A null
+   * entry means "no fill of this order found" — also cached, since the
+   * venue lists fills before the order reads FILLED. */
+  private readonly orderFeeCache = new Map<string, string | null>();
 
   constructor(
     private readonly config: ArcusConfig,
@@ -369,6 +375,26 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
         context: { orderId, status: mapped.status },
         response: record,
       });
+    }
+    if (mapped.status === "filled" && mapped.feeUsd === undefined) {
+      // Arcus order records carry no fee field (docs/exchanges/arcus.md
+      // "Execution facts") — recover the REAL per-fill fee from the
+      // public fills history, matched strictly by orderId (trade #447:
+      // the market-hedge entry fee stayed unknown without this). The
+      // fills fetch filters by market display name, which the order
+      // record carries; the bot is BTC-only, so a missing name falls
+      // back to the default market. Memoized per orderId so the hedge
+      // re-poll loop does not hammer /v1/fills. Real value only — on any
+      // failure the fee stays absent, never estimated.
+      try {
+        const marketName =
+          optionalString(record.marketDisplayName) ??
+          arcusMarketName(DEFAULT_ARCUS_SYMBOL);
+        const feeUsd = await this.resolveOrderFeeCached(marketName, orderId);
+        if (feeUsd !== undefined) mapped.feeUsd = feeUsd;
+      } catch {
+        // Best-effort; the order record stands alone without a fee.
+      }
     }
     return mapped;
   }
@@ -689,7 +715,18 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
     // display name the fills endpoint filters on; getMarket additionally
     // validates the market exists (and warms the TTL cache).
     await this.getMarket(symbol);
-    const marketName = arcusMarketName(symbol);
+    return this.fetchFillsByMarket(arcusMarketName(symbol));
+  }
+
+  /** Fetch the public fills history filtered by an explicit venue market
+   * display name (e.g. "BTC-USD"). Used by paths that only know the
+   * order record's `marketDisplayName` (the getExecutionOrder fee
+   * recovery) and therefore skip the getMarket validation/warm-up of the
+   * symbol-based fetchFills. */
+  private async fetchFillsByMarket(
+    marketName: string,
+  ): Promise<Record<string, unknown>[]> {
+    this.requireAccountAddress();
     const payload = requiredRecord(
       await this.http.get("/v1/fills", {
         address: this.config.accountAddress!,
@@ -715,6 +752,44 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
     orderId: string,
   ): Promise<{ feeUsd?: string; realizedPnlUsd?: string } | null> {
     const fills = await this.fetchFills(symbol);
+    return this.sumFillsByOrderId(fills, orderId);
+  }
+
+  /** Memoized fee recovery for a single filled order, used by
+   * getExecutionOrder (order records carry no fee field). The lookup is
+   * matched strictly by orderId against the public fills history; only
+   * the fee is consumed — realized PnL stays venue-derived elsewhere.
+   * Both a resolved fee and a "no fill found" outcome are cached per
+   * orderId (a filled order's fee never changes, and the venue lists
+   * fills before the order reads FILLED), so the hedge re-poll loop (up
+   * to 6 re-reads) hits /v1/fills at most once per order. Endpoint
+   * failures are NOT cached, so a later poll can retry. Real value only;
+   * undefined on any failure — never estimated. */
+  private async resolveOrderFeeCached(
+    marketName: string,
+    orderId: string,
+  ): Promise<string | undefined> {
+    if (this.orderFeeCache.has(orderId))
+      return this.orderFeeCache.get(orderId) ?? undefined;
+    let feeUsd: string | undefined;
+    try {
+      const fills = await this.fetchFillsByMarket(marketName);
+      feeUsd = this.sumFillsByOrderId(fills, orderId)?.feeUsd;
+    } catch {
+      return undefined;
+    }
+    this.orderFeeCache.set(orderId, feeUsd ?? null);
+    return feeUsd;
+  }
+
+  /** Decimal-sum core shared by the exit-order recovery paths: fills of
+   * the given orderId contribute their REAL per-fill fee (a maker rebate
+   * arrives negative and is preserved as-is) and closedPnl. Returns null
+   * when no fill of the order is present. */
+  private sumFillsByOrderId(
+    fills: Record<string, unknown>[],
+    orderId: string,
+  ): { feeUsd?: string; realizedPnlUsd?: string } | null {
     let feeUsd: string | undefined;
     let realizedPnlUsd: string | undefined;
     let matched = 0;
