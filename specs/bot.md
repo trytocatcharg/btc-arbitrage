@@ -144,12 +144,12 @@ When confirmed:
     if any trigger lands on the wrong side of its leg's fill.
     
     **Disabled exits (since 2026-09-21)**: the fill-time edge band
-    (`EDGE_BAND_ENABLED = false` in `open-trade.ts`) and the time-stop close
-    (`BOT_TIME_STOP_ENABLED` env gate in `timeout-close-monitor.ts`) are
-    disabled. The edge evaluation still runs and logs for diagnostics but never
-    closes. When one leg's TP/SL fills, the sibling stays open: the position
-    monitor marks the trade `unhedged` and notifies urgently. The
-    stale-`closing` recovery sweep stays active regardless.
+    (`EDGE_BAND_ENABLED = false` in `open-trade.ts`) is disabled. The edge
+    evaluation still runs and logs for diagnostics but never closes.
+    Exits are exchange-side TP/SL only. When one leg's TP/SL fills, the
+    sibling stays open: the position monitor marks the trade `unhedged`
+    and notifies urgently. The stale-`closing` recovery sweep stays
+    active regardless (`close-recovery-monitor.ts`).
     
     The execution setup (leverage set on RISEx, order-signing WASM init on
     Extended) runs **once at bot startup**, not per trade; per-trade preflight and
@@ -220,7 +220,7 @@ Implemented live capabilities include:
 
 Implemented in:
 
-- `apps/bot/src/trading/timeout-close-monitor.ts` (time-stop + recovery sweep)
+- `apps/bot/src/trading/close-recovery-monitor.ts` (stale-`closing` recovery sweep)
 - `apps/bot/src/trading/trade-close.ts`
 - `apps/bot/src/trading/open-trade.ts` (per-leg anchoring + fill-time edge band)
 
@@ -235,9 +235,6 @@ spread-USD comparisons on open trades (`OPEN_TRADE_SPREAD_TP_USD` /
   RISEx triggers on MARK price; Extended stays LAST-triggered. A 100 bps
   tolerance + cross-symmetry assertion runs before placement; a breach fails
   loudly (rollback + urgent notify) instead of placing mis-anchored orders.
-- **Time-stop** (orthogonal): a trade open for
-  `OPEN_TRADE_SPREAD_EXIT_TIMEOUT_MINUTES` (default 30) minutes is closed
-  reduce-only with reason `spread_timeout`, regardless of spread moves.
 - **Stale-`closing` recovery sweep**: a trade stuck in `closing` is re-closed
   (`close_recovery`).
 - **Fill-time edge band**: right after both fills, the trade is kept iff

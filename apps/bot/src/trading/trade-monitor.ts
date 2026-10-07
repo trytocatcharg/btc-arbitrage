@@ -1,6 +1,5 @@
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import {
-  activeTradeStatuses,
   tradeLegs,
   trades,
   type getDb,
@@ -8,7 +7,7 @@ import {
 import type { ExchangeAdapter } from "@btc-arbitrage/exchange-core";
 import { formatDecimal, parseDecimal } from "@btc-arbitrage/domain";
 import { shouldNotifyLegClosure } from "./trade-guards.js";
-import { formatPnlColored, formatUsdOrNa } from "./trade-close.js";
+import { formatPnlColored } from "./trade-close.js";
 
 export async function monitorTrades(input: {
   db: Awaited<ReturnType<typeof getDb>>;
@@ -21,7 +20,16 @@ export async function monitorTrades(input: {
     .innerJoin(trades, eq(tradeLegs.tradeId, trades.id))
     .where(
       and(
-        inArray(trades.status, [...activeTradeStatuses]),
+        // F1 (trade-execution-queue Step 2, safety re-review 2026-10-07):
+        // only status "open" trades are monitored. The hedge leg row
+        // transitions to 'open' DURING 'hedging' while the maker limit
+        // still rests, and Extended getPosition can briefly return null
+        // post-fill (read lag); monitoring in-array statuses could then
+        // mark that leg 'closed' + closureNotifiedAt irreversibly and
+        // permanently unmonitor a leg that is actually open. Venue TP/SL
+        // only exist from 'protecting'/'open', so no real closure is
+        // missed by waiting for 'open'.
+        eq(trades.status, "open"),
         inArray(tradeLegs.status, ["open", "unhedged"]),
         isNull(tradeLegs.closureNotifiedAt),
       ),
@@ -227,6 +235,8 @@ export async function monitorTrades(input: {
             exitPriceUsd: sibling.exitPriceUsd,
             realizedPnlUsd: sibling.realizedPnlUsd,
             quantityBase: sibling.quantityBase,
+            entryFeeUsd: sibling.entryFeeUsd,
+            exitFeeUsd: sibling.exitFeeUsd,
           }
         : null;
       const message = buildLegClosureMessage({
@@ -238,6 +248,8 @@ export async function monitorTrades(input: {
           exitPriceUsd: exitPriceUsd ?? null,
           realizedPnlUsd: realizedPnlUsd ?? null,
           quantityBase: row.trade_legs.quantityBase,
+          entryFeeUsd: row.trade_legs.entryFeeUsd,
+          exitFeeUsd: exitFeeUsd ?? null,
         },
         closeReason: closeReason !== "unknown" ? closeReason : null,
         sibling: siblingSnapshot,
@@ -277,30 +289,57 @@ interface LegClosureSnapshot {
   exitPriceUsd: string | null;
   realizedPnlUsd: string | null;
   quantityBase: string | null;
+  entryFeeUsd: string | null;
+  exitFeeUsd: string | null;
 }
 
-/** Exchange-agnostic leg PnL: the exchange-reported realized value when
- * present, else derived from entry/exit/qty (same convention as
- * trade-close). */
-function deriveLegPnlUsd(leg: LegClosureSnapshot): number | null {
+/** Sum of the leg's KNOWN fees (entry + exit); null when none are known.
+ * Fees are never estimated. */
+function knownLegFeesUsd(leg: LegClosureSnapshot): number | null {
+  let feesUsd = 0;
+  let seen = false;
+  for (const fee of [leg.entryFeeUsd, leg.exitFeeUsd]) {
+    if (fee == null) continue;
+    const parsed = Number(fee);
+    if (!Number.isFinite(parsed)) continue;
+    feesUsd += parsed;
+    seen = true;
+  }
+  return seen ? feesUsd : null;
+}
+
+/** Exchange-agnostic GROSS leg PnL under the "always gross" convention
+ * (operator decision 2026-10-07): realized columns stay fee-free and the
+ * net is always realized − fees. Computed from entry/exit/qty — never
+ * from the venue-reported realizedPnlUsd, whose fee convention varies by
+ * exchange (Arcus nets the exit fee into it; Extended reports none at
+ * all — trade #481: bot said -4.01, Extended's realized showed -4.17).
+ * The venue value is only a fallback when the exit price is unknown. */
+function deriveLegGrossPnlUsd(leg: LegClosureSnapshot): number | null {
+  const entry = leg.entryPriceUsd != null ? Number(leg.entryPriceUsd) : null;
+  const exit = leg.exitPriceUsd != null ? Number(leg.exitPriceUsd) : null;
+  const qty = leg.quantityBase != null ? Number(leg.quantityBase) : null;
+  if (entry != null && exit != null && qty != null)
+    return (exit - entry) * qty * (leg.side === "long" ? 1 : -1);
   if (leg.realizedPnlUsd != null) {
     const parsed = Number(leg.realizedPnlUsd);
     if (Number.isFinite(parsed)) return parsed;
   }
-  const entry = leg.entryPriceUsd != null ? Number(leg.entryPriceUsd) : null;
-  const exit = leg.exitPriceUsd != null ? Number(leg.exitPriceUsd) : null;
-  const qty = leg.quantityBase != null ? Number(leg.quantityBase) : null;
-  if (entry == null || exit == null || qty == null) return null;
-  const sideMul = leg.side === "long" ? 1 : -1;
-  return (exit - entry) * qty * sideMul;
+  return null;
 }
 
-function formatLegLine(leg: LegClosureSnapshot, pnl: number | null): string {
-  return (
-    `${leg.side.toUpperCase()} ${leg.exchangeId}: ` +
-    `${formatUsdOrNa(leg.entryPriceUsd)} → ${formatUsdOrNa(leg.exitPriceUsd)} ` +
-    `· PnL ${formatPnlColored(pnl)}`
-  );
+/** One leg line for the closure notice: gross PnL, known fees, and net
+ * (gross − fees). No entry/exit prices (operator request 2026-10-07).
+ * The fees/net segments appear only when at least one fee is known. */
+function formatLegLine(leg: LegClosureSnapshot): string {
+  const gross = deriveLegGrossPnlUsd(leg);
+  const fees = knownLegFeesUsd(leg);
+  const parts = [`PnL ${formatPnlColored(gross)}`];
+  if (gross != null && fees != null) {
+    parts.push(`fees $${fees.toFixed(2)}`);
+    parts.push(`neto ${formatPnlColored(gross - fees)}`);
+  }
+  return `${leg.side.toUpperCase()} ${leg.exchangeId}: ` + parts.join(" · ");
 }
 
 /** Telegram notice for a detected leg closure: per-leg entry → exit with
@@ -313,9 +352,6 @@ function buildLegClosureMessage(input: {
   sibling: LegClosureSnapshot | null;
   siblingClosed: boolean;
 }): string {
-  const closedPnl = deriveLegPnlUsd(input.closedLeg);
-  const siblingPnl =
-    input.sibling != null ? deriveLegPnlUsd(input.sibling) : null;
   const lines: string[] = [
     input.siblingClosed
       ? `✅ Trade #${input.tradeId}: ambas patas cerradas`
@@ -323,14 +359,26 @@ function buildLegClosureMessage(input: {
   ];
   if (input.closeReason != null && input.closeReason !== "unknown")
     lines.push(`Motivo: ${input.closeReason}`);
-  lines.push(formatLegLine(input.closedLeg, closedPnl));
+  lines.push(formatLegLine(input.closedLeg));
   if (input.sibling != null) {
     if (input.siblingClosed) {
-      lines.push(formatLegLine(input.sibling, siblingPnl));
+      lines.push(formatLegLine(input.sibling));
       lines.push("———————————————");
-      const total =
-        closedPnl != null && siblingPnl != null ? closedPnl + siblingPnl : null;
-      lines.push(`PnL total: ${formatPnlColored(total)}`);
+      const grossA = deriveLegGrossPnlUsd(input.closedLeg);
+      const grossB = deriveLegGrossPnlUsd(input.sibling);
+      const totalGross =
+        grossA != null && grossB != null ? grossA + grossB : null;
+      const feeA = knownLegFeesUsd(input.closedLeg);
+      const feeB = knownLegFeesUsd(input.sibling);
+      const totalFees =
+        feeA != null || feeB != null ? (feeA ?? 0) + (feeB ?? 0) : null;
+      if (totalGross != null && totalFees != null) {
+        lines.push(
+          `PnL total: ${formatPnlColored(totalGross)} · fees $${totalFees.toFixed(2)} · neto ${formatPnlColored(totalGross - totalFees)}`,
+        );
+      } else {
+        lines.push(`PnL total: ${formatPnlColored(totalGross)}`);
+      }
     } else {
       lines.push(
         `⚠️ La pata restante sigue abierta: ` +

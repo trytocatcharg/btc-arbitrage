@@ -43,11 +43,6 @@ export interface BotConfig {
     residualDeltaToleranceBase: string;
     takeProfitPercent: string;
     stopLossPercent: string;
-    /** Exit an open trade after this many minutes regardless of spread
-     * (time-stop for a convergence thesis that stopped converging).
-     * Env var OPEN_TRADE_SPREAD_EXIT_TIMEOUT_MINUTES unchanged (kept per
-     * design D5 to avoid breaking-churn). */
-    openTradeCloseTimeoutMinutes: number;
     /** OPEN_TRADE_AUTO_CONFIRM: open a trade immediately when a signal is
      * created, WITHOUT Telegram operator confirmation. Default false —
      * enabling this turns the bot into an auto-trader; the startup log
@@ -277,10 +272,6 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   if (Number(openTradeStopLossPercent) >= 100) {
     throw new Error("OPEN_TRADE_STOP_LOSS_PERCENT must be less than 100");
   }
-  const openTradeCloseTimeoutMinutes = parsePositiveInteger(
-    env.OPEN_TRADE_SPREAD_EXIT_TIMEOUT_MINUTES ?? "30",
-    "OPEN_TRADE_SPREAD_EXIT_TIMEOUT_MINUTES",
-  );
   const minProfitUsd = parseNonNegativeDecimalString(
     env.OPEN_TRADE_MIN_PROFIT_USD ?? "0.05",
     "OPEN_TRADE_MIN_PROFIT_USD",
@@ -362,7 +353,6 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       ),
       takeProfitPercent: openTradeTakeProfitPercent,
       stopLossPercent: openTradeStopLossPercent,
-      openTradeCloseTimeoutMinutes,
       minProfitUsd,
       maxLossUsd,
       slippageBps,

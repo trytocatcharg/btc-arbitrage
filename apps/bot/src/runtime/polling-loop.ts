@@ -8,7 +8,7 @@ import type { getDb } from "@btc-arbitrage/db";
 import { signals, activeTradeStatuses, trades } from "@btc-arbitrage/db";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { monitorTrades } from "../trading/trade-monitor.js";
-import { monitorTimeoutClosures } from "../trading/timeout-close-monitor.js";
+import { recoverStaleClosingTrades } from "../trading/close-recovery-monitor.js";
 import { runDataRetention } from "../retention/data-retention.js";
 import { shouldSuppressSignalForActiveTrades } from "../trading/trade-guards.js";
 import type { ExecutionQueue } from "../trading/execution-queue.js";
@@ -45,6 +45,86 @@ export async function runPollingLoop(input: {
     minPriceDiffUsd: input.config.minPriceDiffUsd,
   });
 
+  // Step 2 (trade-execution-queue): the trade monitors run on their own
+  // wall-clock interval instead of inside the signal tick, so a slow
+  // monitor pass can no longer delay price polling and signal evaluation.
+  // The cadence reuses the already-loaded PRICE_POLL_INTERVAL_MS config
+  // value — no new env keys. The SAME config object is passed by
+  // reference everywhere, so the poller's /config runtime overrides keep
+  // applying to both loops.
+  let pass = 0;
+  let monitorPassInFlight = false;
+  const monitorTimer = setInterval(() => {
+    // F3: never start a new pass once shutdown was requested; the timer
+    // itself is cleared after the signal loop exits.
+    if (isShuttingDown()) return;
+    // F2: re-entrancy guard mirroring ExecutionQueue.draining — check and
+    // set synchronously so an interval tick can never overlap an
+    // in-flight pass; reset in the finally of runMonitorPass().
+    if (monitorPassInFlight) {
+      console.warn("Monitor pass skipped: previous pass still in flight", {
+        pass,
+      });
+      return;
+    }
+    monitorPassInFlight = true;
+    // Floating promise guarded by the in-flight flag and by the catches
+    // inside runMonitorPass, so there is no unhandled-rejection path.
+    void runMonitorPass();
+  }, input.config.pricePollIntervalMs);
+
+  async function runMonitorPass(): Promise<void> {
+    pass += 1;
+    const passStartedAt = new Date();
+    console.log("Monitor pass started", {
+      pass,
+      startedAt: passStartedAt.toISOString(),
+    });
+    try {
+      try {
+        await monitorTrades({
+          db: input.db,
+          registry: input.registry,
+          notify: (text) => input.notifier.notifyUrgent(text),
+        });
+      } catch (error) {
+        console.error(
+          "Trade monitoring failed",
+          error instanceof Error
+            ? { pass, message: error.message }
+            : { pass, error },
+        );
+      }
+      try {
+        await recoverStaleClosingTrades({
+          db: input.db,
+          registry: input.registry,
+          notifier: input.notifier,
+        });
+      } catch (error) {
+        console.error(
+          "Stale-close recovery failed",
+          error instanceof Error
+            ? { pass, message: error.message }
+            : { pass, error },
+        );
+      }
+      console.log("Monitor pass completed", {
+        pass,
+        durationMs: Date.now() - passStartedAt.getTime(),
+      });
+    } catch (error) {
+      console.error(
+        "Monitor pass failed",
+        error instanceof Error
+          ? { pass, message: error.message }
+          : { pass, error },
+      );
+    } finally {
+      monitorPassInFlight = false;
+    }
+  }
+
   while (!isShuttingDown()) {
     tick += 1;
     const tickStartedAt = new Date();
@@ -64,11 +144,6 @@ export async function runPollingLoop(input: {
             : { tick, error },
         );
       }
-      await monitorTrades({
-        db: input.db,
-        registry: input.registry,
-        notify: (text) => input.notifier.notifyUrgent(text),
-      });
       try {
         await runDataRetention(input.db, input.config);
       } catch (error) {
@@ -101,22 +176,6 @@ export async function runPollingLoop(input: {
         priceSource: input.config.priceSource,
       });
 
-      try {
-        await monitorTimeoutClosures({
-          db: input.db,
-          registry: input.registry,
-          notifier: input.notifier,
-          timeoutMinutes: input.config.openTrade.openTradeCloseTimeoutMinutes,
-        });
-      } catch (error) {
-        console.error(
-          "Timeout close monitoring failed",
-          error instanceof Error
-            ? { tick, message: error.message }
-            : { tick, error },
-        );
-      }
-
       // SignalEngine is stateless; constructing it per tick lets runtime
       // overrides of minPriceDiffUsd / leverage apply without a restart.
       const signalEngine = new SignalEngine({
@@ -143,6 +202,11 @@ export async function runPollingLoop(input: {
           .from(trades)
           .where(inArray(trades.status, [...activeTradeStatuses]))
           .orderBy(desc(trades.id));
+        // F4: the suppression branch must NOT skip the tick tail — every
+        // path reaches the botRunOnce break check and the sleep below
+        // (the old `continue` hot-spun the loop while a trade was
+        // active). The suppression query and check-then-insert semantics
+        // are unchanged.
         if (
           shouldSuppressSignalForActiveTrades(active.map((trade) => trade.id))
         ) {
@@ -150,66 +214,66 @@ export async function runPollingLoop(input: {
             "Signal suppressed because an active or unhedged trade exists",
             { tick, activeTradeId: active[0]?.id },
           );
-          continue;
-        }
-        const signalRow = {
-          spreadId: signal.spreadId ? Number(signal.spreadId) : null,
-          longExchange: signal.longExchange,
-          shortExchange: signal.shortExchange,
-          source: signal.priceSource,
-          leverage: signal.leverage,
-          thresholdUsd: signal.thresholdUsd,
-          observedDiffUsd: signal.absoluteDiffUsd,
-          reason: signal.reason,
-          status: "notified",
-          createdAt: signal.createdAt,
-        };
-        const created = await input.db.insert(signals).values(signalRow);
-        const signalId = await resolveInsertedSignalId(
-          input.db,
-          created,
-          signalRow,
-        );
-        console.warn("Trading signal created", {
-          tick,
-          signalId,
-          symbol: signal.symbol,
-          longExchange: signal.longExchange,
-          shortExchange: signal.shortExchange,
-          absoluteDiffUsd: signal.absoluteDiffUsd,
-          thresholdUsd: signal.thresholdUsd,
-          mode: input.config.botExecutionMode,
-        });
-        await input.notifier.notifySignal({
-          ...signal,
-          id: signalId ? String(signalId) : undefined,
-        });
-        if (input.config.openTrade.autoConfirm) {
-          // Decoupled from the tick: execution runs on the shared serial
-          // queue so price polling and monitoring continue while the
-          // entry fills; the queue's per-job catch logs any failure.
-          input.executionQueue.enqueue({
-            description: `auto-confirm:signal-${signalId ?? 0}`,
-            run: () =>
-              autoConfirmSignalTrade({
-                config: input.config,
-                registry: input.registry,
-                db: input.db,
-                notifier: {
-                  notifyUrgent: (text) => input.notifier.notifyUrgent(text),
-                  notifyLimitTimeout: async ({ message }) => {
-                    await input.notifier.notifyUrgent(message);
-                  },
-                },
-                signalId: signalId ?? 0,
-                signal: {
-                  symbol: signal.symbol,
-                  marketType: input.config.marketType,
-                  longExchange: signal.longExchange,
-                  shortExchange: signal.shortExchange,
-                },
-              }),
+        } else {
+          const signalRow = {
+            spreadId: signal.spreadId ? Number(signal.spreadId) : null,
+            longExchange: signal.longExchange,
+            shortExchange: signal.shortExchange,
+            source: signal.priceSource,
+            leverage: signal.leverage,
+            thresholdUsd: signal.thresholdUsd,
+            observedDiffUsd: signal.absoluteDiffUsd,
+            reason: signal.reason,
+            status: "notified",
+            createdAt: signal.createdAt,
+          };
+          const created = await input.db.insert(signals).values(signalRow);
+          const signalId = await resolveInsertedSignalId(
+            input.db,
+            created,
+            signalRow,
+          );
+          console.warn("Trading signal created", {
+            tick,
+            signalId,
+            symbol: signal.symbol,
+            longExchange: signal.longExchange,
+            shortExchange: signal.shortExchange,
+            absoluteDiffUsd: signal.absoluteDiffUsd,
+            thresholdUsd: signal.thresholdUsd,
+            mode: input.config.botExecutionMode,
           });
+          await input.notifier.notifySignal({
+            ...signal,
+            id: signalId ? String(signalId) : undefined,
+          });
+          if (input.config.openTrade.autoConfirm) {
+            // Decoupled from the tick: execution runs on the shared serial
+            // queue so price polling and monitoring continue while the
+            // entry fills; the queue's per-job catch logs any failure.
+            input.executionQueue.enqueue({
+              description: `auto-confirm:signal-${signalId ?? 0}`,
+              run: () =>
+                autoConfirmSignalTrade({
+                  config: input.config,
+                  registry: input.registry,
+                  db: input.db,
+                  notifier: {
+                    notifyUrgent: (text) => input.notifier.notifyUrgent(text),
+                    notifyLimitTimeout: async ({ message }) => {
+                      await input.notifier.notifyUrgent(message);
+                    },
+                  },
+                  signalId: signalId ?? 0,
+                  signal: {
+                    symbol: signal.symbol,
+                    marketType: input.config.marketType,
+                    longExchange: signal.longExchange,
+                    shortExchange: signal.shortExchange,
+                  },
+                }),
+            });
+          }
         }
       }
       console.log("Monitoring tick completed", {
@@ -227,6 +291,13 @@ export async function runPollingLoop(input: {
     if (input.config.botRunOnce) break;
     await sleep(input.config.pricePollIntervalMs);
   }
+  // F3: stop the monitor timer once the signal loop exits. Without this
+  // the interval keeps the Node event loop alive and the process would
+  // never exit after SIGINT/SIGTERM. An in-flight pass is left to finish
+  // (it is bounded by the existing exchange timeouts); the module-local
+  // process.once SIGINT/SIGTERM handlers stay the single shutdown source
+  // of truth.
+  clearInterval(monitorTimer);
 }
 
 async function resolveInsertedSignalId(

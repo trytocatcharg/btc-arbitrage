@@ -53,9 +53,9 @@ RISEx TP/SL orders SHALL use `MARK_PRICE` trigger price type (`stop_price_option
 - **WHEN** a TP or SL order is submitted to Extended
 - **THEN** the order uses `triggerPriceType: "LAST"` with the execution price bounded 150 bps past the trigger (`MARKET_CROSSING_BUFFER_BPS`)
 
-### Requirement: Removal of spread-USD exits with time-stop and recovery sweep retained
+### Requirement: Removal of spread-USD exits with recovery sweep retained
 
-The system SHALL remove all spread-USD exit comparisons (close-both-legs when live spread improves/degrades on captured spread by `OPEN_TRADE_SPREAD_TP_USD` / `OPEN_TRADE_SPREAD_SL_USD`). Config loading SHALL reject `OPEN_TRADE_SPREAD_TP_USD` and `OPEN_TRADE_SPREAD_SL_USD` as unknown variables (fail fast). The system SHALL retain the orthogonal 30-minute time-stop close (reason `spread_timeout`, config `OPEN_TRADE_SPREAD_EXIT_TIMEOUT_MINUTES` kept with default `30`) and the stale-`closing` recovery sweep in the monitor.
+The system SHALL remove all spread-USD exit comparisons (close-both-legs when live spread improves/degrades on captured spread by `OPEN_TRADE_SPREAD_TP_USD` / `OPEN_TRADE_SPREAD_SL_USD`). Config loading SHALL reject `OPEN_TRADE_SPREAD_TP_USD` and `OPEN_TRADE_SPREAD_SL_USD` as unknown variables (fail fast). Exits are exchange-side TP/SL only: the time-stop close was deleted, including its config variable and env gate. The system SHALL retain the stale-`closing` recovery sweep (`close-recovery-monitor.ts`).
 
 #### Scenario: Spread-USD env vars rejected at config load
 
@@ -64,13 +64,8 @@ The system SHALL remove all spread-USD exit comparisons (close-both-legs when li
 
 #### Scenario: No spread-USD comparisons run on open trades
 
-- **WHEN** a trade is open and the spread moves favorably or adversely by any USD amount before the 30-minute timeout
-- **THEN** no spread-USD close is triggered (time-stop and stale-`closing` recovery sweep remain active)
-
-#### Scenario: Time-stop still closes open trades after 30 minutes
-
-- **WHEN** an open trade has been open for `OPEN_TRADE_SPREAD_EXIT_TIMEOUT_MINUTES` (default 30) minutes
-- **THEN** both legs are closed reduce-only with reason `spread_timeout`
+- **WHEN** a trade is open and the spread moves favorably or adversely by any USD amount
+- **THEN** no spread-USD close is triggered (the stale-`closing` recovery sweep remains active)
 
 ### Requirement: Fee-aware fill-time edge band with immediate abort
 

@@ -7,7 +7,6 @@ import type { PreviewStore, TradeLegUpdate } from "./open-trade.js";
 export type SpreadCloseReason =
   | "spread_tp"
   | "spread_sl"
-  | "spread_timeout"
   | "edge_below_cost"
   | "close_recovery";
 
@@ -52,12 +51,6 @@ export function formatPnlColored(value: number | null): string {
   return value >= 0
     ? `🟢 +$${value.toFixed(2)}`
     : `🔴 -$${Math.abs(value).toFixed(2)}`;
-}
-
-export function formatUsdOrNa(value: string | null | undefined): string {
-  if (value == null) return "n/a";
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? `$${parsed.toFixed(2)}` : "n/a";
 }
 
 /** Bot-initiated close of both legs: cancels the venue TP/SL backstop orders,
@@ -340,48 +333,10 @@ export async function closeTradeBothLegs(
     farmedVolumeUsd == null
       ? ""
       : ` Farmed volume (cumulative): $${parseDecimal(farmedVolumeUsd).toFixed(2)}.`;
-  if (input.reason === "spread_timeout") {
-    // Time-stop closes get a human-readable summary instead of the dense
-    // outcome dump: per-leg entry → exit with colored PnL and the combined
-    // total, so the operator can scan the result at a glance.
-    const lines: string[] = [
-      `⏱ Time-stop: trade ${label} cerrado`,
-      `${input.symbol} · long ${input.longExchange} / short ${input.shortExchange}`,
-    ];
-    for (const leg of [...legUpdates].sort((a, b) =>
-      a.side === b.side ? 0 : a.side === "long" ? -1 : 1,
-    )) {
-      lines.push(
-        `${leg.side.toUpperCase()} ${leg.exchangeId}: ` +
-          `${formatUsdOrNa(leg.entryPriceUsd)} → ${formatUsdOrNa(leg.exitPriceUsd)} ` +
-          `· PnL ${formatPnlColored(
-            leg.realizedPnlUsd == null
-              ? null
-              : parseDecimal(leg.realizedPnlUsd),
-          )}`,
-      );
-    }
-    lines.push("———————————————");
-    lines.push(
-      `PnL total: ${formatPnlColored(realizedKnown ? totalRealizedUsd : null)}`,
-    );
-    const residualLegs = legUpdates.filter((leg) => leg.status !== "closed");
-    if (residualLegs.length > 0) {
-      lines.push(
-        ...residualLegs.map(
-          (leg) =>
-            `⚠️ ${leg.exchangeId} (${leg.side}) quedó ${leg.status}; ` +
-            `el monitor de posición sigue vigilándola.`,
-        ),
-      );
-    }
-    await input.notify(lines.join("\n"));
-  } else {
-    await input.notify(
-      `📕 Trade ${label} closed (${input.reason}): ${outcomes.join("; ")}. ` +
-        `Realized PnL: ${pnlText}.${farmedText}`,
-    );
-  }
+  await input.notify(
+    `📕 Trade ${label} closed (${input.reason}): ${outcomes.join("; ")}. ` +
+      `Realized PnL: ${pnlText}.${farmedText}`,
+  );
   return {
     realizedPnlUsd: realizedKnown ? formatDecimal(totalRealizedUsd, 8) : null,
   };

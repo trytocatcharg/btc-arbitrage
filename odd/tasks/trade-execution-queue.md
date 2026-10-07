@@ -29,17 +29,87 @@ between.
 
 ## Safety analysis (verified against code, 2026-10-06)
 
-- `monitorTrades` (`apps/bot/src/trading/trade-monitor.ts`) only acts on
-  trades in `activeTradeStatuses` with legs `open`/`unhedged`. In-flight
-  executions sit in `executing_limit`/`hedging`/`protecting`; legs become
-  `open` only after the entry fill, when the position already exists
-  (so `positionClosed=false` and the monitor skips). No interleave hazard.
 - `monitorTimeoutClosures` only acts on trades with status `"open"`.
   No interleave hazard.
 - The queue MUST be serial (one job at a time, FIFO): two rapid `open:`
   taps must never overlap executions. Ordering is preserved.
 - Crash behavior unchanged: a restart mid-execution orphans the same DB
   states as today; the stale-`closing` recovery sweep handles them.
+- ~~`monitorTrades` ... legs become `open` only after the entry fill ...~~
+  **CORRECTED 2026-10-07 (see re-review below): this bullet was WRONG
+  for the hedge leg and must not be relied on.**
+
+## Safety re-review (2026-10-07, parent + 2 independent read-only agents)
+
+Three-way re-verification of the safety analysis against current code
+(Step 1 implemented, queue detached). Findings:
+
+### F1 (HIGH, already possible with Step 1) — false hedge-leg closure during `hedging`
+
+The hedge leg row transitions to `open` DURING `hedging`
+(`open-trade.ts` ~L723, inside the fill loop), while the maker limit is
+still resting (up to 30 s). `monitorTrades` filters on
+`trades.status ∈ activeTradeStatuses` (which INCLUDES `hedging`) with
+legs `open`/`unhedged`, so that combination IS monitored. Extended
+`getPosition` can briefly return `null` post-fill (read lag documented in
+open-trade.ts) → `positionClosed=true` → the monitor marks the leg
+`closed` and sets `closureNotifiedAt` IRREVERSIBLY in one pass (no
+re-verification, no grace period). The execution job later overwrites
+`trades.status` back to `open` via `transition()`, but the leg row stays
+`closed`+notified → the leg is permanently unmonitored (a real TP/SL
+fire afterwards is never detected, the trade never closes, and signal
+suppression stays active indefinitely; time-stop is disabled).
+
+#### F1 mitigation (prerequisite, not optional)
+
+In `monitorTrades`, only
+act on trades with status `"open"` — venue TP/SL only exist from
+`protecting`/`open`, so no real closure is missed. Cheaper alternative or
+additional belt: skip legs whose trade `openedAt` is very recent
+(< 30–60 s). Multi-read confirmation (2–3 consecutive null reads across
+passes) also possible but heavier.
+
+### F2 (MED, new with Step 2) — monitor-interval re-entrancy
+
+`setInterval` fires on wall-clock regardless of an in-flight pass;
+monitor passes can exceed 1 s (10 s per-call exchange timeouts), and
+`closeTradeBothLegs` can take ~90–110 s worst case vs the sweep's 120 s
+stale budget. Nothing prevents overlapping passes today-in-proposal.
+**Requirement:** in-flight guard mirroring `ExecutionQueue.draining`
+(check-and-set synchronously at the top of the interval callback, reset
+in `finally`, log skipped cadences).
+
+### F3 (MED, new with Step 2) — shutdown contract
+
+The shutdown flag is module-local to `polling-loop.ts`; the new interval
+must: (a) check `isShuttingDown()` at the top of each pass, (b)
+`clearInterval` before the loop function returns — otherwise the timer
+keeps the Node event loop alive and the process NEVER exits after
+SIGINT, (c) let an in-flight pass finish (bounded by existing timeouts).
+
+### F4 — hot-spin `continue` is NOT fixed by the split alone
+
+The suppression `continue` (`polling-loop.ts` ~L153) skips the tail
+including the sleep; even with monitors moved out, the signal loop still
+hot-spins on `pollOnce` + price fetch while a trade is active.
+**Requirement:** restructure the suppression branch so every tick path
+reaches the sleep (e.g. wrap the signal tail in `if (!suppressed)`
+instead of `continue`).
+
+### Confirmed safe (no action)
+
+- Shared in-memory config (poller `/config` overrides) and
+  `TelegramNotifier` cooldown state: monitors never read/write them;
+  single-writer + JS atomicity holds with two intervals. Keep passing
+  the SAME config object by reference.
+- No execution-queue job ever sets `trades.status='closing'` (edge band
+  disabled, retryEntry catch never claims 'closing') → the stale-closing
+  recovery sweep and the queue operate on disjoint row sets.
+- Signal suppression check-then-insert across intervals only shifts
+  timing by one cadence; protected downstream (notifier cooldown,
+  operator confirmation, next-tick suppression). No transaction needed.
+- No new env keys: reuse `PRICE_POLL_INTERVAL_MS` for the monitor
+  cadence (operator decision 2026-10-07: leave env keys untouched).
 
 ## Design contract
 
@@ -130,8 +200,17 @@ timer libs). Five tests:
 - [x] Step 1 — this queue (decouple execution). **Implemented 2026-10-07**
       in the working tree (unstaged, not committed — the operator
       commits); verified: typecheck exit 0, execution-queue tests 5/5.**
-- [ ] Step 2 — move `monitorTrades` + `monitorTimeoutClosures` to their
-      own interval, decoupled from the signal tick.
+- [x] Step 2 — move `monitorTrades` + `monitorTimeoutClosures` to their
+      own interval, decoupled from the signal tick. PREREQUISITES from
+      the 2026-10-07 re-review: F1 mitigation in `monitorTrades`
+      (act only on `trades.status === "open"`), F2 re-entrancy guard,
+      F3 shutdown contract (clearInterval + isShuttingDown), F4 hot-spin
+      restructure (every tick path reaches the sleep). Reuse
+      `PRICE_POLL_INTERVAL_MS`; no env key changes.
+      **Implemented 2026-10-07 in the working tree (unstaged, not
+      committed); F1–F4 all landed; verified: typecheck clean, all
+      non-drift bot tests green, drift unchanged (open-trade 5/7,
+      trade-summary 1 wording).**
 - [ ] Step 3 — data retention off the hot path (daily scheduler at a
       quiet hour instead of inside every tick).
 - [ ] Step 4 (optional) — process split: `bot-monitor` (signals +
