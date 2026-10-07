@@ -20,16 +20,20 @@ export async function monitorTrades(input: {
     .innerJoin(trades, eq(tradeLegs.tradeId, trades.id))
     .where(
       and(
-        // F1 (trade-execution-queue Step 2, safety re-review 2026-10-07):
-        // only status "open" trades are monitored. The hedge leg row
+        // F1 (trade-execution-queue Step 2, safety re-review 2026-10-07,
+        // completed same day): monitor 'open' AND 'unhedged' trades. The
+        // hedging-phase risk F1 guards against is real — the hedge leg row
         // transitions to 'open' DURING 'hedging' while the maker limit
         // still rests, and Extended getPosition can briefly return null
-        // post-fill (read lag); monitoring in-array statuses could then
-        // mark that leg 'closed' + closureNotifiedAt irreversibly and
-        // permanently unmonitor a leg that is actually open. Venue TP/SL
-        // only exist from 'protecting'/'open', so no real closure is
-        // missed by waiting for 'open'.
-        eq(trades.status, "open"),
+        // post-fill (read lag); monitoring 'hedging' trades could then mark
+        // that leg 'closed' + closureNotifiedAt irreversibly. But 'open'
+        // only is equally wrong: once one leg closes, the trade flips to
+        // 'unhedged' and the remaining open leg is never polled again — its
+        // exchange-side TP/SL closure goes undetected, unnotified, and the
+        // trade suppresses signals forever (live bug, arcus leg, trade
+        // after #481, 2026-10-07). An 'unhedged' trade is long past the
+        // entry phase, so the F1 read-lag scenario cannot apply to it.
+        inArray(trades.status, ["open", "unhedged"]),
         inArray(tradeLegs.status, ["open", "unhedged"]),
         isNull(tradeLegs.closureNotifiedAt),
       ),
