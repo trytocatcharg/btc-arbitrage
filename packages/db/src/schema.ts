@@ -334,6 +334,15 @@ export const operations = mysqlTable(
   }),
 );
 
+// Runtime-adjustable bot settings persisted by Telegram control commands so
+// overrides survive bot restarts. One row per setting; values are stored as
+// strings and validated by the runtime appliers at boot.
+export const botRuntimeOverrides = mysqlTable("bot_runtime_overrides", {
+  settingKey: varchar("setting_key", { length: 32 }).primaryKey(),
+  settingValue: varchar("setting_value", { length: 64 }).notNull(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow().onUpdateNow(),
+});
+
 export const events = mysqlTable(
   "events",
   {

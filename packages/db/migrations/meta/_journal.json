@@ -29,6 +29,13 @@
       "when": 1789648707392,
       "tag": "0003_filled_notional_volume",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "5",
+      "when": 1791444064017,
+      "tag": "0004_bot_runtime_overrides",
+      "breakpoints": true
     }
   ]
 }
