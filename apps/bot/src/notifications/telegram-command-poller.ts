@@ -2,6 +2,7 @@ import type { BotConfig } from "@btc-arbitrage/config";
 import type { getDb } from "@btc-arbitrage/db";
 import { signals, tradePreviews } from "@btc-arbitrage/db";
 import { eq } from "drizzle-orm";
+import { findTradingPair, TRADING_PAIRS } from "@btc-arbitrage/domain";
 import {
   buildTradeSummaryMessage,
   type ExchangeRegistryLike,
@@ -35,6 +36,7 @@ import {
   applyCooldownMinutes,
   applyMarginUsd,
   applyMinSpreadUsd,
+  applyTradingPair,
   isRuntimeSettingOverridden,
   snapshotRuntimeSettings,
   type RuntimeSettingChange,
@@ -552,6 +554,201 @@ export class TelegramCommandPoller {
                 });
               },
             );
+          }
+        }
+      } else if (data === "set:pair") {
+        const messageId = callback.message?.message_id;
+        const current = findTradingPair(this.config.btcSymbol);
+        if (typeof messageId === "number") {
+          await this.editMessageText(
+            messageId,
+            "🪙 Pares — elegí el par con el que opera la estrategia\n\n" +
+              `Activo: ${current?.label ?? this.config.btcSymbol} (${this.config.btcSymbol})\n\n` +
+              "Al cambiar el par, el bot abre y cierra operaciones con el " +
+              "nuevo par desde la próxima señal. Las operaciones ya " +
+              "abiertas no se ven afectadas.",
+            buildPairsMenuMarkup(this.config.btcSymbol),
+          ).catch((error: unknown) => {
+            console.warn("Telegram pairs-menu edit failed", {
+              messageId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
+      } else if (data.startsWith("pair:apply:")) {
+        // Confirm step of the Pairs flow. `pair:apply:` is matched BEFORE
+        // the generic `pair:` prefix branch below.
+        const symbol = data.slice("pair:apply:".length);
+        const pair = findTradingPair(symbol);
+        const messageId = callback.message?.message_id;
+        if (!pair) {
+          if (typeof messageId === "number") {
+            await this.editMessageText(
+              messageId,
+              `❌ Par no soportado: ${symbol}`,
+            ).catch((error: unknown) => {
+              console.warn("Telegram pair-apply-unknown edit failed", {
+                messageId,
+                message:
+                  error instanceof Error ? error.message : String(error),
+              });
+            });
+          }
+        } else {
+          try {
+            // Live guard, same family as /bot control: no pair switch
+            // while a trade is open or an execution is in flight.
+            const [active, queueBusy] = await Promise.all([
+              loadActiveTrades(this.db),
+              Promise.resolve(this.executionQueue.isExecuting()),
+            ]);
+            if (active.length > 0 || queueBusy) {
+              const refusal =
+                active.length > 0
+                  ? `⛔ No se puede cambiar el par: hay ${active.length} ` +
+                    "trade(s) activo(s). Cerrá las operaciones antes."
+                  : "⛔ No se puede cambiar el par: hay una ejecución " +
+                    "de trade en curso.";
+              if (typeof messageId === "number") {
+                await this.editMessageText(messageId, refusal).catch(
+                  (error: unknown) => {
+                    console.warn("Telegram pair-apply-refusal edit failed", {
+                      messageId,
+                      message:
+                        error instanceof Error ? error.message : String(error),
+                    });
+                  },
+                );
+              }
+            } else {
+              // Prepare the venues BEFORE applying: RISEx sets the account
+              // leverage per market, so the new symbol must be preflighted
+              // while the bot still operates the previous pair. Any
+              // failure keeps the current pair untouched.
+              const failures: string[] = [];
+              for (const exchangeId of [
+                this.config.exchangeA,
+                this.config.exchangeB,
+              ]) {
+                const adapter = this.registry.get(exchangeId);
+                if (!adapter.capabilities.orderPlacement || !adapter.execution)
+                  continue;
+                try {
+                  await adapter.execution.validateExecutionPreflight({
+                    symbol: pair.symbol,
+                    leverage: this.config.leverage,
+                  });
+                } catch (error) {
+                  failures.push(
+                    `${exchangeId}: ${error instanceof Error ? error.message : String(error)}`,
+                  );
+                }
+              }
+              if (failures.length > 0) {
+                if (typeof messageId === "number") {
+                  await this.editMessageText(
+                    messageId,
+                    "❌ No se pudo preparar el par nuevo; seguimos con " +
+                      `${this.config.btcSymbol}.\n${failures.join("\n")}`,
+                  ).catch((error: unknown) => {
+                    console.warn("Telegram pair-apply-preflight edit failed", {
+                      messageId,
+                      message:
+                        error instanceof Error ? error.message : String(error),
+                    });
+                  });
+                }
+              } else {
+                const change = applyTradingPair(this.config, pair.symbol);
+                const persistNote = await this.persistAppliedChange(change);
+                if (typeof messageId === "number") {
+                  await this.editMessageText(
+                    messageId,
+                    `✅ ${change.summary}${persistNote}\n\n` +
+                      `El bot opera con ${pair.label} desde la próxima señal.`,
+                  ).catch((error: unknown) => {
+                    console.warn("Telegram pair-apply edit failed", {
+                      messageId,
+                      message:
+                        error instanceof Error ? error.message : String(error),
+                    });
+                  });
+                }
+              }
+            }
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : String(error);
+            if (typeof messageId === "number") {
+              await this.editMessageText(messageId, `❌ ${message}`).catch(
+                (error: unknown) => {
+                  console.warn("Telegram pair-apply-error edit failed", {
+                    messageId,
+                    message:
+                      error instanceof Error ? error.message : String(error),
+                  });
+                },
+              );
+            }
+          }
+        }
+      } else if (data.startsWith("pair:")) {
+        // Pair selected: show 24h traded volume per ACTIVE exchange
+        // (the monitored pair A/B via the registry) and ask for the
+        // final confirmation.
+        const symbol = data.slice("pair:".length);
+        const pair = findTradingPair(symbol);
+        const messageId = callback.message?.message_id;
+        if (!pair) {
+          if (typeof messageId === "number") {
+            await this.editMessageText(
+              messageId,
+              `❌ Par no soportado: ${symbol}`,
+            ).catch((error: unknown) => {
+              console.warn("Telegram pair-unknown edit failed", {
+                messageId,
+                message: error instanceof Error ? error.message : String(error),
+              });
+            });
+          }
+        } else {
+          const volumeLines = await Promise.all(
+            [
+              this.config.exchangeA,
+              this.config.exchangeB,
+            ].map(async (exchangeId) => {
+              try {
+                const stats = await this.registry
+                  .get(exchangeId)
+                  .getMarketStats?.({
+                    symbol: pair.symbol,
+                    marketType: this.config.marketType,
+                    priceSource: this.config.priceSource,
+                  });
+                const volume = stats?.volume24hUsd;
+                const rendered =
+                  volume && Number.isFinite(Number(volume))
+                    ? `$${Number(volume).toLocaleString("en-US")}`
+                    : "n/d";
+                return `  ${exchangeId}: ${rendered}`;
+              } catch (error) {
+                return `  ${exchangeId}: error (${error instanceof Error ? error.message : String(error)})`;
+              }
+            }),
+          );
+          if (typeof messageId === "number") {
+            await this.editMessageText(
+              messageId,
+              `🪙 ${pair.label} (${pair.symbol}) — volumen operado últimas 24h\n\n` +
+                volumeLines.join("\n") +
+                `\n\nAl confirmar, el bot opera con ${pair.label} desde la próxima señal.`,
+              buildPairConfirmMarkup(pair.symbol),
+            ).catch((error: unknown) => {
+              console.warn("Telegram pair-confirm edit failed", {
+                messageId,
+                message: error instanceof Error ? error.message : String(error),
+              });
+            });
           }
         }
       } else if (
@@ -1123,16 +1320,48 @@ const VOLUME_VIEW_BUTTONS = [
   { text: "6 meses", callback_data: "volume:6m" },
 ] as const;
 
-// Two rows: the dangerous auto-trading toggle sits alone below the
-// everyday settings so it never renders glued to them.
+// Two rows below the everyday settings: Pairs (opens the pair submenu) and
+// the dangerous auto-trading toggle. The toggle must never render glued to
+// the everyday settings, and Pairs sits beside it as the other
+// strategy-level control.
 const RUNTIME_SETTING_BUTTONS = [
   [
     { text: "⏱ Cooldown", callback_data: "set:cooldown" },
     { text: "📏 Min spread", callback_data: "set:spread" },
     { text: "💰 Margin", callback_data: "set:margin" },
   ],
-  [{ text: "🤖 Auto trade", callback_data: "set:autoconfirm" }],
+  [
+    { text: "🪙 Pairs", callback_data: "set:pair" },
+    { text: "🤖 Auto trade", callback_data: "set:autoconfirm" },
+  ],
 ] as const;
+
+/** Pair submenu buttons, generated from the shared TRADING_PAIRS catalog so
+ * a new pair shows up here with no poller changes. The active pair carries
+ * a ✅ marker. */
+function buildPairsMenuMarkup(currentSymbol: string) {
+  const rows = TRADING_PAIRS.map((pair) => [
+    {
+      text: `${pair.label}${pair.symbol === currentSymbol ? " ✅" : ""}`,
+      callback_data: `pair:${pair.symbol}`,
+    },
+  ]);
+  rows.push([{ text: "Cancelar", callback_data: "set:cancel" }]);
+  return { inline_keyboard: rows };
+}
+
+/** Confirmation row shown after the operator picks a pair and reviews its
+ * 24h volumes. */
+function buildPairConfirmMarkup(symbol: string) {
+  return {
+    inline_keyboard: [
+      [
+        { text: "✅ Confirmar", callback_data: `pair:apply:${symbol}` },
+        { text: "❌ Cancelar", callback_data: "set:cancel" },
+      ],
+    ],
+  };
+}
 
 const SETTING_CANCEL_MARKUP = {
   inline_keyboard: [[{ text: "Cancelar", callback_data: "set:cancel" }]],
@@ -1264,10 +1493,13 @@ export function formatActiveConfigSummary(
   const autoConfirmOverridden =
     baseline != null &&
     isRuntimeSettingOverridden("autoConfirm", baseline, config);
+  const tradingPairOverridden =
+    baseline != null &&
+    isRuntimeSettingOverridden("tradingPair", baseline, config);
   const lines = [
     "⚙️ Active bot configuration",
     "",
-    `Symbol: ${config.btcSymbol}`,
+    `Symbol: ${config.btcSymbol}${tradingPairOverridden ? " *" : ""}`,
     `Market: ${config.marketType}`,
     `Price source: ${config.priceSource}`,
     `Poll interval: ${config.pricePollIntervalMs} ms`,
@@ -1286,7 +1518,8 @@ export function formatActiveConfigSummary(
     minSpreadOverridden ||
     marginOverridden ||
     cooldownOverridden ||
-    autoConfirmOverridden
+    autoConfirmOverridden ||
+    tradingPairOverridden
   ) {
     lines.push("", "(* ajustado en caliente — no persiste al reiniciar)");
   }

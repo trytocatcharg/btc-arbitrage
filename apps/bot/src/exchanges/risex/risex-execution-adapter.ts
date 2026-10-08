@@ -15,7 +15,6 @@ import {
   findMarket,
   getMarketId,
 } from "../market-normalization.js";
-import { logExchangeResponse } from "../exchange-response-logger.js";
 import { ExchangeClient } from "./sdk/ExchangeClient.js";
 import { createNonce } from "./sdk/signing/nonce.js";
 import {
@@ -261,18 +260,6 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
               stop_price_option: StopPriceOption.MarkPrice,
               tif: TimeInForce.GoodTillCancelled,
             });
-      logExchangeResponse({
-        exchange: "risex",
-        event: "tpsl_place",
-        context: {
-          symbol: input.symbol,
-          side: input.side,
-          type: input.type,
-          triggerPriceUsd: trigger,
-          quantityBase: size,
-        },
-        response,
-      });
       const id = stringField(
         firstRecord(unwrapData(response)) ??
           (response as Record<string, unknown>),
@@ -322,21 +309,6 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
         input.clientOrderId,
         this.requireAccountAddress(),
       ),
-    });
-    logExchangeResponse({
-      exchange: "risex",
-      event: "order_submit",
-      context: {
-        symbol: input.symbol,
-        side: input.side,
-        type: input.type,
-        postOnly,
-        reduceOnly,
-        quantityBase: input.quantityBase,
-        priceUsd,
-        clientOrderId: input.clientOrderId,
-      },
-      response,
     });
 
     const submitted = normalizeSubmittedOrder(response, info);
@@ -420,12 +392,6 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
     if (!body) {
       // The position poll runs every tick while a leg is open, so only
       // closed/exit-bearing reads are logged (fee analysis needs those).
-      logExchangeResponse({
-        exchange: "risex",
-        event: "position_read",
-        context: { symbol: input.symbol, side: input.side, outcome: "empty" },
-        response: payload,
-      });
       return {
         side: input.side,
         quantityBase: "0",
@@ -460,12 +426,6 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
       "positionSize",
     ]);
     if (!signedQuantity || parseDecimal(signedQuantity) === 0) {
-      logExchangeResponse({
-        exchange: "risex",
-        event: "position_read",
-        context: { symbol: input.symbol, side: input.side, outcome: "flat" },
-        response: payload,
-      });
       return {
         id,
         side: input.side,
@@ -478,16 +438,6 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
     const quantity = parseDecimal(signedQuantity);
     const actualSide = quantity < 0 ? "short" : "long";
     if (actualSide !== input.side) {
-      logExchangeResponse({
-        exchange: "risex",
-        event: "position_read",
-        context: {
-          symbol: input.symbol,
-          side: input.side,
-          outcome: "side_mismatch",
-        },
-        response: payload,
-      });
       return {
         id,
         side: input.side,
@@ -546,12 +496,6 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
         account,
         market_id: marketId,
       });
-      logExchangeResponse({
-        exchange: "risex",
-        event: "closure_tpsl_read",
-        context: { symbol: input.symbol, side: input.side, marketId },
-        response: tpslPayload,
-      });
       // A fired trigger reports TPSL_ORDER_STATUS_SUCCESS and a
       // triggered_at (unix SECONDS). triggered_order_id equals the on-chain
       // record's wide_order_id (verified 2026-09-29, trade #128), but that
@@ -607,12 +551,6 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
         account,
         market_id: marketId,
         limit: "50",
-      });
-      logExchangeResponse({
-        exchange: "risex",
-        event: "closure_order_history_read",
-        context: { symbol: input.symbol, side: input.side, marketId },
-        response: historyPayload,
       });
       const closingOrders = asRisexArrayPayload(historyPayload)
         .filter(isRecord)
@@ -679,18 +617,6 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
             account,
             market_id: marketId,
             limit: "50",
-          });
-          logExchangeResponse({
-            exchange: "risex",
-            event: "closure_order_history_read",
-            context: {
-              symbol: input.symbol,
-              side: input.side,
-              marketId,
-              source: "trade_history",
-              closingOrderId: closingOrder.id,
-            },
-            response: fillsPayload,
           });
           const fills = asRisexArrayPayload(fillsPayload)
             .filter(isRecord)
@@ -968,12 +894,6 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
           "avgPrice",
         ]);
         if (average) {
-          logExchangeResponse({
-            exchange: "risex",
-            event: "market_fill_read",
-            context: { orderId, marketId, source: "order_history" },
-            response: historyPayload,
-          });
           console.log("RISEx order history average fill price", {
             orderId,
             averageFillPriceUsd: average,
@@ -1025,12 +945,6 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
         }
       }
       if (size > 0) {
-        logExchangeResponse({
-          exchange: "risex",
-          event: "market_fill_read",
-          context: { orderId, marketId, source: "trade_history" },
-          response: fillsPayload,
-        });
         const average = formatDecimal(notional / size, 8);
         console.log("RISEx trade history weighted fill price", {
           orderId,
@@ -1078,12 +992,6 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
       "averageEntryPrice",
     ]);
     if (explicit) {
-      logExchangeResponse({
-        exchange: "risex",
-        event: "market_fill_read",
-        context: { marketId, source: "position_explicit" },
-        response: payload,
-      });
       console.log("RISEx position entry price (explicit field)", {
         marketId,
         entryPriceUsd: explicit,
@@ -1127,12 +1035,6 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
       parseDecimal(quote) / Math.abs(sizeNumber),
       8,
     );
-    logExchangeResponse({
-      exchange: "risex",
-      event: "market_fill_read",
-      context: { marketId, source: "position_average_derived" },
-      response: payload,
-    });
     console.log("RISEx position entry price (derived quote/size)", {
       marketId,
       size,

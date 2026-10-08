@@ -1,3 +1,4 @@
+import { isSupportedTradingSymbol } from "@btc-arbitrage/domain";
 import type { BotConfig } from "@btc-arbitrage/config";
 
 // Runtime-adjustable bot settings. These appliers mutate the live BotConfig
@@ -10,7 +11,8 @@ export type RuntimeSettingKey =
   | "cooldownMinutes"
   | "minSpreadUsd"
   | "marginUsd"
-  | "autoConfirm";
+  | "autoConfirm"
+  | "tradingPair";
 
 export interface RuntimeSettingChange {
   key: RuntimeSettingKey;
@@ -23,6 +25,7 @@ export interface RuntimeSettingsBaseline {
   minSpreadUsd: string;
   marginUsd: string;
   autoConfirm: boolean;
+  tradingPair: string;
 }
 
 const MAX_COOLDOWN_MINUTES = 10_080; // 7 days
@@ -36,6 +39,7 @@ export function snapshotRuntimeSettings(
     minSpreadUsd: config.minPriceDiffUsd,
     marginUsd: config.openTrade.marginUsd,
     autoConfirm: config.openTrade.autoConfirm,
+    tradingPair: config.btcSymbol,
   };
 }
 
@@ -110,6 +114,30 @@ export function applyAutoConfirm(
   };
 }
 
+/** Switch the strategy pair at runtime. Every downstream consumer reads
+ * `config.btcSymbol` per use (polling loop, signal engine, open-trade
+ * previews, execution), so mutating it in place propagates without a
+ * restart. The symbol must come from the shared TRADING_PAIRS catalog —
+ * the venue side resolves it by base-asset matching, so no per-exchange
+ * mapping is needed. Caller is responsible for the active-trade guard and
+ * the per-symbol execution preflight (see the Telegram Pairs panel). */
+export function applyTradingPair(
+  config: BotConfig,
+  symbol: string,
+): RuntimeSettingChange {
+  const normalized = symbol.trim().toUpperCase();
+  if (!isSupportedTradingSymbol(normalized)) {
+    throw new Error(
+      `Par no soportado: ${symbol}. Pares disponibles: BTC/USD, ETH/USD, NVDA/USD.`,
+    );
+  }
+  config.btcSymbol = normalized;
+  return {
+    key: "tradingPair",
+    summary: `Trading pair: ${normalized}`,
+  };
+}
+
 export function isRuntimeSettingOverridden(
   key: RuntimeSettingKey,
   baseline: RuntimeSettingsBaseline,
@@ -127,5 +155,7 @@ export function isRuntimeSettingOverridden(
       return config.openTrade.marginUsd !== baseline.marginUsd;
     case "autoConfirm":
       return config.openTrade.autoConfirm !== baseline.autoConfirm;
+    case "tradingPair":
+      return config.btcSymbol !== baseline.tradingPair;
   }
 }

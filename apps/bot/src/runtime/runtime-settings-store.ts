@@ -7,6 +7,7 @@ import {
   applyCooldownMinutes,
   applyMarginUsd,
   applyMinSpreadUsd,
+  applyTradingPair,
 } from "./runtime-settings.js";
 import type { RuntimeSettingChange, RuntimeSettingKey } from "./runtime-settings.js";
 
@@ -28,6 +29,8 @@ function readSettingValue(config: BotConfig, key: RuntimeSettingKey): string {
       return config.openTrade.marginUsd;
     case "autoConfirm":
       return config.openTrade.autoConfirm ? "true" : "false";
+    case "tradingPair":
+      return config.btcSymbol;
   }
 }
 
@@ -60,7 +63,7 @@ export async function persistRuntimeOverride(
 function parseStoredValue(
   key: RuntimeSettingKey,
   raw: string,
-): number | boolean | null {
+): number | boolean | string | null {
   switch (key) {
     case "cooldownMinutes":
     case "minSpreadUsd":
@@ -72,6 +75,10 @@ function parseStoredValue(
       if (raw === "true") return true;
       if (raw === "false") return false;
       return null;
+    case "tradingPair": {
+      const value = raw.trim().toUpperCase();
+      return value.length > 0 ? value : null;
+    }
   }
 }
 
@@ -94,6 +101,7 @@ export async function applyPersistedRuntimeOverrides(
       "minSpreadUsd",
       "marginUsd",
       "autoConfirm",
+      "tradingPair",
     ];
     if (!knownKeys.includes(key)) {
       console.warn("Skipping unknown persisted runtime override", {
@@ -124,6 +132,9 @@ export async function applyPersistedRuntimeOverrides(
           break;
         case "autoConfirm":
           changes.push(applyAutoConfirm(config, value as boolean));
+          break;
+        case "tradingPair":
+          changes.push(applyTradingPair(config, value as string));
           break;
       }
     } catch (error) {

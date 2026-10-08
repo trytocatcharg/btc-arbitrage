@@ -25,6 +25,14 @@ export interface PriceSubscriptionRequest extends PriceRequest {
   intervalMs?: number;
 }
 
+/** Public market statistics for a symbol. Every field is optional: a venue
+ * that does not expose a value leaves it undefined — consumers must render
+ * "n/d" (never estimate). */
+export interface MarketStats {
+  /** Traded volume over the last 24h in USD (decimal string). */
+  volume24hUsd?: string;
+}
+
 export interface CreateOrderRequest {
   signalId?: string;
   symbol: string;
@@ -148,6 +156,9 @@ export interface ExchangeAdapter {
   };
   getMarkets(): Promise<ExchangeMarket[]>;
   getPriceSnapshot(input: PriceRequest): Promise<PriceSnapshot>;
+  /** Optional 24h market stats (volume) used by the Telegram Pairs panel.
+   * Implementations reuse their existing public markets payloads. */
+  getMarketStats?(input: PriceRequest): Promise<MarketStats>;
   subscribePrices?(
     input: PriceSubscriptionRequest,
   ): AsyncIterable<PriceSnapshot>;

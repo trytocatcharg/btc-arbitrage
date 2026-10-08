@@ -10,7 +10,6 @@ import type {
   PriceRequest,
 } from "@btc-arbitrage/exchange-core";
 import { ArcusHttpClient, ArcusHttpError } from "./arcus-http-client.js";
-import { logExchangeResponse } from "../exchange-response-logger.js";
 import type { ArcusConfig } from "./arcus.types.js";
 import { findMarket } from "../market-normalization.js";
 import {
@@ -292,19 +291,6 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
         const reason = optionalString(row.rejectionReason);
         throw new Error(`Arcus order rejected${reason ? `: ${reason}` : ""}`);
       }
-      logExchangeResponse({
-        exchange: "arcus",
-        event: "tpsl_place",
-        context: {
-          symbol: input.symbol,
-          side: input.side,
-          type: input.type,
-          reduceOnly: orderSpec.reduceOnly,
-          quantityBase: input.quantityBase,
-          stopPriceUsd: orderSpec.stopPriceUsd,
-        },
-        response: row,
-      });
       return mapped;
     }
 
@@ -326,19 +312,6 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
         `Arcus order rejected${reason ? `: ${reason}` : ""}`,
       );
     }
-    logExchangeResponse({
-      exchange: "arcus",
-      event: "order_submit",
-      context: {
-        symbol: input.symbol,
-        side: input.side,
-        type: input.type,
-        reduceOnly: orderSpec.reduceOnly,
-        quantityBase: input.quantityBase,
-        priceUsd: orderSpec.priceUsd,
-      },
-      response: placed,
-    });
 
     if (input.type === "market") {
       // MARKET orders may fill immediately; make a single best-effort read
@@ -369,12 +342,6 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
       mapped.status === "rejected" ||
       mapped.status === "cancelled"
     ) {
-      logExchangeResponse({
-        exchange: "arcus",
-        event: "order_read",
-        context: { orderId, status: mapped.status },
-        response: record,
-      });
     }
     if (mapped.status === "filled" && mapped.feeUsd === undefined) {
       // Arcus order records carry no fee field (docs/exchanges/arcus.md
@@ -524,12 +491,6 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
           );
           order = requiredRecord(unwrapOrderRecord(rawOrder), "Arcus TPSL order");
           // A closure reads each stored trigger at most once — log always.
-          logExchangeResponse({
-            exchange: "arcus",
-            event: "closure_order_read",
-            context: { orderId: id, kind },
-            response: rawOrder,
-          });
         } catch {
           // Missing order: this id has nothing to teach us.
           continue;
@@ -679,12 +640,6 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
       if (input.quantityBase === undefined) break;
     }
     // Close fills only — a bounded set (never the raw 24 h history).
-    logExchangeResponse({
-      exchange: "arcus",
-      event: "closure_order_history_read",
-      context: { symbol: input.symbol, side: input.side, quantityBase: input.quantityBase },
-      response: { fills: matched },
-    });
     if (accepted === 0) return null;
     if (
       input.quantityBase !== undefined &&

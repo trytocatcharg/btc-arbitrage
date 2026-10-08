@@ -135,12 +135,12 @@ async function main() {
   // path. Fail fast here: if live trading is enabled but the venue
   // rejects the setup, better to die at boot than mid-trade.
   for (const exchangeId of [config.exchangeA, config.exchangeB]) {
-    const tradingEnabled =
-      (exchangeId === "risex" && config.risex.tradingEnabled) ||
-      (exchangeId === "extended" && config.extended.tradingEnabled) ||
-      (exchangeId === "arcus" && config.arcus.tradingEnabled);
-    if (!tradingEnabled) continue;
     const adapter = registry.get(exchangeId);
+    // Each client mirrors its config.<exchange>.tradingEnabled into
+    // capabilities.orderPlacement at construction time, so the adapter is
+    // the single source of truth for "live trading enabled" — no
+    // exchange-id chain needed here.
+    if (!adapter.capabilities.orderPlacement) continue;
     if (!adapter.execution) continue;
     // Log before the await so a stalled boot shows exactly which exchange
     // and which step (network calls carry a 10 s timeout) is in flight.
@@ -174,7 +174,7 @@ async function main() {
   // Fail fast: an unreachable fee table must die at boot, not mid-trade.
   if (
     (config.exchangeA === "arcus" || config.exchangeB === "arcus") &&
-    config.arcus.tradingEnabled
+    registry.get("arcus").capabilities.orderPlacement
   ) {
     if (
       config.arcus.makerFeeBps !== undefined &&

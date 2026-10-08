@@ -110,6 +110,39 @@ export interface EventRecord {
   createdAt: Date;
 }
 
+/** A strategy pair the operator can select at runtime. `symbol` is the
+ * canonical bot symbol (normalized, quote included, e.g. "NVDAUSDT");
+ * each exchange resolves it to its native market name through base-asset
+ * matching in findMarket() (RISEx lists "NVDA", Extended/Arcus "NVDA-USD"),
+ * so no per-venue mapping table is needed. Adding a pair = one entry here:
+ * the Telegram Pairs panel and the runtime applier both render/validate
+ * from this catalog. */
+export interface TradingPair {
+  /** Operator-facing label, e.g. "BTC/USD". */
+  label: string;
+  /** Canonical bot symbol stored in config.btcSymbol and per-row in the DB. */
+  symbol: string;
+}
+
+export const DEFAULT_TRADING_PAIR_SYMBOL = "BTCUSDT";
+
+export const TRADING_PAIRS: readonly TradingPair[] = [
+  { label: "BTC/USD", symbol: "BTCUSDT" },
+  { label: "ETH/USD", symbol: "ETHUSDT" },
+  { label: "NVDA/USD", symbol: "NVDAUSDT" },
+];
+
+export function findTradingPair(
+  symbol: string,
+): TradingPair | undefined {
+  const target = symbol.trim().toUpperCase();
+  return TRADING_PAIRS.find((pair) => pair.symbol === target);
+}
+
+export function isSupportedTradingSymbol(symbol: string): boolean {
+  return findTradingPair(symbol) !== undefined;
+}
+
 export interface CalculateSpreadInput {
   exchangeA: PriceSnapshot;
   exchangeB: PriceSnapshot;

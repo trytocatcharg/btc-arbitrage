@@ -1,7 +1,7 @@
 import { ExecutionMode, type PriceSnapshot, type PriceSource } from '@btc-arbitrage/domain';
-import type { ExchangeAdapter, ExchangeMarket, PriceRequest } from '@btc-arbitrage/exchange-core';
+import type { ExchangeAdapter, ExchangeMarket, MarketStats, PriceRequest } from '@btc-arbitrage/exchange-core';
 import { normalizeSymbol } from '@btc-arbitrage/exchange-core';
-import { findMarket, getMarketId } from '../market-normalization.js';
+import { extractVolume24hUsd, findMarket, getMarketId } from '../market-normalization.js';
 import { ArcusHttpClient } from './arcus-http-client.js';
 import type { ArcusBboResponse, ArcusConfig, ArcusMarketInfo, ArcusPriceEntry, ArcusPricesResponse } from './arcus.types.js';
 import { createArcusExecutionAdapter } from './arcus-execution-adapter.js';
@@ -51,6 +51,12 @@ export function createArcusAdapter(config: ArcusConfig, http = new ArcusHttpClie
         receivedAt: new Date(),
         raw: { price: priceEntry.raw, market, bbo }
       };
+    },
+    async getMarketStats(input: PriceRequest): Promise<MarketStats> {
+      if (input.marketType !== 'perpetual') throw new Error('Arcus adapter only supports perpetual markets');
+      const payload = await http.get('/v1/markets', { market: toArcusMarketName(input.symbol) });
+      const market = findArcusMarket(payload, input.symbol);
+      return { volume24hUsd: extractVolume24hUsd(market as Record<string, unknown>) };
     },
     async createOrder() {
       return {

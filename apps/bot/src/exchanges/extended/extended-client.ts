@@ -1,7 +1,7 @@
 import { ExecutionMode, type PriceSnapshot } from '@btc-arbitrage/domain';
-import type { ExchangeAdapter, ExchangeMarket, PriceRequest } from '@btc-arbitrage/exchange-core';
+import type { ExchangeAdapter, ExchangeMarket, MarketStats, PriceRequest } from '@btc-arbitrage/exchange-core';
 import { normalizeSymbol } from '@btc-arbitrage/exchange-core';
-import { extractPrice, extractTimestamp, findMarket, getMarketId } from '../market-normalization.js';
+import { extractPrice, extractTimestamp, extractVolume24hUsd, findMarket, getMarketId } from '../market-normalization.js';
 import { ExtendedHttpClient } from './extended-http-client.js';
 import type { ExtendedConfig } from './extended.types.js';
 import { createExtendedExecutionAdapter } from './extended-execution-adapter.js';
@@ -33,6 +33,11 @@ export function createExtendedAdapter(config: ExtendedConfig, http = new Extende
         receivedAt: new Date(),
         raw: market
       };
+    },
+    async getMarketStats(input: PriceRequest): Promise<MarketStats> {
+      const payload = await http.get('/api/v1/info/markets');
+      const market = findMarket(payload, input.symbol, input.marketType);
+      return { volume24hUsd: extractVolume24hUsd(market) };
     },
     async createOrder() {
       return {

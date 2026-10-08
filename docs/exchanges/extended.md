@@ -38,6 +38,7 @@ This spec captures the Extended API facts this bot relies on, so trading work is
 | Order creation is asynchronous | Do not treat REST acceptance as guaranteed fill; use order/position checks afterward. |
 | `GET /api/v1/user/trades?market=&side=` returns up to 10,000 records, newest-first (descending id). Items carry `averagePrice`, `filledQty` (fallback `qty`), `fee`, `tradeType` (TRADE/LIQUIDATION/DELEVERAGE); there is no `positionEffect` and no per-trade realizedPnl. | A manual close or an operator-moved trigger cancels the TP/SL orders unfired, so `resolveLegClosure` reconstructs the exit from closing-side trades (a long closes with SELL, a short with BUY): exact-decimal VWAP exit price + summed fee, walked newest-first until the leg quantity is covered (single newest trade when no quantity is known; partial coverage under 50% of the leg quantity yields null). PnL is derived by the monitor from entry/exit/qty, never from a venue field. |
 | Market orders still require a price | Future trade builder must calculate a bounded crossing price; do not omit price. |
+| `marketStats.dailyVolume` is 24h traded volume in USD notional; the `dailyVolumeBase` sibling is base-asset volume (verified live 2026-10-08, NVDA-USD). | The Pairs panel renders `dailyVolume` as the 24h USD volume; base-unit fields are never shown as dollars. |
 | GTT expiry max differs by network | Keep configurable expiry and validate before sending. |
 
 ## Implementation map

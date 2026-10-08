@@ -23,7 +23,13 @@ export function asArrayPayload(payload: unknown): unknown[] {
 export function findMarket(payload: unknown, symbol: string, marketType?: MarketType): Record<string, unknown> {
   const target = normalizeSymbol(symbol);
   const targetBase = extractBaseAsset(target);
-  let baseAssetMatch: Record<string, unknown> | undefined;
+  const targetBaseQuotes = [`${targetBase}USD`, `${targetBase}USDT`, `${targetBase}USDC`];
+  // Two-pass base-asset fallback: an EXACT base match ("ETH", "ETHUSD")
+  // wins over a PREFIX match ("ETHFIUSD", "ETHW..."). Prefix-first made
+  // Extended's ETHFI-USD (~$0.72) shadow the real ETH-USD perp — any
+  // asset whose name merely starts with the base won by array order.
+  let exactBaseMatch: Record<string, unknown> | undefined;
+  let prefixBaseMatch: Record<string, unknown> | undefined;
 
   for (const item of asArrayPayload(payload)) {
     if (!item || typeof item !== 'object') continue;
@@ -31,11 +37,14 @@ export function findMarket(payload: unknown, symbol: string, marketType?: Market
     if (marketType && !matchesMarketType(record, marketType)) continue;
     const candidates = collectMarketCandidates(record);
     if (candidates.some((candidate) => candidate === target)) return record;
-    if (candidates.some((candidate) => candidate === targetBase || candidate.startsWith(targetBase))) {
-      baseAssetMatch ??= record;
+    if (candidates.some((candidate) => candidate === targetBase || targetBaseQuotes.includes(candidate))) {
+      exactBaseMatch ??= record;
+    } else if (candidates.some((candidate) => candidate.startsWith(targetBase))) {
+      prefixBaseMatch ??= record;
     }
   }
-  if (baseAssetMatch) return baseAssetMatch;
+  if (exactBaseMatch) return exactBaseMatch;
+  if (prefixBaseMatch) return prefixBaseMatch;
   throw new Error(`Market ${symbol} was not found in exchange markets response`);
 }
 
@@ -60,10 +69,50 @@ export function extractPrice(market: Record<string, unknown>, priceSource: Price
   throw new Error(`Requested PRICE_SOURCE=${priceSource} is not present in market payload; refusing silent fallback`);
 }
 
-export function extractTimestamp(market: Record<string, unknown>): unknown {
+export function extractTimestamp(market: Record<string, unknown>): string | number | undefined {
   for (const source of nestedRecords(market)) {
     const value = source.timestamp ?? source.updated_at ?? source.updatedAt ?? source.time ?? source.created_at ?? source.createdAt;
-    if (value !== undefined) return value;
+    if (typeof value === 'string' || typeof value === 'number') return value;
+  }
+  return undefined;
+}
+
+/** Candidate payload keys for 24h traded volume in USD NOTIONAL, ordered
+ * most-specific first. Venue reference (verified live 2026-10-08):
+ * - Extended: `marketStats.dailyVolume` (USD notional; the `dailyVolumeBase`
+ *   sibling is base-asset volume and must NOT be rendered as USD).
+ * - Arcus: `volume24hNotional` (USD notional; plain `volume24h` is
+ *   base-asset volume — shares — and mislabels badly as dollars).
+ * Base-unit-only fields are deliberately excluded: a venue exposing only
+ * base volume renders "n/d" instead of a mislabeled number. */
+const VOLUME_24H_NOTIONAL_KEYS = [
+  'volume24hNotional',
+  'dailyVolume',
+  'dailyVolumeNotional',
+  'dayVolume',
+  'dayVolumeUsd',
+  'day_volume',
+  'day_volume_usd',
+  'volume24hUsd',
+  'volume_24h_usd',
+  'dayTurnover',
+  'day_turnover',
+  'turnover24h',
+  'quoteVolume24h',
+  'quote_volume_24h'
+] as const;
+
+/** 24h traded volume in USD as a decimal string, or undefined when the
+ * venue payload does not expose a positive finite value for it. Never
+ * estimated — the caller shows "n/d" instead. */
+export function extractVolume24hUsd(market: Record<string, unknown>): string | undefined {
+  for (const source of nestedRecords(market)) {
+    for (const key of VOLUME_24H_NOTIONAL_KEYS) {
+      const value = source[key];
+      if (typeof value !== 'string' && typeof value !== 'number') continue;
+      const parsed = Number(value);
+      if (Number.isFinite(parsed) && parsed > 0) return String(value);
+    }
   }
   return undefined;
 }

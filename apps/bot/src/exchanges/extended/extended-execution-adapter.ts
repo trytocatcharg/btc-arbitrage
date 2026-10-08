@@ -8,7 +8,6 @@ import type {
   PriceRequest,
 } from "@btc-arbitrage/exchange-core";
 import { findMarket, getMarketId } from "../market-normalization.js";
-import { logExchangeResponse } from "../exchange-response-logger.js";
 import type { ExtendedConfig } from "./extended.types.js";
 import {
   createExtendedOrderContext,
@@ -226,23 +225,6 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
     const placedResponse = await this.http.post("/api/v1/user/order", order, {
       private: true,
     });
-    logExchangeResponse({
-      exchange: "extended",
-      event:
-        input.type === "take-profit-market" || input.type === "stop-market"
-          ? "tpsl_place"
-          : "order_submit",
-      context: {
-        symbol: input.symbol,
-        side: input.side,
-        type: input.type,
-        reduceOnly: input.reduceOnly === true,
-        quantityBase: input.quantityBase,
-        priceUsd: input.priceUsd,
-        triggerPriceUsd: input.triggerPriceUsd,
-      },
-      response: placedResponse,
-    });
     const placed = unwrapData(placedResponse);
     const placedId = stringField(placed, ["id"], "Extended order placement id");
 
@@ -267,12 +249,6 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
     // Hot-pathed while a resting limit waits for its fill: log only reads
     // that carry fill or terminal state, not every poll tick.
     if (mapped.status !== "new" || Number(mapped.filledQuantityBase) > 0) {
-      logExchangeResponse({
-        exchange: "extended",
-        event: "order_read",
-        context: { orderId, status: mapped.status },
-        response,
-      });
     }
     return mapped;
   }
@@ -539,16 +515,6 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
       if (input.quantityBase === undefined) break;
     }
     // Closing trades only — a bounded set (never the raw history).
-    logExchangeResponse({
-      exchange: "extended",
-      event: "closure_order_history_read",
-      context: {
-        symbol: input.symbol,
-        side: input.side,
-        quantityBase: input.quantityBase,
-      },
-      response: { trades: matched },
-    });
     if (accepted === 0) return null;
     if (
       input.quantityBase !== undefined &&
