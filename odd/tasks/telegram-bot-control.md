@@ -44,13 +44,13 @@ Both actions are allowed **only when no position is open** (no trade row in
 
 ## Tasks
 
-1. [ ] `db-overrides-table` — Drizzle schema `botRuntimeOverrides` +
-   migration 0002 (watch the known migrations/meta drift landmine; if
-   `drizzle-kit generate` breaks, hand-write the SQL + journal entry).
-2. [ ] `runtime-control` — `apps/bot/src/runtime/runtime-control.ts`:
+1. [x] `db-overrides-table` — Drizzle schema `botRuntimeOverrides` +
+   migration 0004 (hand-written: 0002/0003 already existed and
+   drizzle generate re-emitted existing statements from the meta drift).
+2. [x] `runtime-control` — `apps/bot/src/runtime/runtime-control.ts`:
    `BotControl` (pause/resume/requestRestart/isPaused/isRestartRequested,
    wakeable sleep) + `loadActiveTrades(db)` guard helper.
-3. [ ] `persist-restore-overrides` —
+3. [x] `persist-restore-overrides` —
    `apps/bot/src/runtime/runtime-settings-store.ts`: upsert override on change,
    `applyPersistedRuntimeOverrides(db, config)` for boot.
 4. [ ] `telegram-bot-command` — `/bot` in AVAILABLE_COMMANDS, state-aware
@@ -70,4 +70,4 @@ Both actions are allowed **only when no position is open** (no trade row in
 
 ## Evidence log
 
-_(commits recorded here as tasks close)_
+- a044e84 — feat(db,bot): add bot_runtime_overrides table and bot control foundations (tasks 1-3)
