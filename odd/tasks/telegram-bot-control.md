@@ -53,21 +53,24 @@ Both actions are allowed **only when no position is open** (no trade row in
 3. [x] `persist-restore-overrides` —
    `apps/bot/src/runtime/runtime-settings-store.ts`: upsert override on change,
    `applyPersistedRuntimeOverrides(db, config)` for boot.
-4. [ ] `telegram-bot-command` — `/bot` in AVAILABLE_COMMANDS, state-aware
+4. [x] `telegram-bot-command` — `/bot` in AVAILABLE_COMMANDS, state-aware
    message (⏸ Pausar / ▶️ Reanudar + 🔄 Restart), `bot:` callbacks with the
    guard, restart persists overrides + confirm edit + requestRestart;
    optional baseline constructor arg; persist-after-apply in the 4 existing
    setting applier call sites.
-5. [ ] `polling-loop-pause` — skip price fetch/signal/auto-confirm while
+5. [x] `polling-loop-pause` — skip price fetch/signal/auto-confirm while
    paused; loop condition adds `!control.isRestartRequested()`; sleep becomes
    wakeable; monitor interval respects both flags.
-6. [ ] `main-wiring` — main.ts: env baseline snapshot → apply persisted
+6. [x] `main-wiring` — main.ts: env baseline snapshot → apply persisted
    overrides (log + Telegram notice) → construct BotControl → wire into
    poller + loop.
-7. [ ] `typecheck-docs` — `yarn typecheck` green; update `specs/bot.md`
+7. [x] `typecheck-docs` — `yarn typecheck` green; update `specs/bot.md`
    (commands section) and `AGENTS.md` (Telegram commands + runtime-settings
    persistence note).
 
 ## Evidence log
 
 - a044e84 — feat(db,bot): add bot_runtime_overrides table and bot control foundations (tasks 1-3)
+- 02768cb — docs(odd): mark tasks 1-3 complete
+- 3db033e — feat(bot): /bot Telegram command with pause/resume/restart control (tasks 4-6)
+- pending — docs commit (task 7: specs/bot.md + AGENTS.md)
