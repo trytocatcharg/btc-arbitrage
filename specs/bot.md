@@ -73,6 +73,8 @@ Implemented in:
 
 Current chat commands:
 
+- `/bot` — control panel with **Pause / Restart** (running) or **Resume /
+  Restart** (paused) inline buttons, reflecting live state.
 - `/config`
 - `/trade`
 - `/volume`
@@ -80,6 +82,25 @@ Current chat commands:
   `TELEGRAM_OPERATOR_TIMEZONE` (IANA, default Europe/Madrid) with a
   relative age suffix ("hace 2 minutos"). Telegram never sends the
   sender's device timezone, so the zone is configured explicitly.
+
+#### `/bot` control semantics
+
+- The panel is state-aware (`Estado: ⏸ Pausado` / `🟢 Activo`) and every
+  action is guarded live at click time: pause, resume and restart are all
+  refused while any trade is in an active status
+  (`⛔ No se puede <acción>: hay <n> trade(s) activo(s)…`) or while a trade
+  execution is in flight on the shared execution queue
+  (`⛔ No se puede <acción>: hay una ejecución de trade en curso.`).
+- **Pause** stops price snapshots, spread evaluation, signal emission and
+  auto-confirm. Telegram command polling, data retention and the defensive
+  trade monitor (position polling + stale-close recovery) keep running.
+  Pause is in-memory only and does not survive a restart.
+- **Restart** persists all four runtime overrides (cooldown, min spread,
+  margin, auto-confirm) to `bot_runtime_overrides` before requesting a
+  cooperative exit: the polling loop sees the flag, exits, and the process
+  ends when `main()` returns (exit 0). With Docker `restart: unless-stopped`
+  the container boots again and `applyPersistedRuntimeOverrides` re-applies
+  the saved values at startup.
 
 ### Inline callback flow
 

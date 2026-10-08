@@ -9,6 +9,9 @@ import type { ArcusExecutionHandle } from "./exchanges/arcus/arcus-execution-ada
 import { TelegramCommandPoller } from "./notifications/telegram-command-poller.js";
 import { TelegramNotifier } from "./notifications/telegram-notifier.js";
 import { runPollingLoop } from "./runtime/polling-loop.js";
+import { createBotControl } from "./runtime/runtime-control.js";
+import { snapshotRuntimeSettings } from "./runtime/runtime-settings.js";
+import { applyPersistedRuntimeOverrides } from "./runtime/runtime-settings-store.js";
 import { ExecutionQueue } from "./trading/execution-queue.js";
 
 async function main() {
@@ -26,6 +29,10 @@ async function main() {
   });
 
   const config = loadBotConfig();
+  // Env-level baseline for the runtime-settings "ajustado en caliente"
+  // markers: taken BEFORE any persisted override is applied, so /config
+  // correctly shows which values differ from the environment.
+  const envBaseline = snapshotRuntimeSettings(config);
   if (config.risex.tradingEnabled) {
     console.warn(
       "RISEx live execution adapter is enabled; signed REST mutations require configured account and session signer credentials",
@@ -104,6 +111,19 @@ async function main() {
   console.log("Database connected");
   // await validateDbConnection(config.database.url);
   // console.log('connection succesfull');
+
+  // Re-apply runtime overrides persisted by a previous run (bot_runtime_overrides,
+  // migration 0004) BEFORE the notifier/poller are built so every consumer
+  // sees the restored values. Bad rows are skipped with a warning inside.
+  const restored = await applyPersistedRuntimeOverrides(db, config);
+  if (restored.length > 0) {
+    console.warn(
+      "Runtime overrides restored from database (bot_runtime_overrides):",
+    );
+    for (const change of restored) {
+      console.warn(`  • ${change.summary}`);
+    }
+  }
 
   console.log("Initializing exchange registry");
   const registry = createExchangeRegistry(config);
@@ -197,20 +217,32 @@ async function main() {
     }
   }
   const notifier = new TelegramNotifier(config.telegram);
+  // Pause/resume/restart control shared by the polling loop and the
+  // Telegram command poller (/bot). Created before both so the poller can
+  // hand it over and the loop can honor it.
+  const control = createBotControl();
   // One serial queue shared by the polling loop (auto-confirm on signals)
   // and the Telegram command poller (open:/retrade: callbacks), so trade
   // execution never blocks the monitoring tick and two executions can
   // never overlap.
   const executionQueue = new ExecutionQueue();
   const commandPoller = config.telegram.enabled
-    ? new TelegramCommandPoller(config, db, registry, fetch, executionQueue)
+    ? new TelegramCommandPoller(
+        config,
+        db,
+        registry,
+        fetch,
+        executionQueue,
+        control,
+        envBaseline,
+      )
     : undefined;
   if (commandPoller) {
     try {
       await commandPoller.configureAvailableCommands();
       console.log("Telegram commands configured", {
         scope: "chat",
-        commands: ["config", "trade"],
+        commands: ["bot", "config", "trade", "volume", "lastsignal"],
       });
     } catch (error) {
       console.warn(
@@ -218,6 +250,15 @@ async function main() {
         error instanceof Error ? { message: error.message } : { error },
       );
     }
+  }
+
+  // Surface restored overrides to the operator once, after the notifier
+  // exists; the console banner above already logged the same summaries.
+  if (restored.length > 0 && config.telegram.enabled) {
+    await notifier.notifyUrgent(
+      "🔄 Bot iniciado. Ajustes restaurados desde la base de datos:\n" +
+        restored.map((change) => `• ${change.summary}`).join("\n"),
+    );
   }
 
   console.log("Starting monitoring loop");
@@ -228,6 +269,7 @@ async function main() {
     db,
     commandPoller,
     executionQueue,
+    control,
   });
   console.log("Monitoring loop stopped", {
     stoppedAt: new Date().toISOString(),

@@ -40,6 +40,11 @@ import {
   type RuntimeSettingChange,
   type RuntimeSettingsBaseline,
 } from "../runtime/runtime-settings.js";
+import {
+  loadActiveTrades,
+  type BotControl,
+} from "../runtime/runtime-control.js";
+import { persistRuntimeOverride } from "../runtime/runtime-settings-store.js";
 
 // 2026-09-28: a hung Telegram request froze the bot's polling loop forever
 // (no timeout anywhere in the bot). Every outbound call now aborts after
@@ -90,6 +95,10 @@ export interface TelegramApiResponse {
 
 const AVAILABLE_COMMANDS = [
   {
+    command: "bot",
+    description: "Pausar o reiniciar el bot",
+  },
+  {
     command: "config",
     description: "Show active bot configuration",
   },
@@ -120,8 +129,13 @@ export class TelegramCommandPoller {
     private readonly registry: ExchangeRegistryLike,
     private readonly fetchImpl: FetchLike = fetch,
     private readonly executionQueue: ExecutionQueue,
+    private readonly control?: BotControl,
+    settingsBaseline?: RuntimeSettingsBaseline,
   ) {
-    this.settingsBaseline = snapshotRuntimeSettings(config);
+    // Prefer the process-level env baseline when wired (main.ts), so the
+    // "ajustado en caliente" markers compare against the real env values;
+    // a standalone poller falls back to self-snapshotting.
+    this.settingsBaseline = settingsBaseline ?? snapshotRuntimeSettings(config);
   }
 
   async configureAvailableCommands(): Promise<void> {
@@ -238,6 +252,11 @@ export class TelegramCommandPoller {
         this.pendingSettingPrompt = null;
       }
 
+      if (isTelegramCommand(text, "bot")) {
+        await this.sendBotControlPanel();
+        return;
+      }
+
       if (isTelegramCommand(text, "config")) {
         await this.sendMessage(
           formatActiveConfigSummary(this.config, this.settingsBaseline),
@@ -313,7 +332,8 @@ export class TelegramCommandPoller {
       }
       this.pendingSettingPrompt = null;
       console.warn("Runtime setting updated", { updateId, kind, ...change });
-      await this.sendMessage(`✅ ${change.summary}`);
+      const persistNote = await this.persistAppliedChange(change);
+      await this.sendMessage(`✅ ${change.summary}${persistNote}`);
     } catch (error) {
       console.error("Telegram setting input failed", {
         updateId,
@@ -406,10 +426,11 @@ export class TelegramCommandPoller {
               Number(option),
             );
             this.pendingSettingPrompt = null;
+            const persistNote = await this.persistAppliedChange(change);
             if (typeof messageId === "number") {
               await this.editMessageText(
                 messageId,
-                `✅ ${change.summary}`,
+                `✅ ${change.summary}${persistNote}`,
               ).catch((error: unknown) => {
                 console.warn("Telegram cooldown-apply edit failed", {
                   messageId,
@@ -504,9 +525,12 @@ export class TelegramCommandPoller {
         const messageId = callback.message?.message_id;
         try {
           const change = applyAutoConfirm(this.config, data === "ac:on");
+          const persistNote = await this.persistAppliedChange(change);
           if (typeof messageId === "number") {
-            await this.editMessageText(messageId, `✅ ${change.summary}`).catch(
-              (error: unknown) => {
+            await this.editMessageText(
+              messageId,
+              `✅ ${change.summary}${persistNote}`,
+            ).catch((error: unknown) => {
                 console.warn("Telegram auto-confirm-apply edit failed", {
                   messageId,
                   message:
@@ -528,6 +552,119 @@ export class TelegramCommandPoller {
                 });
               },
             );
+          }
+        }
+      } else if (
+        data === "bot:pause" ||
+        data === "bot:resume" ||
+        data === "bot:restart"
+      ) {
+        const messageId = callback.message?.message_id;
+        const actionLabel =
+          data === "bot:pause"
+            ? "pausar"
+            : data === "bot:resume"
+              ? "reanudar"
+              : "reiniciar";
+        if (!this.control) {
+          if (typeof messageId === "number") {
+            await this.editMessageText(
+              messageId,
+              "🤖 Control del bot no disponible en este proceso.",
+            ).catch((error: unknown) => {
+              console.warn("Telegram bot-control edit failed", {
+                messageId,
+                message: error instanceof Error ? error.message : String(error),
+              });
+            });
+          }
+        } else {
+          // Live guard checked at click time: active trades or an
+          // in-flight trade execution block every control action.
+          // Restart double-clicks are safe because this re-check runs
+          // inside the callback per click (requestRestart is idempotent:
+          // the second click finds restartRequested already set).
+          const [active, queueBusy] = await Promise.all([
+            loadActiveTrades(this.db),
+            Promise.resolve(this.executionQueue.isExecuting()),
+          ]);
+          if (active.length > 0 || queueBusy) {
+            const refusal =
+              active.length > 0
+                ? `⛔ No se puede ${actionLabel}: hay ${active.length} ` +
+                  `trade(s) activo(s) (${active
+                    .map((trade) => `id ${trade.id}, status ${trade.status}`)
+                    .join("; ")}).`
+                : `⛔ No se puede ${actionLabel}: hay una ejecución de trade en curso.`;
+            if (typeof messageId === "number") {
+              await this.editMessageText(messageId, refusal).catch(
+                (error: unknown) => {
+                  console.warn("Telegram bot-control refusal edit failed", {
+                    messageId,
+                    message:
+                      error instanceof Error ? error.message : String(error),
+                  });
+                },
+              );
+            }
+          } else if (data === "bot:pause") {
+            this.control.pause();
+            const { text, markup } = this.buildBotControlPanel();
+            await this.sendMessage(
+              "⏸ Bot pausado. El monitoreo de precios y señales está " +
+                "detenido; Telegram y el monitor defensivo siguen activos.\n\n" +
+                text,
+              markup,
+            );
+          } else if (data === "bot:resume") {
+            this.control.resume();
+            const { text, markup } = this.buildBotControlPanel();
+            await this.sendMessage(`▶️ Bot reanudado.\n\n${text}`, markup);
+          } else {
+            let persistFailure: string | null = null;
+            try {
+              // Persist ALL FOUR runtime overrides so the restart (and
+              // any future boot) re-applies them; failure never blocks
+              // the restart — the operator is told instead.
+              await Promise.all(
+                (
+                  [
+                    "cooldownMinutes",
+                    "minSpreadUsd",
+                    "marginUsd",
+                    "autoConfirm",
+                  ] as const
+                ).map((key) =>
+                  persistRuntimeOverride(this.db, this.config, key),
+                ),
+              );
+            } catch (error) {
+              // persistRuntimeOverride already logs each row failure.
+              persistFailure =
+                error instanceof Error ? error.message : String(error);
+              console.error(
+                "Failed to persist runtime overrides before restart",
+                { message: persistFailure },
+              );
+            }
+            const restartText = persistFailure
+              ? "🔄 Reiniciando el bot… ⚠️ Los ajustes en caliente NO se " +
+                "pudieron guardar y solo sobreviven en memoria."
+              : "🔄 Reiniciando el bot… Los ajustes en caliente quedaron guardados.";
+            if (typeof messageId === "number") {
+              await this.editMessageText(messageId, restartText).catch(
+                (error: unknown) => {
+                  console.warn("Telegram restart edit failed", {
+                    messageId,
+                    message:
+                      error instanceof Error ? error.message : String(error),
+                  });
+                },
+              );
+            }
+            // Cooperative restart: the polling loop sees the flag, exits,
+            // and the process ends when main() returns (Docker restarts it).
+            this.control.requestRestart();
           }
         }
       } else if (data.startsWith("open:")) {
@@ -740,6 +877,61 @@ export class TelegramCommandPoller {
         callback.id,
         friendlyCallbackError(message, this.config.openTrade.quoteMaxAgeMs),
       );
+    }
+  }
+
+  private buildBotControlPanel(): { text: string; markup: unknown } {
+    const paused = this.control?.isPaused() ?? false;
+    const text =
+      "🤖 Control del bot\n" + `Estado: ${paused ? "⏸ Pausado" : "🟢 Activo"}`;
+    const markup = {
+      inline_keyboard: paused
+        ? [
+            [
+              { text: "▶️ Reanudar", callback_data: "bot:resume" },
+              { text: "🔄 Restart", callback_data: "bot:restart" },
+            ],
+          ]
+        : [
+            [
+              { text: "⏸ Pausar", callback_data: "bot:pause" },
+              { text: "🔄 Restart", callback_data: "bot:restart" },
+            ],
+          ],
+    };
+    return { text, markup };
+  }
+
+  private async sendBotControlPanel(): Promise<void> {
+    if (!this.control) {
+      await this.sendMessage(
+        "🤖 Control del bot no disponible: este proceso no tiene " +
+          "pausa/reinicio cableados.",
+      );
+      return;
+    }
+    const { text, markup } = this.buildBotControlPanel();
+    await this.sendMessage(text, markup);
+  }
+
+  /**
+   * Best-effort persistence of an applied runtime override. Returns a
+   * warning suffix for the operator confirmation message, or an empty
+   * string when the change was persisted.
+   */
+  private async persistAppliedChange(
+    change: RuntimeSettingChange,
+  ): Promise<string> {
+    try {
+      await persistRuntimeOverride(this.db, this.config, change.key);
+      return "";
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Telegram runtime override persistence failed", {
+        key: change.key,
+        message,
+      });
+      return `\n⚠️ No se pudo guardar para sobrevivir al restart: ${message}`;
     }
   }
 
