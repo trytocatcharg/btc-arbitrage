@@ -1,4 +1,4 @@
-import { desc, inArray } from "drizzle-orm";
+import { and, desc, inArray, isNotNull } from "drizzle-orm";
 import { getDb, tradeLegs, trades, openTradeStatuses } from "@btc-arbitrage/db";
 import type { ExchangeAdapter } from "@btc-arbitrage/exchange-core";
 import type { MarketType, PriceSource } from "@btc-arbitrage/domain";
@@ -77,6 +77,86 @@ export async function buildTradeSummaryMessage(
   );
 
   return formatTradeSummaryMessage(summaries);
+}
+
+/** True when at least one trade is in an active (openTradeStatuses) state.
+ * Same filter as buildTradeSummaryMessage, so the panel button and the
+ * summary never disagree about what "active" means. */
+export async function hasActiveTrades(db: BotDatabase): Promise<boolean> {
+  const rows = await db
+    .select({ id: trades.id })
+    .from(trades)
+    .where(inArray(trades.status, [...openTradeStatuses]))
+    .limit(1);
+  return rows.length > 0;
+}
+
+export interface LastTradesDependencies {
+  db: BotDatabase;
+}
+
+/** Compact per-trade PnL history: one line per CLOSED trade that has a
+ * valid realized PnL (positive or negative). Active, cancelled, and
+ * failed trades never appear here (operator decision 2026-10-09).
+ * Net = realized GROSS − total fees (operator convention 2026-10-07).
+ * Timestamps render in the operator's IANA timezone. */
+export async function buildLastTradesMessage(
+  deps: LastTradesDependencies,
+  timeZone: string,
+  limit = 10,
+): Promise<string> {
+  const rows = await deps.db
+    .select()
+    .from(trades)
+    .where(and(inArray(trades.status, ["closed"]), isNotNull(trades.realizedPnlUsd)))
+    .orderBy(desc(trades.closedAt))
+    .limit(limit);
+
+  if (rows.length === 0) {
+    return "📭 No closed trades with PnL yet.";
+  }
+
+  const lines: string[] = [`📜 Last ${rows.length} trades (closed)`, ""];
+  let totalNetUsd = 0;
+  for (const trade of rows) {
+    const netUsd = tradeNetPnlUsd(trade);
+    if (netUsd == null) continue;
+    totalNetUsd += netUsd;
+    const when = trade.closedAt ?? trade.createdAt;
+    lines.push(
+      `#${trade.id} · ${formatClosedAt(when, timeZone)} · ${formatPnl(netUsd)}`,
+    );
+  }
+  lines.push("");
+  lines.push(`Total net: ${formatPnl(totalNetUsd)}`);
+  return lines.join("\n");
+}
+
+/** Closed-at label in the operator's timezone: YYYY-MM-DD, short weekday
+ * name, HH:MM (operator request 2026-10-09: fecha, día, hora, minutos). */
+function formatClosedAt(date: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("es-AR", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+  const value = (type: string) =>
+    parts.find((part) => part.type === type)?.value ?? "";
+  return `${value("year")}-${value("month")}-${value("day")} ${value("weekday")} ${value("hour")}:${value("minute")}`;
+}
+
+/** Net PnL for a terminal trade: realized GROSS minus total fees.
+ * Null when the trade never recorded realized PnL. */
+function tradeNetPnlUsd(trade: TradeRow): number | null {
+  const realized = toNumber(trade.realizedPnlUsd);
+  if (realized == null) return null;
+  const fees = toNumber(trade.totalFeesUsd);
+  return fees != null ? realized - fees : realized;
 }
 
 async function loadActiveTrades(db: BotDatabase): Promise<TradeRow[]> {

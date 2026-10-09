@@ -4,7 +4,9 @@ import { signals, tradePreviews } from "@btc-arbitrage/db";
 import { eq } from "drizzle-orm";
 import { findTradingPair, TRADING_PAIRS } from "@btc-arbitrage/domain";
 import {
+  buildLastTradesMessage,
   buildTradeSummaryMessage,
+  hasActiveTrades,
   type ExchangeRegistryLike,
 } from "./trade-summary.js";
 import { buildLastSignalsMessage } from "./last-signals-summary.js";
@@ -106,7 +108,7 @@ const AVAILABLE_COMMANDS = [
   },
   {
     command: "trade",
-    description: "Show open trade summary",
+    description: "Trade panel: active trade + last 10 closed",
   },
   {
     command: "volume",
@@ -268,11 +270,18 @@ export class TelegramCommandPoller {
       }
 
       if (isTelegramCommand(text, "trade")) {
+        // Panel with buttons: each button sends a NEW message (operator
+        // decision 2026-10-09), so the panel stays available in the chat.
+        const hasActive = await hasActiveTrades(this.db);
         await this.sendMessage(
-          await buildTradeSummaryMessage({
-            db: this.db,
-            registry: this.registry,
-          }),
+          hasActive
+            ? "Trade panel: elegí qué ver."
+            : "📭 No active trades right now.",
+          {
+            inline_keyboard: hasActive
+              ? [TRADE_PANEL_BUTTONS]
+              : [TRADE_HISTORY_BUTTON],
+          },
         );
         return;
       }
@@ -1048,6 +1057,17 @@ export class TelegramCommandPoller {
             }
           },
         });
+      } else if (data === "trade:active" || data === "trade:last10") {
+        await this.sendMessage(
+          data === "trade:active"
+            ? await buildTradeSummaryMessage({
+                db: this.db,
+                registry: this.registry,
+              })
+            : await buildLastTradesMessage({
+                db: this.db,
+              }, this.config.telegram.operatorTimezone),
+        );
       } else if (data.startsWith("volume:")) {
         const view = data.slice("volume:".length);
         if (view === "total" || view === "prevmonth" || view === "6m") {
@@ -1311,6 +1331,15 @@ export class TelegramCommandPoller {
     }
   }
 }
+
+const TRADE_PANEL_BUTTONS = [
+  { text: "📊 Active trade", callback_data: "trade:active" },
+  { text: "📜 Last 10 trades", callback_data: "trade:last10" },
+] as const;
+
+const TRADE_HISTORY_BUTTON = [
+  { text: "📜 Last 10 trades", callback_data: "trade:last10" },
+] as const;
 
 type VolumeView = "total" | "prevmonth" | "6m";
 
