@@ -26,6 +26,10 @@ interface ResolvedTradeSummary {
   entrySpreadUsd: number | null;
   liveSpreadUsd: number | null;
   totalEstimatedPnlUsd: number | null;
+  /** Sum of known entry+exit fees across legs; null when none known. */
+  totalKnownFeesUsd: number | null;
+  /** totalEstimatedPnlUsd minus known fees; null when no fees known. */
+  totalNetPnlUsd: number | null;
   longLeg: ResolvedLegSummary;
   shortLeg: ResolvedLegSummary;
   notes: string[];
@@ -39,6 +43,11 @@ interface ResolvedLegSummary {
   quantityBase: number | null;
   currentPriceUsd: number | null;
   estimatedPnlUsd: number | null;
+  /** Closed legs only: exit price and realized GROSS PnL (fee-free). */
+  exitPriceUsd: number | null;
+  realizedGrossPnlUsd: number | null;
+  /** Closed legs only: sum of known entry+exit fees; null when none known. */
+  knownFeesUsd: number | null;
   quoteError?: string;
 }
 
@@ -123,10 +132,23 @@ async function buildTradeSummary(
       ? shortLeg.currentPriceUsd - longLeg.currentPriceUsd
       : null;
 
+  // Effective leg PnL: realized GROSS for closed legs, live estimate for
+  // open ones. Never mixes the two within a leg.
+  const effectiveLegPnl = (leg: ResolvedLegSummary): number | null =>
+    leg.realizedGrossPnlUsd ?? leg.estimatedPnlUsd;
+  const longEffectivePnl = effectiveLegPnl(longLeg);
+  const shortEffectivePnl = effectiveLegPnl(shortLeg);
   const totalEstimatedPnlUsd =
-    longLeg.estimatedPnlUsd != null && shortLeg.estimatedPnlUsd != null
-      ? longLeg.estimatedPnlUsd + shortLeg.estimatedPnlUsd
+    longEffectivePnl != null && shortEffectivePnl != null
+      ? longEffectivePnl + shortEffectivePnl
       : toNumber(trade.unrealizedPnlUsd);
+  const totalKnownFeesUsd = [longLeg.knownFeesUsd, shortLeg.knownFeesUsd].reduce<
+    number | null
+  >((total, fees) => (fees != null ? (total ?? 0) + fees : total), null);
+  const totalNetPnlUsd =
+    totalEstimatedPnlUsd != null && totalKnownFeesUsd != null
+      ? totalEstimatedPnlUsd - totalKnownFeesUsd
+      : null;
 
   const notes: string[] = [];
   if (!longLegRow) notes.push("Long leg row missing in DB.");
@@ -146,6 +168,8 @@ async function buildTradeSummary(
     entrySpreadUsd,
     liveSpreadUsd,
     totalEstimatedPnlUsd,
+    totalKnownFeesUsd,
+    totalNetPnlUsd,
     longLeg,
     shortLeg,
     notes,
@@ -203,6 +227,13 @@ function resolveLegSummary(
         : (entryPriceUsd - currentPriceUsd) * quantityBase
       : null;
 
+  const closed = leg?.status === "closed";
+  const exitPriceUsd = leg ? toNumber(leg.exitPriceUsd) : null;
+  const realizedGrossPnlUsd = closed
+    ? deriveClosedLegGrossPnlUsd(leg, side, entryPriceUsd, exitPriceUsd, quantityBase)
+    : null;
+  const knownFeesUsd = closed && leg ? knownLegFeesUsd(leg) : null;
+
   return {
     exchangeId: leg?.exchangeId ?? "unknown",
     status: leg?.status ?? "missing",
@@ -211,8 +242,46 @@ function resolveLegSummary(
     quantityBase,
     currentPriceUsd,
     estimatedPnlUsd,
+    exitPriceUsd: closed ? exitPriceUsd : null,
+    realizedGrossPnlUsd,
+    knownFeesUsd,
     quoteError: "error" in quote ? quote.error : undefined,
   };
+}
+
+/** Exchange-agnostic GROSS realized PnL for a closed leg, mirroring the
+ * convention in trade-monitor.ts (operator decision 2026-10-07): derived
+ * from entry/exit/qty; the venue-reported realizedPnlUsd is only a fallback
+ * because its fee convention varies by exchange (Arcus nets the exit fee
+ * into it; Extended reports none at all). */
+function deriveClosedLegGrossPnlUsd(
+  leg: TradeLegRow | undefined,
+  side: "long" | "short",
+  entryPriceUsd: number | null,
+  exitPriceUsd: number | null,
+  quantityBase: number | null,
+): number | null {
+  if (entryPriceUsd != null && exitPriceUsd != null && quantityBase != null) {
+    return (
+      (exitPriceUsd - entryPriceUsd) *
+      quantityBase *
+      (side === "long" ? 1 : -1)
+    );
+  }
+  return leg?.realizedPnlUsd != null ? toNumber(leg.realizedPnlUsd) : null;
+}
+
+/** Sum of the leg's KNOWN fees (entry + exit); null when none are known.
+ * Fees are never estimated. Mirrors trade-monitor.ts. */
+function knownLegFeesUsd(leg: TradeLegRow): number | null {
+  let feesUsd = 0;
+  let seen = false;
+  for (const fee of [toNumber(leg.entryFeeUsd), toNumber(leg.exitFeeUsd)]) {
+    if (fee == null) continue;
+    feesUsd += fee;
+    seen = true;
+  }
+  return seen ? feesUsd : null;
 }
 
 function resolveQuantityBase(leg: TradeLegRow | undefined): number | null {
@@ -254,6 +323,18 @@ function formatTradeSummaryMessage(summaries: ResolvedTradeSummary[]): string {
 
   lines.push(`Open trades: ${summaries.length}`);
   lines.push(`Global estimated PnL: ${formatPnl(globalEstimatedPnlUsd)}`);
+  const globalKnownFeesUsd = summaries.reduce<number | null>(
+    (total, summary) =>
+      summary.totalKnownFeesUsd != null
+        ? (total ?? 0) + summary.totalKnownFeesUsd
+        : total,
+    null,
+  );
+  if (globalEstimatedPnlUsd != null && globalKnownFeesUsd != null) {
+    lines.push(
+      `Global net (known fees): ${formatPnl(globalEstimatedPnlUsd - globalKnownFeesUsd)}`,
+    );
+  }
 
   for (const summary of summaries) {
     lines.push("");
@@ -272,6 +353,9 @@ function formatTradeSummaryMessage(summaries: ResolvedTradeSummary[]): string {
       lines.push(
         `Trade estimated PnL: ${formatPnl(summary.totalEstimatedPnlUsd)}`,
       );
+    }
+    if (summary.totalNetPnlUsd != null) {
+      lines.push(`Trade net (known fees): ${formatPnl(summary.totalNetPnlUsd)}`);
     }
 
     lines.push("");
@@ -292,20 +376,36 @@ function formatTradeSummaryMessage(summaries: ResolvedTradeSummary[]): string {
 
 function formatLegSummary(leg: ResolvedLegSummary): string {
   const label = leg.side.toUpperCase();
+  const lines = [
+    `${label} ${leg.exchangeId}`,
+    `Status: ${leg.status}`,
+    `Entry: ${formatUsd(leg.entryPriceUsd)}`,
+  ];
+
+  // Closed legs report the realized exit, never a live-mark estimate: the
+  // venue mark is irrelevant once the position no longer exists, and the
+  // estimate both misses the real exit price and ignores fees.
+  if (leg.status === "closed") {
+    lines.push(`Exit: ${formatUsd(leg.exitPriceUsd)}`);
+    lines.push(`Leg PnL: ${formatPnl(leg.realizedGrossPnlUsd)}`);
+    if (leg.realizedGrossPnlUsd != null && leg.knownFeesUsd != null) {
+      lines.push(
+        `Fees: $${leg.knownFeesUsd.toFixed(2)} · Net: ${formatPnl(leg.realizedGrossPnlUsd - leg.knownFeesUsd)}`,
+      );
+    }
+    return lines.join("\n");
+  }
+
+  const currentPriceUsd = leg.currentPriceUsd;
   const priceMoveUsd =
-    leg.entryPriceUsd != null && leg.currentPriceUsd != null
-      ? leg.currentPriceUsd - leg.entryPriceUsd
+    leg.entryPriceUsd != null && currentPriceUsd != null
+      ? currentPriceUsd - leg.entryPriceUsd
       : null;
   const priceMovePercent =
     leg.entryPriceUsd != null && priceMoveUsd != null
       ? (priceMoveUsd / leg.entryPriceUsd) * 100
       : null;
-  const lines = [
-    `${label} ${leg.exchangeId}`,
-    `Status: ${leg.status}`,
-    `Entry: ${formatUsd(leg.entryPriceUsd)}`,
-    `Current: ${formatUsd(leg.currentPriceUsd)}`,
-  ];
+  lines.push(`Current: ${formatUsd(currentPriceUsd)}`);
 
   if (priceMoveUsd != null) {
     lines.push(

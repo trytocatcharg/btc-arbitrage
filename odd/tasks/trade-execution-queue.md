@@ -198,8 +198,9 @@ timer libs). Five tests:
 ## Roadmap (this doc is step 1 of 4)
 
 - [x] Step 1 — this queue (decouple execution). **Implemented 2026-10-07**
-      in the working tree (unstaged, not committed — the operator
-      commits); verified: typecheck exit 0, execution-queue tests 5/5.**
+      and committed by the operator as `b38c1a2` "decoupling fix";
+      verified at implementation time: typecheck exit 0, execution-queue
+      tests 5/5.**
 - [x] Step 2 — move `monitorTrades` + `monitorTimeoutClosures` to their
       own interval, decoupled from the signal tick. PREREQUISITES from
       the 2026-10-07 re-review: F1 mitigation in `monitorTrades`
@@ -207,13 +208,37 @@ timer libs). Five tests:
       F3 shutdown contract (clearInterval + isShuttingDown), F4 hot-spin
       restructure (every tick path reaches the sleep). Reuse
       `PRICE_POLL_INTERVAL_MS`; no env key changes.
-      **Implemented 2026-10-07 in the working tree (unstaged, not
-      committed); F1–F4 all landed; verified: typecheck clean, all
-      non-drift bot tests green, drift unchanged (open-trade 5/7,
-      trade-summary 1 wording).**
-- [ ] Step 3 — data retention off the hot path (daily scheduler at a
-      quiet hour instead of inside every tick).
-- [ ] Step 4 (optional) — process split: `bot-monitor` (signals +
+      **Implemented 2026-10-07 and committed by the operator as `0521f25`
+      "refactor pooling interval strategy" (monitor interval +
+      `close-recovery-monitor.ts`, `timeout-close-monitor.ts` deleted,
+      F1–F4 all landed); verified at implementation time: typecheck
+      clean, all non-drift bot tests green, drift unchanged.**
+- [x] Step 3 — data retention off the hot path (daily scheduler at a
+      quiet hour instead of inside every tick). **Implemented 2026-10-08
+      in the working tree (unstaged, not committed — the operator
+      commits): NEW
+      `apps/bot/src/retention/retention-scheduler.ts` (one run per day
+      at 03:00 local server time, hardcoded — no new env keys; F2
+      in-flight guard; F3 `stop()` shutdown contract); polling-loop no
+      longer invokes retention per tick, except the single inline pass
+      kept for `BOT_RUN_ONCE` mode (no timer lifetime there); the
+      scheduler is started next to the monitor interval and stopped on
+      loop exit; pruning intentionally keeps running while paused, same
+      semantics as before; the module-local 24 h throttle inside
+      `runDataRetention` stays as belt-and-braces.**
+- [x] Step 4 — Telegram command polling on its own interval instead of
+      inside the signal tick (alternative A of the 2026-10-08 review:
+      single operator, low command volume). Same contracts as the monitor
+      interval: cadence reuses `PRICE_POLL_INTERVAL_MS`, no new env keys,
+      F2 re-entrancy guard (skip logged once, not per second), F3
+      `clearInterval` on loop exit. Deliberately NOT gated on the pause
+      flags (operator keeps full control of a paused bot) and not gated
+      on restart until exit, mirroring the monitor interval. `BOT_RUN_ONCE`
+      keeps the single inline poll (no timer lifetime). Outbound
+      notifications were already fire-and-forget and are unchanged.
+      **Implemented 2026-10-08 in the working tree (unstaged, not
+      committed — the operator commits).**
+- [ ] Step 5 (optional) — process split: `bot-monitor` (signals +
       Telegram + monitors) and `bot-executor` (queue consumer) against
       the same DB, only if crash isolation is needed.
 

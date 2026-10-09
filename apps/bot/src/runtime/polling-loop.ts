@@ -9,6 +9,7 @@ import { and, desc, eq, inArray } from "drizzle-orm";
 import { monitorTrades } from "../trading/trade-monitor.js";
 import { recoverStaleClosingTrades } from "../trading/close-recovery-monitor.js";
 import { runDataRetention } from "../retention/data-retention.js";
+import { startRetentionScheduler } from "../retention/retention-scheduler.js";
 import { shouldSuppressSignalForActiveTrades } from "../trading/trade-guards.js";
 import type { ExecutionQueue } from "../trading/execution-queue.js";
 import { autoConfirmSignalTrade } from "../trading/open-trade-factory.js";
@@ -143,6 +144,61 @@ export async function runPollingLoop(input: {
     }
   }
 
+  // Step 4 (trade-execution-queue): Telegram command polling runs on
+  // its own wall-clock interval instead of inside the signal tick, so a
+  // slow or hung Telegram API can no longer delay price polling and
+  // signal evaluation. Cadence reuses PRICE_POLL_INTERVAL_MS — no new
+  // env keys. Unlike the monitor interval this one is NOT gated on the
+  // pause flags: an operator keeps full control of a paused bot (this
+  // was the tick's original ordering and is preserved deliberately).
+  let commandPollInFlight = false;
+  // Set when the in-flight skip line has been logged, so a slow poll
+  // (up to TELEGRAM_REQUEST_TIMEOUT_MS) logs the skip once instead of
+  // every second.
+  let commandPollSkipLogged = false;
+  const telegramTimer = setInterval(() => {
+    // F3: never start a new poll once shutdown was requested; the timer
+    // itself is cleared after the signal loop exits.
+    if (isShuttingDown()) return;
+    // Same restart contract as the monitor interval: no fresh poll
+    // overlapping a restart exit.
+    if (input.control.isRestartRequested()) return;
+    // F2: re-entrancy guard mirroring the monitor interval — check and
+    // set synchronously so interval ticks can never overlap an
+    // in-flight poll; reset in the finally of runTelegramPoll().
+    if (commandPollInFlight) {
+      if (!commandPollSkipLogged) {
+        commandPollSkipLogged = true;
+        console.warn("Telegram poll skipped: previous poll still in flight");
+      }
+      return;
+    }
+    commandPollSkipLogged = false;
+    commandPollInFlight = true;
+    // Floating promise guarded by the in-flight flag and by the catch
+    // inside runTelegramPoll(), so there is no unhandled-rejection path.
+    void runTelegramPoll();
+  }, input.config.pricePollIntervalMs);
+
+  async function runTelegramPoll(): Promise<void> {
+    try {
+      await input.commandPoller?.pollOnce();
+    } catch (error) {
+      console.error(
+        "Telegram command polling failed",
+        error instanceof Error ? { message: error.message } : { error },
+      );
+    } finally {
+      commandPollInFlight = false;
+    }
+  }
+
+  const retentionScheduler = startRetentionScheduler({
+    db: input.db,
+    config: input.config,
+    isShuttingDown,
+  });
+
   // Restart is cooperative: the loop exits when control.requestRestart()
   // sets the flag, the monitor timer is cleared below, and the process
   // exits cleanly (code 0) when main() returns; Docker (restart:
@@ -156,37 +212,51 @@ export async function runPollingLoop(input: {
     });
 
     try {
-      try {
-        await input.commandPoller?.pollOnce();
-      } catch (error) {
-        console.error(
-          "Telegram command polling failed",
-          error instanceof Error
-            ? { tick, message: error.message }
-            : { tick, error },
-        );
+      // Step 4 (trade-execution-queue): in long-running mode Telegram is
+      // polled on its own interval (started above). Run-once mode has no
+      // timer lifetime — the process exits after this tick — so it keeps
+      // the single inline poll it always had.
+      if (input.config.botRunOnce) {
+        try {
+          await input.commandPoller?.pollOnce();
+        } catch (error) {
+          console.error(
+            "Telegram command polling failed",
+            error instanceof Error
+              ? { tick, message: error.message }
+              : { tick, error },
+          );
+        }
       }
-      try {
-        await runDataRetention(input.db, input.config);
-      } catch (error) {
-        console.error(
-          "Data retention failed",
-          error instanceof Error
-            ? { tick, message: error.message }
-            : { tick, error },
-        );
+      // Step 3 (trade-execution-queue): in long-running mode data
+      // retention fires on its own daily timer (quiet hour), not here.
+      // Run-once mode has no timer lifetime — the process exits after
+      // this tick — so it keeps the single inline pass it always had.
+      if (input.config.botRunOnce) {
+        try {
+          await runDataRetention(input.db, input.config);
+        } catch (error) {
+          console.error(
+            "Data retention failed",
+            error instanceof Error
+              ? { tick, message: error.message }
+              : { tick, error },
+          );
+        }
       }
 
-      // Pause check stays BELOW the Telegram command polling and data
-      // retention above so an operator keeps full control and retention
-      // keeps pruning while paused. Only price snapshots, spread
-      // evaluation, signal emission and auto-confirm are skipped.
+      // Pause check stays BELOW the run-once Telegram/retention passes
+      // above so run-once mode keeps its original ordering. In
+      // long-running mode the Telegram interval is not gated on the
+      // pause flags either, so an operator keeps full control while
+      // paused. Only price snapshots, spread evaluation, signal
+      // emission and auto-confirm are skipped.
       if (input.control.isRestartRequested()) {
-        // A /bot restart callback sets the flag mid-tick (inside
-        // command polling above). Skip the signal pass so no signal can
-        // fire — and no auto-confirm job can be enqueued — between the
-        // no-open-position guard and the loop exit. The while condition
-        // ends the loop before the next tick.
+        // A /bot restart callback sets the flag (in the Telegram poll
+        // interval or in a run-once poll above). Skip the signal pass
+        // so no signal can fire — and no auto-confirm job can be
+        // enqueued — between the no-open-position guard and the loop
+        // exit. The while condition ends the loop before the next tick.
         console.log("Restart requested; signal pass skipped", { tick });
       } else if (input.control.isPaused()) {
         console.log("Monitoring tick paused", { tick });
@@ -218,6 +288,12 @@ export async function runPollingLoop(input: {
   // process.once SIGINT/SIGTERM handlers stay the single shutdown source
   // of truth.
   clearInterval(monitorTimer);
+  clearInterval(telegramTimer);
+  // F3: same shutdown contract for the retention scheduler — without
+  // stop() a pending daily timer would keep the Node event loop alive
+  // and the process would never exit (relevant in run-once mode too,
+  // where the scheduler started but never fired).
+  retentionScheduler.stop();
 
   // Price snapshots + spread evaluation + signal emission + auto-confirm
   // enqueue, extracted from the tick so a paused bot skips it wholesale.
