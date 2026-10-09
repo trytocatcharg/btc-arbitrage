@@ -242,21 +242,25 @@ export async function closeTradeBothLegs(
       totalCloseVolumeUsd += parseDecimal(closeVolumeDeltaUsd);
       closeVolumeKnownLegs += 1;
     }
-    if (
-      !realizedPnlUsd &&
-      exit &&
-      close.leg.entryPriceUsd &&
-      close.leg.entryPriceUsd !== "0"
-    ) {
-      const qty = parseDecimal(quantityBase);
-      const sideMul = close.leg.side === "long" ? 1 : -1;
-      const pnl =
-        (parseDecimal(exit) - parseDecimal(close.leg.entryPriceUsd)) *
-        qty *
-        sideMul;
-      realizedPnlUsd = formatDecimal(pnl, 8);
-    }
-    if (realizedPnlUsd) totalRealizedUsd += parseDecimal(realizedPnlUsd);
+    // Always-GROSS convention (operator decision 2026-10-07): the trade
+    // total uses the entry/exit/qty-derived gross per leg; the
+    // venue-reported realizedPnlUsd (Arcus nets the exit fee into it)
+    // is only a fallback when no exit price exists at all — otherwise
+    // the exit fee would be subtracted twice (once inside the venue
+    // value, once via trades.total_fees_usd; trade #637).
+    const qty = parseDecimal(quantityBase);
+    const sideMul = close.leg.side === "long" ? 1 : -1;
+    const derivedGrossPnlUsd =
+      exit && close.leg.entryPriceUsd && close.leg.entryPriceUsd !== "0"
+        ? formatDecimal(
+            (parseDecimal(exit) - parseDecimal(close.leg.entryPriceUsd)) *
+              qty *
+              sideMul,
+            8,
+          )
+        : null;
+    const legTotalPnlUsd = derivedGrossPnlUsd ?? realizedPnlUsd;
+    if (legTotalPnlUsd) totalRealizedUsd += parseDecimal(legTotalPnlUsd);
     else realizedKnown = false;
 
     legUpdates.push({

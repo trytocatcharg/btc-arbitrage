@@ -169,24 +169,16 @@ export async function monitorTrades(input: {
             .select()
             .from(tradeLegs)
             .where(eq(tradeLegs.tradeId, row.trades.id));
+          // Always-GROSS convention (operator decision 2026-10-07): each
+          // leg contributes its entry/exit/qty-derived gross; the
+          // venue-reported leg.realizedPnlUsd is only a fallback when the
+          // exit price is unknown (Arcus nets the exit fee into its
+          // reported value — trusting it here double-counts that fee via
+          // trades.total_fees_usd; trade #637: stored net -0.11 vs real
+          // +0.15). Same rule as deriveLegGrossPnlUsd below.
           const totalRealizedPnl = allLegs.reduce((sum, leg) => {
-            if (leg.realizedPnlUsd != null)
-              return sum + parseDecimal(leg.realizedPnlUsd);
-            if (
-              leg.exitPriceUsd != null &&
-              leg.entryPriceUsd != null &&
-              leg.quantityBase != null
-            ) {
-              const sideMul = leg.side === "long" ? 1 : -1;
-              return (
-                sum +
-                sideMul *
-                  (parseDecimal(leg.exitPriceUsd) -
-                    parseDecimal(leg.entryPriceUsd)) *
-                  parseDecimal(leg.quantityBase)
-              );
-            }
-            return sum;
+            const gross = deriveLegGrossPnlUsd(leg);
+            return sum + (gross ?? 0);
           }, 0);
           // trades.total_fees_usd = sum of KNOWN leg fees (entry + exit);
           // NULL leg fees are skipped, never estimated.
