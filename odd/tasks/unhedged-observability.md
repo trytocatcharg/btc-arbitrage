@@ -29,28 +29,19 @@ behavior changes in this feature.
 
 ## Tasks
 
-1. [ ] Instrument trade-monitor: write trade_status_history rows inside the same
+1. [x] Instrument trade-monitor: write trade_status_history rows inside the same
    transaction for the monitor-driven 'unhedged' and 'closed' transitions
    (fromStatus = status read at query time; reason = leg closeReason; metadata =
-   closed-leg identity). — bot write path, no behavior change.
-2. [ ] Backend trades-analysis service + normalizers + routes:
-   - GET /api/trades/unhedged/active — trades currently unhedged: open leg
-     (entry/qty/openedAt) + closed leg (closeReason/exit/realized/fees) +
-     unhedgedSince (history-derived; fallback closed-leg closedAt or
-     trades.updatedAt, flagged approximate).
-   - GET /api/trades/unhedged/events?limit=&sinceDays= — historical windows:
-     history rows toStatus='unhedged' (window start) → next transition to
-     closed/failed (window end); durationMs; resolution open|closed|failed;
-     both legs' outcomes; trade realizedPnlUsd/totalFeesUsd/netPnlUsd when
-     resolved. Pre-instrumentation active unhedged trades merge in with
-     approximateStart.
-   - GET /api/trades/:id/timeline — trade + legs + statusHistory asc + signal.
-   Conventions: read-only, decimals as strings, dates as ISO strings (match
-   volume-stats normalizer), no new dependencies, no axios.
-3. [ ] Update specs/backend.md: route list, semantics, derivation + caveats,
-   reword "does not expose historical trade APIs yet" (paginated all-trades
-   listing stays a non-goal).
-4. [ ] yarn typecheck clean; work-unit commit(s) on feat/unhedged-observability.
+   closed-leg identity). — bot write path, no behavior change. — commit 046ac50
+2. [x] Backend trades-analysis service + normalizers + routes:
+   - GET /api/trades/unhedged/active
+   - GET /api/trades/unhedged/events?limit=&sinceDays=
+   - GET /api/trades/:id/timeline (404 contract)
+   — commit 046ac50
+3. [x] Update specs/backend.md (route list, section 4 semantics + PnL convention,
+   non-goals reworded). — commit 046ac50
+4. [x] yarn typecheck clean (exit 0, all 8 workspaces); work-unit commit
+   046ac50 on feat/unhedged-observability.
 
 ## Non-goals (this feature)
 
@@ -63,4 +54,10 @@ behavior changes in this feature.
 
 ## Commits
 
-(pending)
+- 046ac50 — feat(backend): unhedged-window observability APIs + monitor
+  status-history instrumentation (tasks 1-4, typecheck exit 0)
+
+## Next step
+
+Unhedged-window unrealized-PnL sampling in the bot tick (separate feature) so
+the analysis agent can measure intra-window drawdown, not just final outcomes.
