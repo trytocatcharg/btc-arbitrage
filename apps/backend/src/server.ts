@@ -10,11 +10,21 @@ import {
   type VolumeStatsService,
 } from "./exchanges/volume-stats-service.js";
 import { normalizeVolumeStats } from "./exchanges/volume-stats-normalizers.js";
+import {
+  createTradeAnalysisService,
+  type TradeAnalysisService,
+} from "./trades/trade-analysis-service.js";
+import {
+  normalizeTradeTimeline,
+  normalizeUnhedgedActive,
+  normalizeUnhedgedEvents,
+} from "./trades/trade-analysis-normalizers.js";
 
 export function createBackendApp(
   config: BackendConfig,
   balances: BalanceService,
   volumeStats: VolumeStatsService = createVolumeStatsService(),
+  tradeAnalysis: TradeAnalysisService = createTradeAnalysisService(),
 ) {
   const app = express();
   app.disable("x-powered-by");
@@ -52,6 +62,52 @@ export function createBackendApp(
     "/api/trades/volume-stats",
     asyncHandler(async (_request, response) => {
       response.json(normalizeVolumeStats(await volumeStats.getVolumeStats()));
+    }),
+  );
+
+  // Read-only unhedged-window observability over the bot database
+  // (unhedged-observability spec). No order placement, no exchange calls.
+  app.get(
+    "/api/trades/unhedged/active",
+    asyncHandler(async (_request, response) => {
+      const { generatedAt, trades } =
+        await tradeAnalysis.getActiveUnhedgedTrades();
+      response.json(normalizeUnhedgedActive(generatedAt, trades));
+    }),
+  );
+
+  app.get(
+    "/api/trades/unhedged/events",
+    asyncHandler(async (request, response) => {
+      const limit = parseBoundedQueryInt(request.query.limit, 1, 200, 50);
+      const sinceDays = parseBoundedQueryInt(
+        request.query.sinceDays,
+        1,
+        365,
+        90,
+      );
+      const { generatedAt, events } = await tradeAnalysis.getUnhedgedEvents({
+        limit,
+        sinceDays,
+      });
+      response.json(normalizeUnhedgedEvents(generatedAt, events));
+    }),
+  );
+
+  app.get(
+    "/api/trades/:id/timeline",
+    asyncHandler(async (request, response) => {
+      const tradeId = Number(request.params.id);
+      if (!Number.isInteger(tradeId)) {
+        response.status(404).json({ error: "Trade not found" });
+        return;
+      }
+      const timeline = await tradeAnalysis.getTradeTimeline(tradeId);
+      if (!timeline) {
+        response.status(404).json({ error: "Trade not found" });
+        return;
+      }
+      response.json(normalizeTradeTimeline(timeline));
     }),
   );
 
@@ -98,6 +154,19 @@ function createCorsMiddleware(allowedOrigins: string[]) {
 
     next();
   };
+}
+
+function parseBoundedQueryInt(
+  value: unknown,
+  min: number,
+  max: number,
+  fallback: number,
+): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    return fallback;
+  }
+  return parsed;
 }
 
 function asyncHandler(

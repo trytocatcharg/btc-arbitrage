@@ -28,6 +28,9 @@ Implemented routes:
 - `GET /api/exchanges/risex/balance`
 - `GET /api/exchanges/extended/balance`
 - `GET /api/trades/volume-stats`
+- `GET /api/trades/unhedged/active`
+- `GET /api/trades/unhedged/events`
+- `GET /api/trades/:id/timeline`
 
 There are no write endpoints.
 
@@ -63,7 +66,46 @@ read-only DB handle (`getDb()`), with response normalization in
 `formatDecimal` convention). The route performs no order placement and no
 exchange signing.
 
-### 4. Error normalization
+### 4. Unhedged-window observability (read-only)
+
+`GET /api/trades/unhedged/active`, `GET /api/trades/unhedged/events`, and
+`GET /api/trades/:id/timeline` expose trade-analysis data for unhedged
+windows and per-trade timelines (`unhedged-observability` spec):
+
+- **Active unhedged trades** — every trade in status `unhedged` with its open
+  and closed leg, plus `unhedgedSince`. Derivation priority: the latest
+  `trade_status_history` row with `to_status = 'unhedged'` (exact,
+  `unhedgedSinceApproximate: false`); else the closed leg's `closed_at`
+  (approximate); else `trades.updated_at` (approximate).
+- **Unhedged events** — one entry per unhedged window: the window starts at a
+  monitor-written `trade_status_history` `to_status = 'unhedged'` row
+  (`toStatusChangedAtIdx`), ends at the earliest later `closed`/`failed`
+  history row for the same trade, and resolves accordingly (`open` when no
+  end row exists). Trades that went unhedged before the monitor wrote
+  history rows are merged in with `windowStartAt` from the closed leg's
+  `closed_at` (or null) and flagged `approximateStart: true`. Invalid
+  `limit` (1..200, default 50) or `sinceDays` (1..365, default 90) query
+  params fall back to the defaults instead of erroring.
+- **Per-trade timeline** — the trade row, both full leg rows, the status
+  history ascending by `changed_at`, and the originating signals row (or
+  null). A missing or non-integer id returns `404 { error: "Trade not found" }`.
+
+The monitor (`apps/bot/src/trading/trade-monitor.ts`) now writes a
+`trade_status_history` row inside the same transaction as every status flip
+it performs (`unhedged` and `closed`), tagged `source: "position-monitor"`
+in metadata, so unhedged windows are reconstructible from history alone.
+
+PnL convention: `realized_pnl_usd` is GROSS (fee-free). `netPnlUsd` is
+`realized − total_fees_usd` and is emitted only when the trade resolved and
+`total_fees_usd` is known; NULL fees are never estimated.
+
+The aggregation lives in `trades/trade-analysis-service.ts` over the shared
+read-only DB handle (`getDb()`), with response normalization in
+`trades/trade-analysis-normalizers.ts` (decimals as raw SQL strings, dates
+as ISO strings). The routes perform no order placement and no exchange
+calls.
+
+### 5. Error normalization
 
 The backend converts exchange failures into safe public responses instead of leaking raw exchange internals to the UI.
 
@@ -103,8 +145,8 @@ The backend currently does **not**:
 - open or close positions,
 - create TP/SL,
 - confirm Telegram trade previews,
-- mutate trade state,
-- expose historical trade APIs yet.
+- mutate trade state.
 
-The volume-stats endpoint is the only trade-data API; historical trade listing
+The backend never mutates; the trade-analysis APIs above are read-only
+(unhedged windows + per-trade timeline). A paginated all-trades listing
 remains a non-goal.

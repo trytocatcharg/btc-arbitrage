@@ -2,6 +2,7 @@ import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import {
   tradeLegs,
   trades,
+  tradeStatusHistory,
   type getDb,
 } from "@btc-arbitrage/db";
 import type { ExchangeAdapter } from "@btc-arbitrage/exchange-core";
@@ -215,6 +216,17 @@ export async function monitorTrades(input: {
                 : {}),
             })
             .where(eq(trades.id, row.trades.id));
+          // Status-history row (unhedged-observability): written in the same
+          // transaction as the status flip so unhedged windows stay
+          // reconstructible from trade_status_history alone.
+          await tx.insert(tradeStatusHistory).values({
+            tradeId: row.trades.id,
+            fromStatus: row.trades.status,
+            toStatus: "closed",
+            reason: closeReason.slice(0, 512),
+            metadata: { source: "position-monitor", closeReason },
+            changedAt: new Date(),
+          });
         } else {
           await tx
             .update(trades)
@@ -228,6 +240,24 @@ export async function monitorTrades(input: {
                 : {}),
             })
             .where(eq(trades.id, row.trades.id));
+          // Status-history row (unhedged-observability): the unhedged flip
+          // starts a window the backend derives from trade_status_history;
+          // the insert stays inside this transaction so the window start is
+          // atomic with the status update.
+          await tx.insert(tradeStatusHistory).values({
+            tradeId: row.trades.id,
+            fromStatus: row.trades.status,
+            toStatus: "unhedged",
+            reason: closeReason.slice(0, 512),
+            metadata: {
+              source: "position-monitor",
+              closedLegId: row.trade_legs.id,
+              closedLegSide: row.trade_legs.side,
+              closedLegExchangeId: row.trade_legs.exchangeId,
+              closeReason,
+            },
+            changedAt: new Date(),
+          });
         }
       });
 
