@@ -363,7 +363,7 @@ function formatLegLine(leg: LegClosureSnapshot): string {
   const parts = [`PnL ${formatPnlColored(gross)}`];
   if (gross != null && fees != null) {
     parts.push(`fees $${fees.toFixed(2)}`);
-    parts.push(`neto ${formatPnlColored(gross - fees)}`);
+    parts.push(`net ${formatPnlColored(gross - fees)}`);
   }
   return `${leg.side.toUpperCase()} ${leg.exchangeId}: ` + parts.join(" · ");
 }
@@ -380,11 +380,11 @@ function buildLegClosureMessage(input: {
 }): string {
   const lines: string[] = [
     input.siblingClosed
-      ? `✅ Trade #${input.tradeId}: ambas patas cerradas`
-      : `🚨 Pata cerrada: Trade #${input.tradeId}`,
+      ? `✅ Trade #${input.tradeId}: both legs closed`
+      : `🚨 Leg closed: Trade #${input.tradeId}`,
   ];
   if (input.closeReason != null && input.closeReason !== "unknown")
-    lines.push(`Motivo: ${input.closeReason}`);
+    lines.push(`Reason: ${input.closeReason}`);
   lines.push(formatLegLine(input.closedLeg));
   if (input.sibling != null) {
     if (input.siblingClosed) {
@@ -400,14 +400,14 @@ function buildLegClosureMessage(input: {
         feeA != null || feeB != null ? (feeA ?? 0) + (feeB ?? 0) : null;
       if (totalGross != null && totalFees != null) {
         lines.push(
-          `PnL total: ${formatPnlColored(totalGross)} · fees $${totalFees.toFixed(2)} · neto ${formatPnlColored(totalGross - totalFees)}`,
+          `Total PnL: ${formatPnlColored(totalGross)} · fees $${totalFees.toFixed(2)} · net ${formatPnlColored(totalGross - totalFees)}`,
         );
       } else {
         lines.push(`PnL total: ${formatPnlColored(totalGross)}`);
       }
     } else {
       lines.push(
-        `⚠️ La pata restante sigue abierta: ` +
+        `⚠️ The remaining leg is still open: ` +
           `${input.sibling.side.toUpperCase()} ${input.sibling.exchangeId} (unhedged).`,
       );
     }

@@ -151,14 +151,14 @@ export async function autoConfirmSignalTrade(input: {
         // Auto-trading: el aviso de límite expirado sin fill queda
         // silenciado a propósito — un chat sin operador solo acumula
         // ruido. El cambio de estado igual queda en la DB/logs.
-        console.log("Auto-confirm: trade cancelado (el límite expiró sin fill)", {
+        console.log("Auto-confirm: trade cancelled (limit order expired without a fill)", {
           signalId: input.signalId,
           token: preview.token,
         });
       } else {
         await input.notifier.notifyUrgent(
-          `❌ Auto-trade ${preview.token.slice(0, 8)} terminó sin un ` +
-            `resultado definido. Revisá los logs antes de asumir que abrió.`,
+          `❌ Auto-trade ${preview.token.slice(0, 8)} finished without a ` +
+            `definite outcome. Check the logs before assuming it opened.`,
         );
       }
     } catch (notifyError) {
@@ -180,7 +180,7 @@ export async function autoConfirmSignalTrade(input: {
     });
     try {
       await input.notifier.notifyUrgent(
-        `❌ Auto-trade falló en la señal ${input.signalId}: ` +
+        `❌ Auto-trade failed on signal ${input.signalId}: ` +
           (error instanceof Error ? error.message : String(error)),
       );
     } catch (notifyError) {

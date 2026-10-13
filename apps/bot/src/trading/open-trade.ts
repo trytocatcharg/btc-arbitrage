@@ -1126,22 +1126,22 @@ export class OpenTradeService {
         let abortNotice: string;
         if (entryAbortReason === "spread_inverted")
           abortNotice =
-            `🛑 Entrada abortada en ${preview.limitExchange} ` +
+            `🛑 Entry aborted at ${preview.limitExchange} ` +
             `(${limitSideForNotice} ${preview.quantityBase} ${preview.symbol}): ` +
-            `perseguir el precio ya era pérdida segura (spread ejecutable invertido). ` +
-            `Límite cancelado sin fill. ¿Reintentar?`;
+            `chasing the price was already a guaranteed loss (executable spread inverted). ` +
+            `Limit cancelled without a fill. Retry?`;
         else if (entryAbortReason === "spread_dropped")
           abortNotice =
-            `🛑 Entrada abortada: el spread en vivo cayó a ` +
-            `$${lastLiveSpreadUsd?.toFixed(2) ?? "n/a"} (mínimo ` +
-            `$${minSpreadUsd?.toFixed(2) ?? "n/a"}) mientras esperaba el fill ` +
-            `del límite en ${preview.limitExchange}. Límite cancelado sin fill. ` +
-            `¿Reintentar?`;
+            `🛑 Entry aborted: the live spread dropped to ` +
+            `$${lastLiveSpreadUsd?.toFixed(2) ?? "n/a"} (minimum ` +
+            `$${minSpreadUsd?.toFixed(2) ?? "n/a"}) while waiting for the ` +
+            `limit fill at ${preview.limitExchange}. Limit cancelled without a fill. ` +
+            `Retry?`;
         else
           abortNotice =
-            `⏱ Limit order en ${preview.limitExchange} (${limitSideForNotice} ` +
-            `${preview.quantityBase} ${preview.symbol}) no se llenó en ` +
-            `${this.options.limitTimeoutMs}ms y fue cancelada. ¿Reintentar?`;
+            `⏱ Limit order at ${preview.limitExchange} (${limitSideForNotice} ` +
+            `${preview.quantityBase} ${preview.symbol}) was not filled within ` +
+            `${this.options.limitTimeoutMs}ms and was cancelled. Retry?`;
         // In auto-confirm mode the operator is not watching the chat for
         // abort decisions (the "¿Reintentar?" prompt has no actor), so the
         // Entrada abortada notices are suppressed; the plain limit-timeout

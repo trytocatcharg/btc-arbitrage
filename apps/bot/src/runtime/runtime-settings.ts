@@ -56,7 +56,7 @@ export function applyCooldownMinutes(
     minutes <= 0 ||
     minutes > MAX_COOLDOWN_MINUTES
   ) {
-    throw new Error("El cooldown debe estar entre 1 y 10080 minutos.");
+    throw new Error("Cooldown must be between 1 and 10080 minutes.");
   }
   const cooldownMs = Math.round(minutes * 60_000);
   config.telegram.alertCooldownMs = cooldownMs;
@@ -71,7 +71,7 @@ export function applyMinSpreadUsd(
   valueUsd: number,
 ): RuntimeSettingChange {
   if (!Number.isFinite(valueUsd) || valueUsd <= 0 || valueUsd > MAX_USD_VALUE) {
-    throw new Error("El min spread debe estar entre 0 y 10000 USD.");
+    throw new Error("Min spread must be between 0 and 10000 USD.");
   }
   config.minPriceDiffUsd = valueUsd.toFixed(2);
   return {
@@ -85,7 +85,7 @@ export function applyMarginUsd(
   valueUsd: number,
 ): RuntimeSettingChange {
   if (!Number.isFinite(valueUsd) || valueUsd <= 0 || valueUsd > MAX_USD_VALUE) {
-    throw new Error("El margin debe estar entre 0 y 10000 USD.");
+    throw new Error("Margin must be between 0 and 10000 USD.");
   }
   config.openTrade.marginUsd = valueUsd.toFixed(2);
   // notionalUsd is derived at config load as margin × leverage, so a runtime
@@ -94,8 +94,8 @@ export function applyMarginUsd(
   return {
     key: "marginUsd",
     summary:
-      `Open trade margin: $${valueUsd.toFixed(2)} por pata ` +
-      `(notional $${(valueUsd * config.leverage).toFixed(2)} a ${config.leverage}x)`,
+      `Open trade margin: $${valueUsd.toFixed(2)} per leg ` +
+      `(notional $${(valueUsd * config.leverage).toFixed(2)} at ${config.leverage}x)`,
   };
 }
 
@@ -108,7 +108,7 @@ export function applyLeverage(
     leverage < 1 ||
     leverage > MAX_LEVERAGE
   ) {
-    throw new Error(`El leverage debe ser un entero entre 1 y ${MAX_LEVERAGE}.`);
+    throw new Error(`Leverage must be an integer between 1 and ${MAX_LEVERAGE}.`);
   }
   config.leverage = leverage;
   // Same invariant as applyMarginUsd: notionalUsd derives as margin ×
@@ -120,8 +120,8 @@ export function applyLeverage(
     key: "leverage",
     summary:
       `Leverage: ${leverage}x ` +
-      `(notional $${(marginUsd * leverage).toFixed(2)} por pata ` +
-      `con margin $${marginUsd.toFixed(2)})`,
+      `(notional $${(marginUsd * leverage).toFixed(2)} per leg ` +
+      `with margin $${marginUsd.toFixed(2)})`,
   };
 }
 
@@ -140,7 +140,7 @@ export function applyAutoConfirm(
   }
   return {
     key: "autoConfirm",
-    summary: `Auto-confirm (auto-trading): ${enabled ? "ACTIVADO" : "desactivado"}`,
+    summary: `Auto-confirm (auto-trading): ${enabled ? "ON" : "off"}`,
   };
 }
 
@@ -158,7 +158,7 @@ export function applyTradingPair(
   const normalized = symbol.trim().toUpperCase();
   if (!isSupportedTradingSymbol(normalized)) {
     throw new Error(
-      `Par no soportado: ${symbol}. Pares disponibles: BTC/USD, ETH/USD, NVDA/USD.`,
+      `Unsupported pair: ${symbol}. Available pairs: BTC/USD, ETH/USD, NVDA/USD.`,
     );
   }
   config.btcSymbol = normalized;

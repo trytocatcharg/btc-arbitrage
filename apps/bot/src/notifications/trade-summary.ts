@@ -132,7 +132,7 @@ export async function buildLastTradesMessage(
   }
   lines.push("");
   lines.push(
-    `Total net (histórico completo): ${formatPnl(await loadClosedNetPnlUsd(deps.db))}`,
+    `Total net (full history): ${formatPnl(await loadClosedNetPnlUsd(deps.db))}`,
   );
   return lines.join("\n");
 }
@@ -162,7 +162,7 @@ async function loadClosedNetPnlUsd(db: BotDatabase): Promise<number | null> {
 /** Closed-at label in the operator's timezone: YYYY-MM-DD, short weekday
  * name, HH:MM (operator request 2026-10-09: fecha, día, hora, minutos). */
 function formatClosedAt(date: Date, timeZone: string): string {
-  const parts = new Intl.DateTimeFormat("es-AR", {
+  const parts = new Intl.DateTimeFormat("en-US", {
     timeZone,
     year: "numeric",
     month: "2-digit",

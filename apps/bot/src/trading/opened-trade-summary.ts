@@ -57,9 +57,9 @@ export function formatEdgeClosedNotice(confirmOutcome: {
       ? "n/a"
       : `$${Number(confirmOutcome.realizedPnlUsd).toFixed(2)}`;
   return (
-    `⚖️ Edge insuficiente al llenar: spread capturado ` +
-    `$${confirmOutcome.capturedSpreadUsd.toFixed(2)} vs mínimo ` +
-    `$${confirmOutcome.minEdgeUsd.toFixed(2)}. Ambas patas ` +
-    `cerradas al momento. PnL realizado: ${pnlText}.`
+    `⚖️ Insufficient edge at fill: captured spread ` +
+    `$${confirmOutcome.capturedSpreadUsd.toFixed(2)} vs minimum ` +
+    `$${confirmOutcome.minEdgeUsd.toFixed(2)}. Both legs ` +
+    `closed immediately. Realized PnL: ${pnlText}.`
   );
 }

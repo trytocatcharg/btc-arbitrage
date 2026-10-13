@@ -100,7 +100,7 @@ export interface TelegramApiResponse {
 const AVAILABLE_COMMANDS = [
   {
     command: "bot",
-    description: "Pausar o reiniciar el bot",
+    description: "Pause or restart the bot",
   },
   {
     command: "config",
@@ -112,11 +112,11 @@ const AVAILABLE_COMMANDS = [
   },
   {
     command: "volume",
-    description: "Volumen generado (farmed): total, mes anterior, 6 meses",
+    description: "Generated volume (farmed): total, previous month, 6 months",
   },
   {
     command: "lastsignal",
-    description: "Últimas 10 señales (hora local)",
+    description: "Last 10 signals (local time)",
   },
 ] as const;
 
@@ -279,7 +279,7 @@ export class TelegramCommandPoller {
         const hasActive = await hasActiveTrades(this.db);
         await this.sendMessage(
           hasActive
-            ? "Trade panel: elegí qué ver."
+            ? "Trade panel: choose what to view."
             : "📭 No active trades right now.",
           {
             inline_keyboard: hasActive
@@ -343,7 +343,7 @@ export class TelegramCommandPoller {
             ? validationError.message
             : String(validationError);
         await this.sendMessage(
-          `❌ ${message}\nProbá de nuevo, o tocá /config para empezar de nuevo.`,
+          `❌ ${message}\nTry again, or tap /config to start over.`,
         );
         return;
       }
@@ -359,7 +359,7 @@ export class TelegramCommandPoller {
       });
       this.pendingSettingPrompt = null;
       await this.sendMessage(
-        "❌ No se pudo actualizar el ajuste. Reintentá, o tocá /config para empezar de nuevo.",
+        "❌ Could not update the setting. Try again, or tap /config to start over.",
       );
     }
   }
@@ -382,7 +382,7 @@ export class TelegramCommandPoller {
         this.pendingSettingPrompt = null;
         const messageId = callback.message?.message_id;
         if (typeof messageId === "number") {
-          await this.editMessageText(messageId, "Cancelado.").catch(
+          await this.editMessageText(messageId, "Cancelled.").catch(
             (error: unknown) => {
               console.warn("Telegram setting-cancel edit failed", {
                 messageId,
@@ -397,7 +397,7 @@ export class TelegramCommandPoller {
         if (typeof messageId === "number") {
           await this.editMessageText(
             messageId,
-            "Elegí el cooldown de alertas:",
+            "Choose the alert cooldown:",
             {
               inline_keyboard: [
                 [
@@ -407,7 +407,7 @@ export class TelegramCommandPoller {
                 ],
                 [
                   { text: "Custom…", callback_data: "cd:custom" },
-                  { text: "Cancelar", callback_data: "set:cancel" },
+                  { text: "Cancel", callback_data: "set:cancel" },
                 ],
               ],
             },
@@ -426,7 +426,7 @@ export class TelegramCommandPoller {
           if (typeof messageId === "number") {
             await this.editMessageText(
               messageId,
-              "Mandame el cooldown en minutos (número entre 1 y 10080).",
+              "Send me the cooldown in minutes (a number between 1 and 10080).",
               SETTING_CANCEL_MARKUP,
             ).catch((error: unknown) => {
               console.warn("Telegram cooldown-custom edit failed", {
@@ -478,7 +478,7 @@ export class TelegramCommandPoller {
         if (typeof messageId === "number") {
           await this.editMessageText(
             messageId,
-            "Mandame el nuevo min spread en USD (ej: 40).",
+            "Send me the new min spread in USD (e.g. 40).",
             SETTING_CANCEL_MARKUP,
           ).catch((error: unknown) => {
             console.warn("Telegram spread-prompt edit failed", {
@@ -493,7 +493,7 @@ export class TelegramCommandPoller {
         if (typeof messageId === "number") {
           await this.editMessageText(
             messageId,
-            `Mandame el nuevo margin por pata en USD (ej: 20). El notional se recalcula como margin × leverage (${this.config.leverage}x).`,
+            `Send me the new margin per leg in USD (e.g. 20). The notional is recalculated as margin × leverage (${this.config.leverage}x).`,
             SETTING_CANCEL_MARKUP,
           ).catch((error: unknown) => {
             console.warn("Telegram margin-prompt edit failed", {
@@ -508,9 +508,9 @@ export class TelegramCommandPoller {
         if (typeof messageId === "number") {
           await this.editMessageText(
             messageId,
-            "Mandame el nuevo leverage (entero entre 1 y 50). " +
-              `El notional por pata se recalcula como margin × leverage ` +
-              `(margin actual $${Number(this.config.openTrade.marginUsd).toFixed(2)}).`,
+            "Send me the new leverage (integer between 1 and 50). " +
+              `The per-leg notional is recalculated as margin × leverage ` +
+              `(current margin $${Number(this.config.openTrade.marginUsd).toFixed(2)}).`,
             SETTING_CANCEL_MARKUP,
           ).catch((error: unknown) => {
             console.warn("Telegram leverage-prompt edit failed", {
@@ -529,22 +529,22 @@ export class TelegramCommandPoller {
           await this.editMessageText(
             messageId,
             enabled
-              ? "🤖 Auto-confirm está ACTIVADO: el bot abre trades solo apenas " +
-                "aparece una señal, sin confirmación por Telegram.\n\n" +
-                "¿Está seguro que desea DESACTIVARLO? El bot volverá a esperar " +
-                "tu confirmación manual en cada señal."
-              : "🤖 AUTO-TRADING: si activás auto-confirm, el bot abrirá trades " +
-                "automáticamente apenas aparezca una señal, SIN confirmación " +
-                "por Telegram. Los entry guards siguen aplicando.\n\n" +
-                "¿Está seguro que desea realizar esta acción?",
+              ? "🤖 Auto-confirm is ON: the bot opens trades on its own as soon as " +
+                "a signal appears, without Telegram confirmation.\n\n" +
+                "Are you sure you want to DISABLE it? The bot will go back to " +
+                "waiting for your manual confirmation on each signal."
+              : "🤖 AUTO-TRADING: if you enable auto-confirm, the bot will open " +
+                "trades automatically as soon as a signal appears, WITHOUT " +
+                "Telegram confirmation. Entry guards still apply.\n\n" +
+                "Are you sure you want to perform this action?",
             {
               inline_keyboard: [
                 [
                   {
-                    text: enabled ? "✅ Sí, desactivar" : "✅ Sí, activar",
+                    text: enabled ? "✅ Yes, disable" : "✅ Yes, enable",
                     callback_data: enabled ? "ac:off" : "ac:on",
                   },
-                  { text: "❌ Cancelar", callback_data: "set:cancel" },
+                  { text: "❌ Cancel", callback_data: "set:cancel" },
                 ],
               ],
             },
@@ -594,11 +594,11 @@ export class TelegramCommandPoller {
         if (typeof messageId === "number") {
           await this.editMessageText(
             messageId,
-            "🪙 Pares — elegí el par con el que opera la estrategia\n\n" +
-              `Activo: ${current?.label ?? this.config.btcSymbol} (${this.config.btcSymbol})\n\n` +
-              "Al cambiar el par, el bot abre y cierra operaciones con el " +
-              "nuevo par desde la próxima señal. Las operaciones ya " +
-              "abiertas no se ven afectadas.",
+            "🪙 Pairs — choose the pair the strategy trades\n\n" +
+              `Active: ${current?.label ?? this.config.btcSymbol} (${this.config.btcSymbol})\n\n` +
+              "When you switch the pair, the bot opens and closes positions with the " +
+              "new pair from the next signal. Already-open positions are not " +
+              "affected.",
             buildPairsMenuMarkup(this.config.btcSymbol),
           ).catch((error: unknown) => {
             console.warn("Telegram pairs-menu edit failed", {
@@ -617,7 +617,7 @@ export class TelegramCommandPoller {
           if (typeof messageId === "number") {
             await this.editMessageText(
               messageId,
-              `❌ Par no soportado: ${symbol}`,
+              `❌ Unsupported pair: ${symbol}`,
             ).catch((error: unknown) => {
               console.warn("Telegram pair-apply-unknown edit failed", {
                 messageId,
@@ -637,10 +637,9 @@ export class TelegramCommandPoller {
             if (active.length > 0 || queueBusy) {
               const refusal =
                 active.length > 0
-                  ? `⛔ No se puede cambiar el par: hay ${active.length} ` +
-                    "trade(s) activo(s). Cerrá las operaciones antes."
-                  : "⛔ No se puede cambiar el par: hay una ejecución " +
-                    "de trade en curso.";
+                  ? `⛔ Cannot switch pair: there are ${active.length} ` +
+                    "active trade(s). Close the positions first."
+                  : "⛔ Cannot switch pair: a trade execution is in progress.";
               if (typeof messageId === "number") {
                 await this.editMessageText(messageId, refusal).catch(
                   (error: unknown) => {
@@ -680,7 +679,7 @@ export class TelegramCommandPoller {
                 if (typeof messageId === "number") {
                   await this.editMessageText(
                     messageId,
-                    "❌ No se pudo preparar el par nuevo; seguimos con " +
+                    "❌ Could not prepare the new pair; staying with " +
                       `${this.config.btcSymbol}.\n${failures.join("\n")}`,
                   ).catch((error: unknown) => {
                     console.warn("Telegram pair-apply-preflight edit failed", {
@@ -697,7 +696,7 @@ export class TelegramCommandPoller {
                   await this.editMessageText(
                     messageId,
                     `✅ ${change.summary}${persistNote}\n\n` +
-                      `El bot opera con ${pair.label} desde la próxima señal.`,
+                      `The bot trades ${pair.label} from the next signal.`,
                   ).catch((error: unknown) => {
                     console.warn("Telegram pair-apply edit failed", {
                       messageId,
@@ -735,7 +734,7 @@ export class TelegramCommandPoller {
           if (typeof messageId === "number") {
             await this.editMessageText(
               messageId,
-              `❌ Par no soportado: ${symbol}`,
+              `❌ Unsupported pair: ${symbol}`,
             ).catch((error: unknown) => {
               console.warn("Telegram pair-unknown edit failed", {
                 messageId,
@@ -771,9 +770,9 @@ export class TelegramCommandPoller {
           if (typeof messageId === "number") {
             await this.editMessageText(
               messageId,
-              `🪙 ${pair.label} (${pair.symbol}) — volumen operado últimas 24h\n\n` +
+              `🪙 ${pair.label} (${pair.symbol}) — traded volume last 24h\n\n` +
                 volumeLines.join("\n") +
-                `\n\nAl confirmar, el bot opera con ${pair.label} desde la próxima señal.`,
+                `\n\nOn confirm, the bot trades ${pair.label} from the next signal.`,
               buildPairConfirmMarkup(pair.symbol),
             ).catch((error: unknown) => {
               console.warn("Telegram pair-confirm edit failed", {
@@ -791,15 +790,15 @@ export class TelegramCommandPoller {
         const messageId = callback.message?.message_id;
         const actionLabel =
           data === "bot:pause"
-            ? "pausar"
+            ? "pause"
             : data === "bot:resume"
-              ? "reanudar"
-              : "reiniciar";
+              ? "resume"
+              : "restart";
         if (!this.control) {
           if (typeof messageId === "number") {
             await this.editMessageText(
               messageId,
-              "🤖 Control del bot no disponible en este proceso.",
+              "🤖 Bot control is not available in this process.",
             ).catch((error: unknown) => {
               console.warn("Telegram bot-control edit failed", {
                 messageId,
@@ -820,11 +819,11 @@ export class TelegramCommandPoller {
           if (active.length > 0 || queueBusy) {
             const refusal =
               active.length > 0
-                ? `⛔ No se puede ${actionLabel}: hay ${active.length} ` +
-                  `trade(s) activo(s) (${active
+                ? `⛔ Cannot ${actionLabel}: there are ${active.length} ` +
+                  `active trade(s) (${active
                     .map((trade) => `id ${trade.id}, status ${trade.status}`)
                     .join("; ")}).`
-                : `⛔ No se puede ${actionLabel}: hay una ejecución de trade en curso.`;
+                : `⛔ Cannot ${actionLabel}: a trade execution is in progress.`;
             if (typeof messageId === "number") {
               await this.editMessageText(messageId, refusal).catch(
                 (error: unknown) => {
@@ -840,15 +839,15 @@ export class TelegramCommandPoller {
             this.control.pause();
             const { text, markup } = this.buildBotControlPanel();
             await this.sendMessage(
-              "⏸ Bot pausado. El monitoreo de precios y señales está " +
-                "detenido; Telegram y el monitor defensivo siguen activos.\n\n" +
+              "⏸ Bot paused. Price and signal monitoring is stopped; " +
+                "Telegram and the defensive monitor stay active.\n\n" +
                 text,
               markup,
             );
           } else if (data === "bot:resume") {
             this.control.resume();
             const { text, markup } = this.buildBotControlPanel();
-            await this.sendMessage(`▶️ Bot reanudado.\n\n${text}`, markup);
+            await this.sendMessage(`▶️ Bot resumed.\n\n${text}`, markup);
           } else {
             let persistFailure: string | null = null;
             try {
@@ -878,9 +877,9 @@ export class TelegramCommandPoller {
               );
             }
             const restartText = persistFailure
-              ? "🔄 Reiniciando el bot… ⚠️ Los ajustes en caliente NO se " +
-                "pudieron guardar y solo sobreviven en memoria."
-              : "🔄 Reiniciando el bot… Los ajustes en caliente quedaron guardados.";
+              ? "🔄 Restarting the bot… ⚠️ Hot-adjusted settings could NOT be " +
+                "saved and survive in memory only."
+              : "🔄 Restarting the bot… Hot-adjusted settings were saved.";
             if (typeof messageId === "number") {
               await this.editMessageText(messageId, restartText).catch(
                 (error: unknown) => {
@@ -1061,8 +1060,8 @@ export class TelegramCommandPoller {
                 // report.
               } else {
                 await this.sendMessage(
-                  `❌ Retry ${token.slice(0, 8)} terminó sin un resultado ` +
-                    `definido. Revisá los logs antes de asumir que abrió.`,
+                  `❌ Retry ${token.slice(0, 8)} finished without a definite ` +
+                    `outcome. Check the logs before assuming it opened.`,
                 );
               }
             } catch (retryError) {
@@ -1124,18 +1123,18 @@ export class TelegramCommandPoller {
   private buildBotControlPanel(): { text: string; markup: unknown } {
     const paused = this.control?.isPaused() ?? false;
     const text =
-      "🤖 Control del bot\n" + `Estado: ${paused ? "⏸ Pausado" : "🟢 Activo"}`;
+      "🤖 Bot control\n" + `Status: ${paused ? "⏸ Paused" : "🟢 Active"}`;
     const markup = {
       inline_keyboard: paused
         ? [
             [
-              { text: "▶️ Reanudar", callback_data: "bot:resume" },
+              { text: "▶️ Resume", callback_data: "bot:resume" },
               { text: "🔄 Restart", callback_data: "bot:restart" },
             ],
           ]
         : [
             [
-              { text: "⏸ Pausar", callback_data: "bot:pause" },
+              { text: "⏸ Pause", callback_data: "bot:pause" },
               { text: "🔄 Restart", callback_data: "bot:restart" },
             ],
           ],
@@ -1146,8 +1145,8 @@ export class TelegramCommandPoller {
   private async sendBotControlPanel(): Promise<void> {
     if (!this.control) {
       await this.sendMessage(
-        "🤖 Control del bot no disponible: este proceso no tiene " +
-          "pausa/reinicio cableados.",
+        "🤖 Bot control not available: this process has no " +
+          "pause/restart wiring.",
       );
       return;
     }
@@ -1172,7 +1171,7 @@ export class TelegramCommandPoller {
         key: change.key,
         message,
       });
-      return `\n⚠️ No se pudo guardar para sobrevivir al restart: ${message}`;
+      return `\n⚠️ Could not save it to survive a restart: ${message}`;
     }
   }
 
@@ -1188,7 +1187,7 @@ export class TelegramCommandPoller {
             inline_keyboard: [
               [
                 {
-                  text: "Reintentar orden limit",
+                  text: "Retry limit order",
                   callback_data: `retrade:${token}`,
                 },
               ],
@@ -1288,9 +1287,9 @@ export class TelegramCommandPoller {
       if (typeof messageId === "number") {
         await this.editMessageText(
           messageId,
-          `⏱ Trade no abierto (${token.slice(0, 8)}): la orden ` +
-            `límite expiró sin fill y el trade quedó cancelado. ` +
-            `Usá "Reintentar orden limit" para intentarlo de nuevo.`,
+          `⏱ Trade not opened (${token.slice(0, 8)}): the limit order ` +
+            `expired without a fill and the trade was cancelled. ` +
+            `Use "Retry limit order" to try again.`,
         ).catch((error: unknown) => {
           console.warn("Telegram cancel-timeout edit failed", {
             messageId,
@@ -1314,8 +1313,8 @@ export class TelegramCommandPoller {
       // without an explicit opened result.
       await this.editMessageText(
         messageId,
-        `❌ Trade ${token.slice(0, 8)} terminó sin un resultado ` +
-          `definido. Revisá los logs antes de asumir que abrió.`,
+        `❌ Trade ${token.slice(0, 8)} finished without a definite ` +
+          `outcome. Check the logs before assuming it opened.`,
       ).catch((error: unknown) => {
         console.warn("Telegram unknown-outcome edit failed", {
           messageId,
@@ -1369,8 +1368,8 @@ type VolumeView = "total" | "prevmonth" | "6m";
 
 const VOLUME_VIEW_BUTTONS = [
   { text: "Total", callback_data: "volume:total" },
-  { text: "Mes anterior", callback_data: "volume:prevmonth" },
-  { text: "6 meses", callback_data: "volume:6m" },
+  { text: "Previous month", callback_data: "volume:prevmonth" },
+  { text: "6 months", callback_data: "volume:6m" },
 ] as const;
 
 // Two buttons per row, in operator-priority order: the everyday alert
@@ -1403,7 +1402,7 @@ function buildPairsMenuMarkup(currentSymbol: string) {
       callback_data: `pair:${pair.symbol}`,
     },
   ]);
-  rows.push([{ text: "Cancelar", callback_data: "set:cancel" }]);
+  rows.push([{ text: "Cancel", callback_data: "set:cancel" }]);
   return { inline_keyboard: rows };
 }
 
@@ -1413,18 +1412,18 @@ function buildPairConfirmMarkup(symbol: string) {
   return {
     inline_keyboard: [
       [
-        { text: "✅ Confirmar", callback_data: `pair:apply:${symbol}` },
-        { text: "❌ Cancelar", callback_data: "set:cancel" },
+        { text: "✅ Confirm", callback_data: `pair:apply:${symbol}` },
+        { text: "❌ Cancel", callback_data: "set:cancel" },
       ],
     ],
   };
 }
 
 const SETTING_CANCEL_MARKUP = {
-  inline_keyboard: [[{ text: "Cancelar", callback_data: "set:cancel" }]],
+  inline_keyboard: [[{ text: "Cancel", callback_data: "set:cancel" }]],
 };
 
-const VOLUME_ATTRIBUTION_NOTE = "(atribuido por apertura del trade, UTC)";
+const VOLUME_ATTRIBUTION_NOTE = "(attributed by trade opening, UTC)";
 
 /** Compact USD for the /volume message (operator request): K/M suffixes
  * with ONE decimal, rounded, dropping a trailing ".0" (10K, not 10.0K).
@@ -1457,8 +1456,8 @@ function formatCompactPnl(value: number): string {
  * and funding is out of scope. */
 function formatNetPnlLines(net: NetPnlTotals): string[] {
   return [
-    `PnL realizado: $${formatCompactUsd(net.realizedUsd)} · Fees: $${formatCompactUsd(net.feesUsd)}`,
-    `Neto: ${formatCompactPnl(net.netUsd)} (trading fees conocidos, sin funding)`,
+    `Realized PnL: $${formatCompactUsd(net.realizedUsd)} · Fees: $${formatCompactUsd(net.feesUsd)}`,
+    `Net: ${formatCompactPnl(net.netUsd)} (known trading fees, funding excluded)`,
   ];
 }
 
@@ -1474,7 +1473,7 @@ function formatExchangeVolumeLines(
 ): string[] {
   if (byExchange.length === 0) return [];
   return [
-    "Por exchange:",
+    "By exchange:",
     ...byExchange.map(
       (entry) => `  ${entry.exchangeId}: $${formatCompactUsd(entry.usd)}`,
     ),
@@ -1494,7 +1493,7 @@ async function buildVolumeMessage(
     const stats = await loadVolumeTotals(db, range);
     const net = await loadNetPnlTotals(db, range);
     return [
-      `📊 Volumen generado — ${range.label}`,
+      `📊 Generated volume — ${range.label}`,
       `Total: $${formatCompactUsd(stats.totalUsd)}`,
       ...formatNetPnlLines(net),
       ...formatExchangeVolumeLines(stats.byExchange),
@@ -1527,12 +1526,12 @@ async function buildVolumeMessage(
       const suffix =
         label ===
         `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`
-          ? " (en curso)"
+          ? " (in progress)"
           : "";
       // Months with no realized PnL have no net row: no suffix, rather
       // than a misleading "+0.00".
       const netSuffix = netByMonth.has(label)
-        ? ` · neto ${formatSignedUsd(netByMonth.get(label) ?? 0)}`
+        ? ` · net ${formatSignedUsd(netByMonth.get(label) ?? 0)}`
         : "";
       monthLines.push(
         `${label}: $${formatCompactUsd(byMonth.get(label) ?? 0)}${suffix}${netSuffix}`,
@@ -1540,9 +1539,9 @@ async function buildVolumeMessage(
       cursor.setUTCMonth(cursor.getUTCMonth() + 1);
     }
     return [
-      "📊 Volumen generado — últimos 6 meses",
+      "📊 Generated volume — last 6 months",
       ...monthLines,
-      `Total período: $${formatCompactUsd(stats.totalUsd)}`,
+      `Period total: $${formatCompactUsd(stats.totalUsd)}`,
       ...formatNetPnlLines(net),
       ...formatExchangeVolumeLines(stats.byExchange),
       VOLUME_ATTRIBUTION_NOTE,
@@ -1551,8 +1550,8 @@ async function buildVolumeMessage(
   const stats = await loadVolumeTotals(db);
   const net = await loadNetPnlTotals(db);
   return [
-    "📊 Volumen generado (farmed)",
-    `Total histórico: $${formatCompactUsd(stats.totalUsd)}`,
+    "📊 Generated volume (farmed)",
+    `Lifetime total: $${formatCompactUsd(stats.totalUsd)}`,
     ...formatNetPnlLines(net),
     ...formatExchangeVolumeLines(stats.byExchange),
     VOLUME_ATTRIBUTION_NOTE,
@@ -1593,7 +1592,7 @@ export function formatActiveConfigSummary(
     `Mode: ${config.botExecutionMode}`,
     `Open trade margin: $${formatUsd(config.openTrade.marginUsd)} per leg (notional $${formatUsd(config.openTrade.notionalUsd)} at ${config.leverage}x)${marginOverridden ? " *" : ""}`,
     `Open trade TP/SL: TP: ${config.openTrade.takeProfitPercent}% / SL: -${config.openTrade.stopLossPercent}%`,
-    `Auto-confirm (auto-trading): ${config.openTrade.autoConfirm ? "ACTIVADO 🤖" : "off"}${autoConfirmOverridden ? " *" : ""}`,
+    `Auto-confirm (auto-trading): ${config.openTrade.autoConfirm ? "ON 🤖" : "off"}${autoConfirmOverridden ? " *" : ""}`,
     `Telegram cooldown: ${config.telegram.alertCooldownMs} ms${cooldownOverridden ? " *" : ""}`,
     "",
     formatExchangeLine("Exchange A", config.exchangeA, config),
@@ -1607,7 +1606,7 @@ export function formatActiveConfigSummary(
     autoConfirmOverridden ||
     tradingPairOverridden
   ) {
-    lines.push("", "(* ajustado en caliente — no persiste al reiniciar)");
+    lines.push("", "(* adjusted at runtime — does not persist across restarts)");
   }
   return lines.join("\n");
 }
@@ -1644,19 +1643,19 @@ function friendlyCallbackError(raw: string, quoteMaxAgeMs: number): string {
   switch (raw) {
     case "Executable BBO quote is stale":
       return (
-        `⏱ Cotización vencida: el precio llegó con más de ${Math.round(quoteMaxAgeMs / 1000)}s de antigüedad. ` +
-        'Tocá "Open Trade" de nuevo.'
+        `⏱ Stale quote: the price arrived more than ${Math.round(quoteMaxAgeMs / 1000)}s old. ` +
+        'Tap "Open Trade" again.'
       );
     case "Preview expired; open a new trade from a fresh signal":
-      return '⌛ La preview de la señal expiró. Esperá una señal nueva y tocá "Open Trade" ahí.';
+      return '⌛ The signal preview expired. Wait for a new signal and tap "Open Trade" there.';
     case "Preview was already consumed, cancelled or expired":
-      return "↪️ Esa acción ya fue usada o expiró. Si el trade no abrió, usá una señal nueva.";
+      return "↪️ That action was already used or expired. If the trade did not open, use a new signal.";
     case "Signal no longer exists":
-      return "🔍 La señal ya no existe (puede haber sido limpiada). Esperá la próxima señal.";
+      return "🔍 The signal no longer exists (it may have been cleaned up). Wait for the next signal.";
     case "Trade not available for retry":
-      return "🔁 Ese trade no está disponible para reintento.";
+      return "🔁 That trade is not available for retry.";
     default:
-      return `❌ No se pudo completar: ${raw}`;
+      return `❌ Could not complete: ${raw}`;
   }
 }
 

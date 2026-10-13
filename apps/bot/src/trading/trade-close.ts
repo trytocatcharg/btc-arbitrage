@@ -47,7 +47,7 @@ const CLOSE_FLAT_POLL_MS = 500;
 
 /** 🟢/🔴 PnL formatting, matching the trade-summary module convention. */
 export function formatPnlColored(value: number | null): string {
-  if (value == null) return "n/a (precio de salida no disponible)";
+  if (value == null) return "n/a (exit price unavailable)";
   return value >= 0
     ? `🟢 +$${value.toFixed(2)}`
     : `🔴 -$${Math.abs(value).toFixed(2)}`;

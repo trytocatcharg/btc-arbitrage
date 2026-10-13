@@ -22,11 +22,11 @@ export async function buildLastSignalsMessage(
     .limit(LAST_SIGNALS_LIMIT);
 
   if (rows.length === 0) {
-    return "📡 Últimas señales\n\nNo hay señales registradas.";
+    return "📡 Last signals\n\nNo signals recorded.";
   }
 
   return [
-    `📡 Últimas ${rows.length} señales (${timeZone})`,
+    `📡 Last ${rows.length} signals (${timeZone})`,
     "",
     ...rows.flatMap((row) => formatSignalLines(row, timeZone, now)),
   ].join("\n");
@@ -55,7 +55,7 @@ function formatLocalTimestamp(date: Date, timeZone: string, now: Date): string {
 
   const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
   if (day === dayKey(yesterday, timeZone)) {
-    return `ayer ${formatParts(date, timeZone, ["hour", "minute", "second"])}`;
+    return `yesterday ${formatParts(date, timeZone, ["hour", "minute", "second"])}`;
   }
   return formatParts(date, timeZone, ["day", "month", "hour", "minute"]);
 }
@@ -65,14 +65,14 @@ function formatRelativeAge(from: Date, now: Date): string {
     0,
     Math.round((now.getTime() - from.getTime()) / 1000),
   );
-  if (seconds < 10) return "justo ahora";
-  if (seconds < 60) return `hace ${seconds} segundos`;
+  if (seconds < 10) return "just now";
+  if (seconds < 60) return `${seconds} seconds ago`;
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `hace ${minutes} minuto${minutes === 1 ? "" : "s"}`;
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `hace ${hours} hora${hours === 1 ? "" : "s"}`;
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
   const days = Math.floor(hours / 24);
-  return `hace ${days} día${days === 1 ? "" : "s"}`;
+  return `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
 /** YYYY-MM-DD of the instant in the given timezone (en-CA renders ISO
