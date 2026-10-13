@@ -24,7 +24,6 @@ import {
   type NetPnlTotals,
   type VolumeTotals,
 } from "../trading/volume-stats.js";
-import { formatPnlColored } from "../trading/trade-close.js";
 import {
   isAllowedTelegramChat,
   isAllowedTelegramUser,
@@ -1427,22 +1426,47 @@ const SETTING_CANCEL_MARKUP = {
 
 const VOLUME_ATTRIBUTION_NOTE = "(atribuido por apertura del trade, UTC)";
 
+/** Compact USD for the /volume message (operator request): K/M suffixes
+ * with ONE decimal, rounded, dropping a trailing ".0" (10K, not 10.0K).
+ * Values under 1k keep the exact cent-level rendering so small numbers
+ * (per-exchange volume, monthly nets) stay precise. */
+function formatCompactUsd(value: number): string {
+  if (!Number.isFinite(value)) return "n/d";
+  const abs = Math.abs(value);
+  if (abs >= 1_000_000) return `${roundCompact(value / 1_000_000)}M`;
+  if (abs >= 1_000) return `${roundCompact(value / 1_000)}K`;
+  return value.toFixed(2);
+}
+
+/** One decimal, rounded; a round result drops the decimal (5, not 5.0). */
+function roundCompact(value: number): string {
+  return String(Math.round(value * 10) / 10);
+}
+
+/** Compact signed PnL with the 🟢/🔴 icons, matching formatPnlColored's
+ * shape but with the K/M compact amount. */
+function formatCompactPnl(value: number): string {
+  const icon = value >= 0 ? "🟢" : "🔴";
+  const sign = value >= 0 ? "+" : "-";
+  return `${icon} ${sign}$${formatCompactUsd(Math.abs(value))}`;
+}
+
 /** Two-line net-PnL block shown after the volume total in every /volume
  * view. The label is load-bearing: only fees persisted since the
  * fee-capture feature landed are summed (historical fees under-report),
  * and funding is out of scope. */
 function formatNetPnlLines(net: NetPnlTotals): string[] {
   return [
-    `PnL realizado: $${net.realizedUsd.toFixed(2)} · Fees: $${net.feesUsd.toFixed(2)}`,
-    `Neto: ${formatPnlColored(net.netUsd)} (trading fees conocidos, sin funding)`,
+    `PnL realizado: $${formatCompactUsd(net.realizedUsd)} · Fees: $${formatCompactUsd(net.feesUsd)}`,
+    `Neto: ${formatCompactPnl(net.netUsd)} (trading fees conocidos, sin funding)`,
   ];
 }
 
-/** Compact signed USD (no emoji) for inline per-month net suffixes. */
+/** Compact signed USD for inline per-month net suffixes. */
 function formatSignedUsd(value: number): string {
   return value >= 0
-    ? `+$${value.toFixed(2)}`
-    : `-$${Math.abs(value).toFixed(2)}`;
+    ? `+$${formatCompactUsd(value)}`
+    : `-$${formatCompactUsd(Math.abs(value))}`;
 }
 
 function formatExchangeVolumeLines(
@@ -1452,7 +1476,7 @@ function formatExchangeVolumeLines(
   return [
     "Por exchange:",
     ...byExchange.map(
-      (entry) => `  ${entry.exchangeId}: $${entry.usd.toFixed(2)}`,
+      (entry) => `  ${entry.exchangeId}: $${formatCompactUsd(entry.usd)}`,
     ),
   ];
 }
@@ -1471,7 +1495,7 @@ async function buildVolumeMessage(
     const net = await loadNetPnlTotals(db, range);
     return [
       `📊 Volumen generado — ${range.label}`,
-      `Total: $${stats.totalUsd.toFixed(2)}`,
+      `Total: $${formatCompactUsd(stats.totalUsd)}`,
       ...formatNetPnlLines(net),
       ...formatExchangeVolumeLines(stats.byExchange),
       VOLUME_ATTRIBUTION_NOTE,
@@ -1511,14 +1535,14 @@ async function buildVolumeMessage(
         ? ` · neto ${formatSignedUsd(netByMonth.get(label) ?? 0)}`
         : "";
       monthLines.push(
-        `${label}: $${(byMonth.get(label) ?? 0).toFixed(2)}${suffix}${netSuffix}`,
+        `${label}: $${formatCompactUsd(byMonth.get(label) ?? 0)}${suffix}${netSuffix}`,
       );
       cursor.setUTCMonth(cursor.getUTCMonth() + 1);
     }
     return [
       "📊 Volumen generado — últimos 6 meses",
       ...monthLines,
-      `Total período: $${stats.totalUsd.toFixed(2)}`,
+      `Total período: $${formatCompactUsd(stats.totalUsd)}`,
       ...formatNetPnlLines(net),
       ...formatExchangeVolumeLines(stats.byExchange),
       VOLUME_ATTRIBUTION_NOTE,
@@ -1528,7 +1552,7 @@ async function buildVolumeMessage(
   const net = await loadNetPnlTotals(db);
   return [
     "📊 Volumen generado (farmed)",
-    `Total histórico: $${stats.totalUsd.toFixed(2)}`,
+    `Total histórico: $${formatCompactUsd(stats.totalUsd)}`,
     ...formatNetPnlLines(net),
     ...formatExchangeVolumeLines(stats.byExchange),
     VOLUME_ATTRIBUTION_NOTE,
