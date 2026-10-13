@@ -11,6 +11,7 @@ export type RuntimeSettingKey =
   | "cooldownMinutes"
   | "minSpreadUsd"
   | "marginUsd"
+  | "leverage"
   | "autoConfirm"
   | "tradingPair";
 
@@ -24,12 +25,14 @@ export interface RuntimeSettingsBaseline {
   cooldownMinutes: number;
   minSpreadUsd: string;
   marginUsd: string;
+  leverage: number;
   autoConfirm: boolean;
   tradingPair: string;
 }
 
 const MAX_COOLDOWN_MINUTES = 10_080; // 7 days
 const MAX_USD_VALUE = 10_000;
+const MAX_LEVERAGE = 50;
 
 export function snapshotRuntimeSettings(
   config: BotConfig,
@@ -38,6 +41,7 @@ export function snapshotRuntimeSettings(
     cooldownMinutes: config.telegram.alertCooldownMs / 60_000,
     minSpreadUsd: config.minPriceDiffUsd,
     marginUsd: config.openTrade.marginUsd,
+    leverage: config.leverage,
     autoConfirm: config.openTrade.autoConfirm,
     tradingPair: config.btcSymbol,
   };
@@ -92,6 +96,32 @@ export function applyMarginUsd(
     summary:
       `Open trade margin: $${valueUsd.toFixed(2)} por pata ` +
       `(notional $${(valueUsd * config.leverage).toFixed(2)} a ${config.leverage}x)`,
+  };
+}
+
+export function applyLeverage(
+  config: BotConfig,
+  leverage: number,
+): RuntimeSettingChange {
+  if (
+    !Number.isInteger(leverage) ||
+    leverage < 1 ||
+    leverage > MAX_LEVERAGE
+  ) {
+    throw new Error(`El leverage debe ser un entero entre 1 y ${MAX_LEVERAGE}.`);
+  }
+  config.leverage = leverage;
+  // Same invariant as applyMarginUsd: notionalUsd derives as margin ×
+  // leverage at config load, so a runtime leverage override must
+  // recompute it to keep previews consistent.
+  const marginUsd = Number(config.openTrade.marginUsd);
+  config.openTrade.notionalUsd = (marginUsd * leverage).toFixed(8);
+  return {
+    key: "leverage",
+    summary:
+      `Leverage: ${leverage}x ` +
+      `(notional $${(marginUsd * leverage).toFixed(2)} por pata ` +
+      `con margin $${marginUsd.toFixed(2)})`,
   };
 }
 
@@ -153,6 +183,8 @@ export function isRuntimeSettingOverridden(
       return config.minPriceDiffUsd !== baseline.minSpreadUsd;
     case "marginUsd":
       return config.openTrade.marginUsd !== baseline.marginUsd;
+    case "leverage":
+      return config.leverage !== baseline.leverage;
     case "autoConfirm":
       return config.openTrade.autoConfirm !== baseline.autoConfirm;
     case "tradingPair":

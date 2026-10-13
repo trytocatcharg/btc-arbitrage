@@ -1,4 +1,4 @@
-import { and, desc, inArray, isNotNull } from "drizzle-orm";
+import { and, desc, inArray, isNotNull, sql } from "drizzle-orm";
 import { getDb, tradeLegs, trades, openTradeStatuses } from "@btc-arbitrage/db";
 import type { ExchangeAdapter } from "@btc-arbitrage/exchange-core";
 import type { MarketType, PriceSource } from "@btc-arbitrage/domain";
@@ -99,7 +99,12 @@ export interface LastTradesDependencies {
  * valid realized PnL (positive or negative). Active, cancelled, and
  * failed trades never appear here (operator decision 2026-10-09).
  * Net = realized GROSS − total fees (operator convention 2026-10-07).
- * Timestamps render in the operator's IANA timezone. */
+ * Timestamps render in the operator's IANA timezone.
+ *
+ * The trailing "Total net" line aggregates the WHOLE closed-trade history
+ * (operator request), not just the displayed page: the list is a window
+ * into the last N trades, while the total answers "cuánto gané/perdí en
+ * total". */
 export async function buildLastTradesMessage(
   deps: LastTradesDependencies,
   timeZone: string,
@@ -117,19 +122,41 @@ export async function buildLastTradesMessage(
   }
 
   const lines: string[] = [`📜 Last ${rows.length} trades (closed)`, ""];
-  let totalNetUsd = 0;
   for (const trade of rows) {
     const netUsd = tradeNetPnlUsd(trade);
     if (netUsd == null) continue;
-    totalNetUsd += netUsd;
     const when = trade.closedAt ?? trade.createdAt;
     lines.push(
       `#${trade.id} · ${formatClosedAt(when, timeZone)} · ${formatPnl(netUsd)}`,
     );
   }
   lines.push("");
-  lines.push(`Total net: ${formatPnl(totalNetUsd)}`);
+  lines.push(
+    `Total net (histórico completo): ${formatPnl(await loadClosedNetPnlUsd(deps.db))}`,
+  );
   return lines.join("\n");
+}
+
+/** Aggregate net across ALL closed trades with realized PnL — the full
+ * history, not the displayed page. sum(realized GROSS) − sum(known fees),
+ * mirroring the per-trade convention in tradeNetPnlUsd (a trade with null
+ * fees contributes its realized PnL only). */
+async function loadClosedNetPnlUsd(db: BotDatabase): Promise<number | null> {
+  const [totals] = await db
+    .select({
+      realized: sql<string | null>`sum(${trades.realizedPnlUsd})`,
+      fees: sql<string | null>`sum(${trades.totalFeesUsd})`,
+    })
+    .from(trades)
+    .where(
+      and(
+        inArray(trades.status, ["closed"]),
+        isNotNull(trades.realizedPnlUsd),
+      ),
+    );
+  const realized = toNumber(totals?.realized);
+  if (realized == null) return null;
+  return realized - (toNumber(totals?.fees) ?? 0);
 }
 
 /** Closed-at label in the operator's timezone: YYYY-MM-DD, short weekday

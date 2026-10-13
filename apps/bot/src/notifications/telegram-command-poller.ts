@@ -36,6 +36,7 @@ import { createOpenTradeService } from "../trading/open-trade-factory.js";
 import {
   applyAutoConfirm,
   applyCooldownMinutes,
+  applyLeverage,
   applyMarginUsd,
   applyMinSpreadUsd,
   applyTradingPair,
@@ -124,8 +125,12 @@ export class TelegramCommandPoller {
   private offset = 0;
 
   private readonly settingsBaseline: RuntimeSettingsBaseline;
-  private pendingSettingPrompt: "cooldown" | "spread" | "margin" | null =
-    null;
+  private pendingSettingPrompt:
+    | "cooldown"
+    | "spread"
+    | "margin"
+    | "leverage"
+    | null = null;
 
   constructor(
     private readonly config: BotConfig,
@@ -327,9 +332,11 @@ export class TelegramCommandPoller {
         change =
           kind === "cooldown"
             ? applyCooldownMinutes(this.config, value)
-          : kind === "spread"
-            ? applyMinSpreadUsd(this.config, value)
-            : applyMarginUsd(this.config, value);
+            : kind === "spread"
+              ? applyMinSpreadUsd(this.config, value)
+              : kind === "margin"
+                ? applyMarginUsd(this.config, value)
+                : applyLeverage(this.config, value);
       } catch (validationError) {
         // Invalid value: keep the prompt open so the operator can retry.
         const message =
@@ -491,6 +498,23 @@ export class TelegramCommandPoller {
             SETTING_CANCEL_MARKUP,
           ).catch((error: unknown) => {
             console.warn("Telegram margin-prompt edit failed", {
+              messageId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
+      } else if (data === "set:leverage") {
+        this.pendingSettingPrompt = "leverage";
+        const messageId = callback.message?.message_id;
+        if (typeof messageId === "number") {
+          await this.editMessageText(
+            messageId,
+            "Mandame el nuevo leverage (entero entre 1 y 50). " +
+              `El notional por pata se recalcula como margin × leverage ` +
+              `(margin actual $${Number(this.config.openTrade.marginUsd).toFixed(2)}).`,
+            SETTING_CANCEL_MARKUP,
+          ).catch((error: unknown) => {
+            console.warn("Telegram leverage-prompt edit failed", {
               messageId,
               message: error instanceof Error ? error.message : String(error),
             });
@@ -829,7 +853,7 @@ export class TelegramCommandPoller {
           } else {
             let persistFailure: string | null = null;
             try {
-              // Persist ALL FOUR runtime overrides so the restart (and
+              // Persist ALL FIVE runtime overrides so the restart (and
               // any future boot) re-applies them; failure never blocks
               // the restart — the operator is told instead.
               await Promise.all(
@@ -838,6 +862,7 @@ export class TelegramCommandPoller {
                     "cooldownMinutes",
                     "minSpreadUsd",
                     "marginUsd",
+                    "leverage",
                     "autoConfirm",
                   ] as const
                 ).map((key) =>
@@ -1349,15 +1374,19 @@ const VOLUME_VIEW_BUTTONS = [
   { text: "6 meses", callback_data: "volume:6m" },
 ] as const;
 
-// Two rows below the everyday settings: Pairs (opens the pair submenu) and
-// the dangerous auto-trading toggle. The toggle must never render glued to
-// the everyday settings, and Pairs sits beside it as the other
-// strategy-level control.
+// Two buttons per row, in operator-priority order: the everyday alert
+// settings first, the sizing settings second (margin + leverage derive the
+// per-leg notional together), and the strategy-level row last — Pairs and
+// the dangerous auto-trading toggle, which must never render glued to the
+// everyday settings.
 const RUNTIME_SETTING_BUTTONS = [
   [
     { text: "⏱ Cooldown", callback_data: "set:cooldown" },
     { text: "📏 Min spread", callback_data: "set:spread" },
+  ],
+  [
     { text: "💰 Margin", callback_data: "set:margin" },
+    { text: "⚡️ Leverage", callback_data: "set:leverage" },
   ],
   [
     { text: "🪙 Pairs", callback_data: "set:pair" },
@@ -1516,6 +1545,9 @@ export function formatActiveConfigSummary(
   const marginOverridden =
     baseline != null &&
     isRuntimeSettingOverridden("marginUsd", baseline, config);
+  const leverageOverridden =
+    baseline != null &&
+    isRuntimeSettingOverridden("leverage", baseline, config);
   const cooldownOverridden =
     baseline != null &&
     isRuntimeSettingOverridden("cooldownMinutes", baseline, config);
@@ -1533,7 +1565,7 @@ export function formatActiveConfigSummary(
     `Price source: ${config.priceSource}`,
     `Poll interval: ${config.pricePollIntervalMs} ms`,
     `Min spread: $${formatUsd(config.minPriceDiffUsd)}${minSpreadOverridden ? " *" : ""}`,
-    `Leverage: ${config.leverage}x`,
+    `Leverage: ${config.leverage}x${leverageOverridden ? " *" : ""}`,
     `Mode: ${config.botExecutionMode}`,
     `Open trade margin: $${formatUsd(config.openTrade.marginUsd)} per leg (notional $${formatUsd(config.openTrade.notionalUsd)} at ${config.leverage}x)${marginOverridden ? " *" : ""}`,
     `Open trade TP/SL: TP: ${config.openTrade.takeProfitPercent}% / SL: -${config.openTrade.stopLossPercent}%`,
@@ -1546,6 +1578,7 @@ export function formatActiveConfigSummary(
   if (
     minSpreadOverridden ||
     marginOverridden ||
+    leverageOverridden ||
     cooldownOverridden ||
     autoConfirmOverridden ||
     tradingPairOverridden

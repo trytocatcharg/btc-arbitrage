@@ -5,6 +5,7 @@ import { sql } from "drizzle-orm";
 import {
   applyAutoConfirm,
   applyCooldownMinutes,
+  applyLeverage,
   applyMarginUsd,
   applyMinSpreadUsd,
   applyTradingPair,
@@ -27,6 +28,8 @@ function readSettingValue(config: BotConfig, key: RuntimeSettingKey): string {
       return config.minPriceDiffUsd;
     case "marginUsd":
       return config.openTrade.marginUsd;
+    case "leverage":
+      return String(config.leverage);
     case "autoConfirm":
       return config.openTrade.autoConfirm ? "true" : "false";
     case "tradingPair":
@@ -67,7 +70,8 @@ function parseStoredValue(
   switch (key) {
     case "cooldownMinutes":
     case "minSpreadUsd":
-    case "marginUsd": {
+    case "marginUsd":
+    case "leverage": {
       const value = Number(raw);
       return Number.isFinite(value) ? value : null;
     }
@@ -100,6 +104,7 @@ export async function applyPersistedRuntimeOverrides(
       "cooldownMinutes",
       "minSpreadUsd",
       "marginUsd",
+      "leverage",
       "autoConfirm",
       "tradingPair",
     ];
@@ -129,6 +134,9 @@ export async function applyPersistedRuntimeOverrides(
           break;
         case "marginUsd":
           changes.push(applyMarginUsd(config, value as number));
+          break;
+        case "leverage":
+          changes.push(applyLeverage(config, value as number));
           break;
         case "autoConfirm":
           changes.push(applyAutoConfirm(config, value as boolean));
