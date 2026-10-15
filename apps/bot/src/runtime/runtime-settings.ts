@@ -148,7 +148,7 @@ export function applyAutoConfirm(
  * `config.btcSymbol` per use (polling loop, signal engine, open-trade
  * previews, execution), so mutating it in place propagates without a
  * restart. The symbol must come from the shared TRADING_PAIRS catalog —
- * the venue side resolves it by base-asset matching, so no per-exchange
+ * the exchange side resolves it by base-asset matching, so no per-exchange
  * mapping is needed. Caller is responsible for the active-trade guard and
  * the per-symbol execution preflight (see the Telegram Pairs panel). */
 export function applyTradingPair(

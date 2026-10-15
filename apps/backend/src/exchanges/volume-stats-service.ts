@@ -3,7 +3,7 @@ import { and, eq, gte, sql } from "drizzle-orm";
 
 type Db = Awaited<ReturnType<typeof getDb>>;
 
-export interface VenueVolumeSnapshot {
+export interface ExchangeVolumeSnapshot {
   exchangeId: string;
   /** Raw decimal string straight from the MySQL `sum()` aggregate. */
   volumeUsd: string;
@@ -12,7 +12,7 @@ export interface VenueVolumeSnapshot {
 export interface VolumeTotalsSnapshot {
   /** Raw decimal string straight from the MySQL `sum()` aggregate. */
   totalUsd: string;
-  byVenue: VenueVolumeSnapshot[];
+  byExchange: ExchangeVolumeSnapshot[];
 }
 
 export interface RawVolumeStats {
@@ -79,7 +79,7 @@ async function readTotals(
     .from(trades)
     .where(and(...conditions));
 
-  const byVenueRows = await db
+  const byExchangeRows = await db
     .select({
       exchangeId: tradeLegs.exchangeId,
       volumeUsd: sql<string>`coalesce(sum(${tradeLegs.filledNotionalUsd}), 0)`,
@@ -91,6 +91,6 @@ async function readTotals(
 
   return {
     totalUsd: totalRows[0]?.totalUsd ?? "0",
-    byVenue: byVenueRows,
+    byExchange: byExchangeRows,
   };
 }

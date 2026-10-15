@@ -50,7 +50,7 @@ refresh as balances (one effect, `Promise.allSettled`, independent
 loading/error state), so a backend outage degrades to balances-only.
 
 The farmed-volume panel (`FarmedVolumePanel`) shows the lifetime total, the
-trailing 24h / 7d / 30d totals, and the per-venue breakdown. When the
+trailing 24h / 7d / 30d totals, and the per-exchange breakdown. When the
 database holds zeros (dry-run / pre-fill) the panel renders an explicit
 "$0.00 farmed" empty state — never an error. The panel is read-only: no
 exchange signing, no credential handling, no mutating calls.

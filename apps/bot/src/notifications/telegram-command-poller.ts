@@ -17,13 +17,11 @@ import {
 import {
   lastSixMonthsFrom,
   loadMonthlyNetPnlBreakdown,
-  loadMonthlyVolumeBreakdown,
   loadNetPnlTotals,
-  loadVolumeTotals,
   previousMonthRange,
   type NetPnlTotals,
-  type VolumeTotals,
 } from "../trading/volume-stats.js";
+import { loadExchangeVolume } from "../trading/exchange-volume.js";
 import {
   isAllowedTelegramChat,
   isAllowedTelegramUser,
@@ -113,7 +111,7 @@ const AVAILABLE_COMMANDS = [
   },
   {
     command: "volume",
-    description: "Generated volume (farmed): total, previous month, 6 months",
+    description: "Volume by exchange: total, previous month, 6 months",
   },
   {
     command: "lastsignal",
@@ -292,9 +290,12 @@ export class TelegramCommandPoller {
       }
 
       if (isTelegramCommand(text, "volume")) {
-        await this.sendMessage(await buildVolumeMessage(this.db, "total"), {
-          inline_keyboard: [VOLUME_VIEW_BUTTONS],
-        });
+        await this.sendMessage(
+          await buildVolumeMessage(this.db, this.registry, "total"),
+          {
+            inline_keyboard: [VOLUME_VIEW_BUTTONS],
+          },
+        );
         return;
       }
 
@@ -327,9 +328,9 @@ export class TelegramCommandPoller {
     if (!kind) return;
     try {
       const value = Number(text.replace(",", "."));
-      // Leverage is written to the venues inside
-      // validateExecutionPreflight, so venues are prepared BEFORE the
-      // config value changes; a venue rejection keeps the current value.
+      // Leverage is written to the exchanges inside
+      // validateExecutionPreflight, so exchanges are prepared BEFORE the
+      // config value changes; an exchange rejection keeps the current value.
       // Policy: specs/exchange-execution.md ("Startup execution preflight").
       if (kind === "leverage") {
         if (!Number.isInteger(value) || value < 1 || value > MAX_LEVERAGE) {
@@ -360,7 +361,7 @@ export class TelegramCommandPoller {
         if (failures.length > 0) {
           this.pendingSettingPrompt = null;
           await this.sendMessage(
-            "❌ Could not set the leverage on the venue(s); leverage stays " +
+            "❌ Could not set the leverage on the exchange(s); leverage stays " +
               `at ${this.config.leverage}x.\n${failures.join("\n")}`,
           );
           return;
@@ -390,10 +391,10 @@ export class TelegramCommandPoller {
       this.pendingSettingPrompt = null;
       console.warn("Runtime setting updated", { updateId, kind, ...change });
       const persistNote = await this.persistAppliedChange(change);
-      const venueSyncNote =
-        kind === "leverage" ? "\n(venue leverage updated)" : "";
+      const exchangeSyncNote =
+        kind === "leverage" ? "\n(exchange leverage updated)" : "";
       await this.sendMessage(
-        `✅ ${change.summary}${persistNote}${venueSyncNote}`,
+        `✅ ${change.summary}${persistNote}${exchangeSyncNote}`,
       );
     } catch (error) {
       console.error("Telegram setting input failed", {
@@ -696,7 +697,7 @@ export class TelegramCommandPoller {
                 );
               }
             } else {
-              // Prepare the venues BEFORE applying: RISEx sets the account
+              // Prepare the exchanges BEFORE applying: RISEx sets the account
               // leverage per market, so the new symbol must be preflighted
               // while the bot still operates the previous pair. Any
               // failure keeps the current pair untouched.
@@ -1142,7 +1143,7 @@ export class TelegramCommandPoller {
           if (typeof messageId === "number") {
             await this.editMessageText(
               messageId,
-              await buildVolumeMessage(this.db, view),
+              await buildVolumeMessage(this.db, this.registry, view),
               { inline_keyboard: [VOLUME_VIEW_BUTTONS] },
             );
           }
@@ -1467,7 +1468,8 @@ const SETTING_CANCEL_MARKUP = {
   inline_keyboard: [[{ text: "Cancel", callback_data: "set:cancel" }]],
 };
 
-const VOLUME_ATTRIBUTION_NOTE = "(attributed by trade opening, UTC)";
+const VOLUME_ATTRIBUTION_NOTE =
+  "(exchange-reported account volume by fill month, UTC; · db = DB-sourced)";
 
 /** Compact USD for the /volume message (operator request): K/M suffixes
  * with ONE decimal, rounded, dropping a trailing ".0" (10K, not 10.0K).
@@ -1513,44 +1515,51 @@ function formatSignedUsd(value: number): string {
 }
 
 function formatExchangeVolumeLines(
-  byExchange: VolumeTotals["byExchange"],
+  byExchange: Array<{ exchangeId: string; usd: number }>,
+  exchangesFromDb: string[],
 ): string[] {
   if (byExchange.length === 0) return [];
   return [
     "By exchange:",
     ...byExchange.map(
-      (entry) => `  ${entry.exchangeId}: $${formatCompactUsd(entry.usd)}`,
+      (entry) =>
+        `  ${entry.exchangeId}${exchangesFromDb.includes(entry.exchangeId) ? " · db" : ""}: $${formatCompactUsd(entry.usd)}`,
     ),
   ];
 }
 
-/** Renders one of the /volume views. Farmed volume = the filled_notional_usd
- * increments (design D6); monthly views attribute volume to the trade's
- * opening month. Every view also shows the net-PnL block (realized minus
- * known trading fees; funding excluded, historical fees under-report). */
+/** Renders one of the /volume views. Volume is exchange-direct: the exchange-
+ * reported account fills for every registered exchange (exchange-volume), so
+ * manual trades on the accounts count too; an exchange whose fetch fails is
+ * marked "· db" and shows its DB numbers instead. Only the net-PnL block
+ * stays DB-based (realized minus known trading fees; funding excluded,
+ * historical fees under-report). */
 async function buildVolumeMessage(
   db: Awaited<ReturnType<typeof getDb>>,
+  registry: ExchangeRegistryLike,
   view: VolumeView,
 ): Promise<string> {
   if (view === "prevmonth") {
     const range = previousMonthRange();
-    const stats = await loadVolumeTotals(db, range);
+    const stats = await loadExchangeVolume(db, registry, {
+      from: range.from,
+      to: range.to,
+    });
     const net = await loadNetPnlTotals(db, range);
     return [
       `📊 Generated volume — ${range.label}`,
       `Total: $${formatCompactUsd(stats.totalUsd)}`,
       ...formatNetPnlLines(net),
-      ...formatExchangeVolumeLines(stats.byExchange),
+      ...formatExchangeVolumeLines(stats.byExchange, stats.exchangesFromDb),
       VOLUME_ATTRIBUTION_NOTE,
     ].join("\n");
   }
   if (view === "6m") {
     const from = lastSixMonthsFrom();
-    const months = await loadMonthlyVolumeBreakdown(db, from);
+    const stats = await loadExchangeVolume(db, registry, { from });
     const netMonths = await loadMonthlyNetPnlBreakdown(db, from);
-    const stats = await loadVolumeTotals(db, { from });
     const net = await loadNetPnlTotals(db, { from });
-    const byMonth = new Map(months.map((row) => [row.month, row.usd]));
+    const byMonth = stats.byMonth;
     const netByMonth = new Map(
       netMonths.map((row) => [row.month, row.netUsd]),
     );
@@ -1587,17 +1596,17 @@ async function buildVolumeMessage(
       ...monthLines,
       `Period total: $${formatCompactUsd(stats.totalUsd)}`,
       ...formatNetPnlLines(net),
-      ...formatExchangeVolumeLines(stats.byExchange),
+      ...formatExchangeVolumeLines(stats.byExchange, stats.exchangesFromDb),
       VOLUME_ATTRIBUTION_NOTE,
     ].join("\n");
   }
-  const stats = await loadVolumeTotals(db);
+  const stats = await loadExchangeVolume(db, registry);
   const net = await loadNetPnlTotals(db);
   return [
-    "📊 Generated volume (farmed)",
+    "📊 Generated volume",
     `Lifetime total: $${formatCompactUsd(stats.totalUsd)}`,
     ...formatNetPnlLines(net),
-    ...formatExchangeVolumeLines(stats.byExchange),
+    ...formatExchangeVolumeLines(stats.byExchange, stats.exchangesFromDb),
     VOLUME_ATTRIBUTION_NOTE,
   ].join("\n");
 }

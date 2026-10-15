@@ -1,6 +1,8 @@
 import { sha256 } from "@noble/hashes/sha2";
 import { bytesToHex } from "@noble/hashes/utils";
+import { formatDecimal, parseDecimal } from "@btc-arbitrage/domain";
 import type {
+  AccountFill,
   BestBidOffer,
   ExecutionAdapter,
   ExecutionOrder,
@@ -52,7 +54,7 @@ const FILLS_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 
 /** Closure reconstruction tolerance: a fill run whose cumulative size lands
  * within this epsilon of the leg quantity is accepted as fully closed
- * (venue-reported sizes can carry rounding). */
+ * (exchange-reported sizes can carry rounding). */
 const CLOSURE_QTY_EPSILON = "0.000000001";
 
 /** Arcus account index is fixed at 0 — the bot operates a single account
@@ -108,7 +110,7 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
    * resolveOrderFeeCached): a filled order's fee never changes, so the
    * hedge re-poll loop re-reads the cache instead of /v1/fills. A null
    * entry means "no fill of this order found" — also cached, since the
-   * venue lists fills before the order reads FILLED. */
+   * exchange lists fills before the order reads FILLED. */
   private readonly orderFeeCache = new Map<string, string | null>();
 
   constructor(
@@ -303,7 +305,7 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
     );
     const mapped = mapExecutionOrder(placed);
     // A definitive (HTTP 200) REJECTED must surface loudly — including the
-    // venue rejection reason: a post-only ALO that would cross arrives here
+    // exchange rejection reason: a post-only ALO that would cross arrives here
     // as POST_ONLY_WOULD_CROSS, which the trade executor retries. A 202 ACK
     // carries no terminal state and maps to "new".
     if (mapped.status === "rejected") {
@@ -439,8 +441,61 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
     };
   }
 
+  /** Exchange-direct account fill history for /volume: public, unauthenticated
+   * GET /v1/fills (docs/exchanges/arcus.md) scoped by account address and
+   * market display name — deliberately WITHOUT the `from` lookback the
+   * closure-reconstruction paths use, so the whole account history is
+   * covered. Newest-first per the exchange doc. Notional = size × price with
+   * decimal-string math (parseDecimal/formatDecimal — no raw Number
+   * round-trips). Rows without a usable size/price/side/timestamp are
+   * skipped with a warning — never estimated. */
+  async getAccountFills(input: { symbol: string }): Promise<AccountFill[]> {
+    this.requireAccountAddress();
+    // Same market validation/warm-up as fetchFills.
+    await this.getMarket(input.symbol);
+    const payload = requiredRecord(
+      await this.http.get("/v1/fills", {
+        address: this.config.accountAddress!,
+        market: arcusMarketName(input.symbol),
+      }),
+      "Arcus fills",
+    );
+    const rows = Array.isArray(payload.fills) ? payload.fills.filter(isRecord) : [];
+    const fills: AccountFill[] = [];
+    for (const fill of rows) {
+      const size = findDecimal(fill, ["size"]);
+      const price = findDecimal(fill, ["price"]);
+      const side = accountFillSide(optionalString(fill.side));
+      const occurredAt = arcusFillDate(fill.createdAt);
+      if (
+        size === undefined ||
+        price === undefined ||
+        side === undefined ||
+        occurredAt === undefined
+      ) {
+        console.warn("Arcus fill missing size/price/side/createdAt; skipping for volume", {
+          orderId: optionalString(fill.orderId),
+        });
+        continue;
+      }
+      fills.push({
+        notionalUsd: formatDecimal(
+          parseDecimal(size, "Arcus fill size") *
+            parseDecimal(price, "Arcus fill price"),
+          8,
+        ),
+        side,
+        occurredAt,
+        ...(findDecimal(fill, ["fee"]) !== undefined
+          ? { feeUsd: findDecimal(fill, ["fee"]) }
+          : {}),
+      });
+    }
+    return fills;
+  }
+
   /** Best-effort recovery of the exit data for a leg the position monitor
-   * already detected as flat (venue-side TP/SL fire): /v1/positions no
+   * already detected as flat (exchange-side TP/SL fire): /v1/positions no
    * longer reports the entry once flat, so the closure is reconstructed
    * from the stored TP/SL order ids via GET /v1/order/{orderId}. A fired
    * trigger reports filledSize > 0 / avgFillPrice > 0; anything else
@@ -662,7 +717,7 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
   }
 
   /** Fetch the public fills history for a symbol (24 h lookback,
-   * newest-first per the venue doc). Shared by the closure reconstruction
+   * newest-first per the exchange doc). Shared by the closure reconstruction
    * and the exit-order fee recovery. */
   private async fetchFills(symbol: string): Promise<Record<string, unknown>[]> {
     this.requireAccountAddress();
@@ -673,7 +728,7 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
     return this.fetchFillsByMarket(arcusMarketName(symbol));
   }
 
-  /** Fetch the public fills history filtered by an explicit venue market
+  /** Fetch the public fills history filtered by an explicit exchange market
    * display name (e.g. "BTC-USD"). Used by paths that only know the
    * order record's `marketDisplayName` (the getExecutionOrder fee
    * recovery) and therefore skip the getMarket validation/warm-up of the
@@ -690,7 +745,7 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
       }),
       "Arcus fills",
     );
-    // The venue guarantees newest-first order (docs.arcus.xyz
+    // The exchange guarantees newest-first order (docs.arcus.xyz
     // /api-reference/public/get-fills) — the accumulation below relies on
     // it so the FIRST accepted fill is the newest (exit order id source).
     const fills = Array.isArray(payload.fills) ? payload.fills : [];
@@ -713,9 +768,9 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
   /** Memoized fee recovery for a single filled order, used by
    * getExecutionOrder (order records carry no fee field). The lookup is
    * matched strictly by orderId against the public fills history; only
-   * the fee is consumed — realized PnL stays venue-derived elsewhere.
+   * the fee is consumed — realized PnL stays exchange-derived elsewhere.
    * Both a resolved fee and a "no fill found" outcome are cached per
-   * orderId (a filled order's fee never changes, and the venue lists
+   * orderId (a filled order's fee never changes, and the exchange lists
    * fills before the order reads FILLED), so the hedge re-poll loop (up
    * to 6 re-reads) hits /v1/fills at most once per order. Endpoint
    * failures are NOT cached, so a later poll can retry. Real value only;
@@ -1114,7 +1169,7 @@ function findArcusMarket(
   payload: Record<string, unknown>,
   symbol: string,
 ): Record<string, unknown> {
-  // The shared matcher maps bot symbols to venue markets via exact match
+  // The shared matcher maps bot symbols to exchange markets via exact match
   // first, then base-asset fallback (BTCUSDT -> BTC matches Arcus's
   // BTC-USD / baseAsset "BTC") — the same resolution the market-data
   // client relies on. A local exact-only matcher rejected BTCUSDT here
@@ -1133,8 +1188,26 @@ function arcusBboPrice(level: unknown): string | undefined {
   return String(price);
 }
 
+/** "BUY"/"SELL" (any case) to the AccountFill side; anything else is
+ * undefined so the caller skips the row — never guessed. */
+function accountFillSide(value: string | undefined): "buy" | "sell" | undefined {
+  const normalized = value?.toUpperCase();
+  if (normalized === "BUY") return "buy";
+  if (normalized === "SELL") return "sell";
+  return undefined;
+}
+
+/** Arcus fill `createdAt` is epoch MICROSECONDS (docs/exchanges/arcus.md);
+ * undefined when missing/unusable — a fill without a timestamp cannot be
+ * attributed to a month. */
+function arcusFillDate(value: unknown): Date | undefined {
+  const micros = typeof value === "string" || typeof value === "number" ? Number(value) : NaN;
+  if (!Number.isFinite(micros) || micros <= 0) return undefined;
+  return new Date(micros / 1000);
+}
+
 /** Arcus caps clientId at 36 chars; the open-trade flow builds ids like
- * `${uuid}-tp` / `-hedge-1` (up to 45+ chars), which the venue would
+ * `${uuid}-tp` / `-hedge-1` (up to 45+ chars), which the exchange would
  * reject outright. Normalize oversized ids deterministically at the
  * adapter boundary: keep a short readable prefix plus a SHA-256 hex
  * digest of the FULL original id.
@@ -1146,7 +1219,7 @@ function arcusBboPrice(level: unknown): string | undefined {
  *   DUPLICATE_CLIENT_ID; the digest separates them (~116 bits of entropy).
  * - Charset stays [A-Za-z0-9_-], length ≤ 36.
  *
- * Ids that already satisfy the venue rule pass through untouched. */
+ * Ids that already satisfy the exchange rule pass through untouched. */
 function normalizeArcusClientId(clientOrderId: string): string {
   if (!clientOrderId || CLIENT_ID_PATTERN.test(clientOrderId))
     return clientOrderId;
@@ -1300,7 +1373,7 @@ function positiveDecimal(value: string | undefined): string | undefined {
 }
 
 /** Cumulative close-fill size reaching the leg quantity — exact decimal
- * comparison first, then the CLOSURE_QTY_EPSILON band for venue-reported
+ * comparison first, then the CLOSURE_QTY_EPSILON band for exchange-reported
  * sizes that land a hair under (rounding). */
 function closureQtyReached(cumulative: string, target: string): boolean {
   if (compareDecimals(cumulative, target) >= 0) return true;

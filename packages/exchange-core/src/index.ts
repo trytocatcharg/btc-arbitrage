@@ -25,7 +25,7 @@ export interface PriceSubscriptionRequest extends PriceRequest {
   intervalMs?: number;
 }
 
-/** Public market statistics for a symbol. Every field is optional: a venue
+/** Public market statistics for a symbol. Every field is optional: an exchange
  * that does not expose a value leaves it undefined — consumers must render
  * "n/d" (never estimate). */
 export interface MarketStats {
@@ -52,7 +52,7 @@ export interface MarketMetadata {
   maxLeverage?: number;
   positionMode?:
     | "one-way"
-    | "hedge" /** Price tick / minimum price increment of the venue (USD), e.g. "0.1". */;
+    | "hedge" /** Price tick / minimum price increment of the exchange (USD), e.g. "0.1". */;
   priceTickUsd?: string;
 }
 export interface ExecutionOrderRequest {
@@ -71,7 +71,7 @@ export interface ExecutionOrder {
   filledQuantityBase: string;
   averageFillPriceUsd?: string;
   /** Real trading fee in USD (decimal string), summed over the fills this
-   * record covers. Undefined when the venue payload does not expose it —
+   * record covers. Undefined when the exchange payload does not expose it —
    * never estimated. */
   feeUsd?: string;
 }
@@ -85,8 +85,19 @@ export interface ExchangePosition {
   exitPriceUsd?: string;
   realizedPnlUsd?: string;
   /** Real trading fee in USD (decimal string) incurred by the position
-   * records this snapshot covers. Undefined when the venue payload does
+   * records this snapshot covers. Undefined when the exchange payload does
    * not expose it — never estimated. */
+  feeUsd?: string;
+}
+/** A single account fill reported by the exchange's own trade/fill history
+ * endpoint. Sourced exchange-direct (not from the bot's DB): `notionalUsd`
+ * is the exchange's exact fill notional as a decimal string. */
+export interface AccountFill {
+  notionalUsd: string;
+  side: "buy" | "sell";
+  occurredAt: Date;
+  /** Real trading fee in USD (decimal string) when the exchange payload
+   * exposes it — never estimated. */
   feeUsd?: string;
 }
 export interface ExecutionAdapter {
@@ -104,12 +115,19 @@ export interface ExecutionAdapter {
     symbol: string;
     side: "long" | "short";
   }): Promise<ExchangePosition | null>;
+  /** Exchange-direct account fill history (user trades / fills endpoints),
+   * newest-first per exchange convention. Consumed by the Telegram /volume
+   * command to report exchange-sourced volume instead of DB sums.
+   * Optional: an exchange without a verified fill-history endpoint omits it
+   * and callers fall back to DB numbers for that exchange. Must throw on
+   * missing credentials (the caller degrades per exchange). */
+  getAccountFills?(input: { symbol: string }): Promise<AccountFill[]>;
   /** Best-effort recovery of exit data for a leg already detected closed
-   * (e.g. a venue-side TP/SL trigger, where getPosition no longer reports
-   * close price / realized PnL once the venue position record is gone).
+   * (e.g. an exchange-side TP/SL trigger, where getPosition no longer reports
+   * close price / realized PnL once the exchange position record is gone).
    * Implementations resolve the closure from the protection order ids the
    * caller stored when the TP/SL orders were placed, keeping those ids as
-   * the primary path, and may fall back to venue fill/order HISTORY when
+   * the primary path, and may fall back to exchange fill/order HISTORY when
    * the stored ids no longer resolve (an operator-moved trigger or a
    * manual close leaves only history behind). Returns null when the
    * closure cannot be resolved; must never throw. */
@@ -129,7 +147,7 @@ export interface ExecutionAdapter {
     exitOrderId?: string;
     closeReason?: "tp" | "sl" | "manual" | "liquidation";
     /** Real trading fee in USD (decimal string) summed over the exit fills
-     * the closure was resolved from. Undefined when the venue payload does
+     * the closure was resolved from. Undefined when the exchange payload does
      * not expose it — never estimated. */
     feeUsd?: string;
   } | null>;

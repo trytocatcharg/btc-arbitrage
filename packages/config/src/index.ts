@@ -182,7 +182,7 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   // untouched protection orders and left trades unprotected (observed
   // 2026-09-23). Capped at 90 days per docs/exchanges/extended.md
   // ("GTT expiry max differs by network — keep configurable expiry and
-  // validate before sending"); a venue-side rejection surfaces loudly.
+  // validate before sending"); an exchange-side rejection surfaces loudly.
   const extendedOrderExpirationHours = parsePositiveInteger(
     env.EXTENDED_ORDER_EXPIRATION_HOURS ?? "168",
     "EXTENDED_ORDER_EXPIRATION_HOURS",

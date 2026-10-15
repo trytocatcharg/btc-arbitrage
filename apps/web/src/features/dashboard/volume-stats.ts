@@ -1,13 +1,13 @@
 import { getBackendApiBaseUrl } from "./exchange-balances.js";
 
-export interface VenueVolume {
+export interface ExchangeVolume {
   exchangeId: string;
   volumeUsd: string;
 }
 
 export interface VolumeTotals {
   totalUsd: string;
-  byVenue: VenueVolume[];
+  byExchange: ExchangeVolume[];
 }
 
 export interface VolumeStatsResponse {

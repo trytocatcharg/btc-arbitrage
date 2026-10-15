@@ -1,4 +1,5 @@
 import type {
+  AccountFill,
   BestBidOffer,
   ExecutionAdapter,
   ExecutionOrder,
@@ -65,6 +66,11 @@ interface ExtendedHttpApi {
 }
 
 const MARKET_CROSSING_BUFFER_BPS = 150;
+
+/** /api/v1/user/trades caps a page at 10,000 records and paginates by
+ * cursor; the account history is small today, but the page loop is
+ * bounded anyway so an exchange-side cursor bug can never spin forever. */
+const USER_TRADES_MAX_PAGES = 50;
 
 /** How long cached near-static Extended data (fees, Starknet domain,
  * market records) stay valid. All three are exchange config that rotates
@@ -215,8 +221,8 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
     if (Number(availableMargin) <= 0)
       throw new Error("Extended available margin is zero");
     await initExtendedSigningWasm();
-    // Align the venue leverage with the bot-configured value. Account
-    // endpoint, API-key auth, venue rejection surfaces as a preflight
+    // Align the exchange leverage with the bot-configured value. Account
+    // endpoint, API-key auth, exchange rejection surfaces as a preflight
     // failure. See docs/exchanges/extended-execution.md.
     if (!this.http.patch)
       throw new Error("Extended HTTP client does not support PATCH");
@@ -362,8 +368,65 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
     };
   }
 
+  /** Exchange-direct account fill history for /volume: private GET
+   * /api/v1/user/trades (X-Api-Key auth only, live-verified 2026-10-15),
+   * paginated by re-requesting with cursor=<pagination.cursor> until an
+   * empty page, a missing cursor, or a cursor already followed (the
+   * exchange can ignore the parameter — a repeated cursor would loop
+   * forever). Each trade's `value` is the exact fill notional. Rows
+   * without a usable notional/side/timestamp are skipped with a warning —
+   * never estimated. */
+  async getAccountFills(input: { symbol: string }): Promise<AccountFill[]> {
+    this.requireApiKey();
+    const market = await this.getMarket({
+      symbol: input.symbol,
+      marketType: "perpetual",
+      priceSource: "last",
+    });
+    const marketName = getMarketName(market);
+    const fills: AccountFill[] = [];
+    let cursor: string | undefined;
+    const seenCursors = new Set<string>();
+    for (let page = 0; page < USER_TRADES_MAX_PAGES; page += 1) {
+      const response = await this.http.get("/api/v1/user/trades", {
+        private: true,
+        query: { market: marketName, ...(cursor ? { cursor } : {}) },
+      });
+      const payload = requiredRecord(response, "Extended user trades response");
+      const records = asRecords(payload);
+      for (const trade of records) {
+        const notionalUsd = findDecimal(trade, ["value"]);
+        const side = accountFillSide(optionalString(trade.side));
+        const occurredAtMs = epochMs(optionalNumber(trade.createdTime));
+        if (notionalUsd === undefined || side === undefined || occurredAtMs === undefined) {
+          console.warn("Extended user trade missing value/side/createdTime; skipping for volume", {
+            market: marketName,
+            tradeId: optionalString(trade.id),
+          });
+          continue;
+        }
+        fills.push({
+          notionalUsd,
+          side,
+          occurredAt: new Date(occurredAtMs),
+          ...(findDecimal(trade, ["fee"]) !== undefined
+            ? { feeUsd: findDecimal(trade, ["fee"]) }
+            : {}),
+        });
+      }
+      const pagination = isRecord(payload.pagination)
+        ? payload.pagination
+        : undefined;
+      const next = pagination ? optionalString(pagination.cursor) : undefined;
+      if (records.length === 0 || !next || seenCursors.has(next)) break;
+      seenCursors.add(next);
+      cursor = next;
+    }
+    return fills;
+  }
+
   /** Best-effort recovery of the exit data for a leg the position monitor
-   * already detected as flat (venue-side TP/SL fire): /api/v1/user/positions
+   * already detected as flat (exchange-side TP/SL fire): /api/v1/user/positions
    * returns null once flat, so the closure is reconstructed from the stored
    * TP/SL order ids via GET /api/v1/user/orders/{id}. A trigger that fired
    * reports a non-zero filledQty / averagePrice; anything else (UNTRIGGERED,
@@ -1016,6 +1079,24 @@ function toExtendedSide(
   side: ExecutionOrderRequest["side"],
 ): ExtendedOrderSide {
   return side === "buy" ? "BUY" : "SELL";
+}
+
+/** "BUY"/"SELL" (any case) to the AccountFill side; anything else is
+ * undefined so the caller skips the row — never guessed. */
+function accountFillSide(value: string | undefined): "buy" | "sell" | undefined {
+  const normalized = value?.toUpperCase();
+  if (normalized === "BUY") return "buy";
+  if (normalized === "SELL") return "sell";
+  return undefined;
+}
+
+/** Epoch-milliseconds guard for exchange timestamps: a positive finite
+ * number or undefined (a missing/zero timestamp cannot be attributed to
+ * a month). */
+function epochMs(value: number | undefined): number | undefined {
+  if (value === undefined || !Number.isFinite(value) || value <= 0)
+    return undefined;
+  return value;
 }
 
 function normalizeSide(side: unknown): "long" | "short" | undefined {

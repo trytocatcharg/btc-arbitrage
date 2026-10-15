@@ -2,8 +2,8 @@
 
 This project must always route the entry legs with this priority:
 
-1. **Choose the cheaper maker venue first**
-2. If maker fees tie, **choose the cheaper taker venue**
+1. **Choose the cheaper maker exchange first**
+2. If maker fees tie, **choose the cheaper taker exchange**
 
 Definitions:
 

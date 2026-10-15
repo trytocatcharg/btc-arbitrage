@@ -1,18 +1,18 @@
 import { formatDecimal, parseDecimal } from "@btc-arbitrage/domain";
 import type {
   RawVolumeStats,
-  VenueVolumeSnapshot,
+  ExchangeVolumeSnapshot,
   VolumeTotalsSnapshot,
 } from "./volume-stats-service.js";
 
-export interface VenueVolumeDto {
+export interface ExchangeVolumeDto {
   exchangeId: string;
   volumeUsd: string;
 }
 
 export interface VolumeTotalsDto {
   totalUsd: string;
-  byVenue: VenueVolumeDto[];
+  byExchange: ExchangeVolumeDto[];
 }
 
 export interface VolumeStatsResponseDto {
@@ -43,11 +43,11 @@ export function normalizeVolumeStats(
 function normalizeTotals(snapshot: VolumeTotalsSnapshot): VolumeTotalsDto {
   return {
     totalUsd: formatUsdDecimal(snapshot.totalUsd),
-    byVenue: snapshot.byVenue.map(normalizeVenueVolume),
+    byExchange: snapshot.byExchange.map(normalizeExchangeVolume),
   };
 }
 
-function normalizeVenueVolume(row: VenueVolumeSnapshot): VenueVolumeDto {
+function normalizeExchangeVolume(row: ExchangeVolumeSnapshot): ExchangeVolumeDto {
   return {
     exchangeId: row.exchangeId,
     volumeUsd: formatUsdDecimal(row.volumeUsd),

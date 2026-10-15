@@ -3,7 +3,7 @@ import type { ExchangeAdapter } from "@btc-arbitrage/exchange-core";
 import type { PreviewStore, TradeLegUpdate } from "./open-trade.js";
 
 /** Why the bot is closing an open (or just-filled) trade itself, instead of
- * waiting for the venue-side TP/SL backstop or the position monitor. */
+ * waiting for the exchange-side TP/SL backstop or the position monitor. */
 export type SpreadCloseReason =
   | "spread_tp"
   | "spread_sl"
@@ -16,7 +16,7 @@ export interface CloseLegInput {
   quantityBase: string;
   entryPriceUsd: string | null;
   /** Leg raw JSON as persisted on trade_legs (tpOrderId/slOrderId when the
-   * venue TP/SL backstop was placed). */
+   * exchange TP/SL backstop was placed). */
   raw: unknown;
 }
 
@@ -53,7 +53,7 @@ export function formatPnlColored(value: number | null): string {
     : `🔴 -$${Math.abs(value).toFixed(2)}`;
 }
 
-/** Bot-initiated close of both legs: cancels the venue TP/SL backstop orders,
+/** Bot-initiated close of both legs: cancels the exchange TP/SL backstop orders,
  * submits reduce-only market closes, waits for flat, then persists leg/trade
  * closure (with realized PnL when exit prices are known) through the preview
  * store so status history is recorded. A leg that cannot be confirmed flat
@@ -71,7 +71,7 @@ export async function closeTradeBothLegs(
   if (!quantityBase) throw new Error("closeTradeBothLegs requires a quantity");
   const outcomes: string[] = [];
 
-  // 1. Cancel the venue TP/SL backstop orders; a triggered order simply
+  // 1. Cancel the exchange TP/SL backstop orders; a triggered order simply
   //    rejects the cancel and is reported as failed.
   for (const leg of input.legs) {
     const adapter = input.registry.get(leg.exchangeId).execution;
@@ -157,7 +157,7 @@ export async function closeTradeBothLegs(
     });
   }
 
-  // 3. Wait for flat and capture exit prices / venue-reported realized PnL.
+  // 3. Wait for flat and capture exit prices / exchange-reported realized PnL.
   const legUpdates: TradeLegUpdate[] = [];
   let totalRealizedUsd = 0;
   let realizedKnown = true;
@@ -196,7 +196,7 @@ export async function closeTradeBothLegs(
           (position === null || position.status === "closed")
         ) {
           // null means "no position" on these adapters; a closed status may
-          // carry the venue's exit data.
+          // carry the exchange's exit data.
           if (position !== null) {
             exitPriceUsd = position.exitPriceUsd ?? null;
             realizedPnlUsd = position.realizedPnlUsd ?? null;
@@ -209,7 +209,7 @@ export async function closeTradeBothLegs(
         await sleep(CLOSE_FLAT_POLL_MS);
       }
     } else if (adapter && close.error) {
-      // The close was rejected: the venue TP/SL backstop may have already
+      // The close was rejected: the exchange TP/SL backstop may have already
       // closed the position. Verify before declaring the leg unhedged.
       try {
         const position = await adapter.getPosition({
@@ -244,9 +244,9 @@ export async function closeTradeBothLegs(
     }
     // Always-GROSS convention (operator decision 2026-10-07): the trade
     // total uses the entry/exit/qty-derived gross per leg; the
-    // venue-reported realizedPnlUsd (Arcus nets the exit fee into it)
+    // exchange-reported realizedPnlUsd (Arcus nets the exit fee into it)
     // is only a fallback when no exit price exists at all — otherwise
-    // the exit fee would be subtracted twice (once inside the venue
+    // the exit fee would be subtracted twice (once inside the exchange
     // value, once via trades.total_fees_usd; trade #637).
     const qty = parseDecimal(quantityBase);
     const sideMul = close.leg.side === "long" ? 1 : -1;
@@ -316,7 +316,7 @@ export async function closeTradeBothLegs(
     });
     await input
       .notify(
-        `🚨 Trade ${label} closed on venue but the DB persist failed ` +
+        `🚨 Trade ${label} closed on the exchange but the DB persist failed ` +
           `(${message}). Outcomes: ${outcomes.join("; ")}. ` +
           "The recovery sweep will reconcile it.",
       )

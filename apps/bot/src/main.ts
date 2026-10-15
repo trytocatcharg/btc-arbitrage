@@ -17,7 +17,7 @@ import { applyPersistedRuntimeOverrides } from "./runtime/runtime-settings-store
 import { ExecutionQueue } from "./trading/execution-queue.js";
 
 // Startup preflight retry policy: transient (timeout-class) failures
-// retry with bounded backoff; persistent venue rejections still abort
+// retry with bounded backoff; persistent exchange rejections still abort
 // the boot immediately. Authoritative spec:
 // specs/exchange-execution.md ("Startup execution preflight").
 const STARTUP_PREFLIGHT_MAX_ATTEMPTS = 3;
@@ -177,8 +177,8 @@ async function main() {
   const registry = createExchangeRegistry(config);
 
   // One-time execution setup, hoisted from the per-trade preflight:
-  // aligns venue account leverage (RISEx write, Extended PATCH) and
-  // initializes signing setup. Fail fast on persistent venue rejection —
+  // aligns exchange account leverage (RISEx write, Extended PATCH) and
+  // initializes signing setup. Fail fast on persistent exchange rejection —
   // except transient timeouts, retried with backoff (see
   // runStartupPreflightWithTransientRetry and
   // specs/exchange-execution.md).

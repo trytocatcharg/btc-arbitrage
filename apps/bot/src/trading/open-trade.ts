@@ -76,11 +76,11 @@ export interface TradeLegUpdate {
    * transaction. */
   filledNotionalUsdDelta?: string;
   /** Real entry fee (USD, decimal string) summed over the leg's entry
-   * fills, when the venue reported it. Undefined keeps the column NULL —
+   * fills, when the exchange reported it. Undefined keeps the column NULL —
    * fees are never estimated. */
   entryFeeUsd?: string;
   /** Real exit fee (USD, decimal string) summed over the leg's exit
-   * fills, when the venue reported it. Undefined keeps the column NULL —
+   * fills, when the exchange reported it. Undefined keeps the column NULL —
    * fees are never estimated. */
   exitFeeUsd?: string;
   closeReason?: string;
@@ -177,7 +177,7 @@ const DEFAULT_SLIPPAGE_BPS = "2";
  * levels. A breach fails the protection step loudly (no orders placed). */
 export const PROTECTION_TOLERANCE_BPS = 100;
 // Below this remaining size (BTC) a reprice resubmission is skipped: the
-// venue minimum quantity would reject the replacement order anyway.
+// exchange minimum quantity would reject the replacement order anyway.
 const REPRICE_MIN_REMAINING_BASE = 0.0001;
 
 /** Loud failure of the protection step: thrown when a trigger cannot be
@@ -572,7 +572,7 @@ export class OpenTradeService {
         | undefined;
       let hedgeFillDerived = false;
       let hedgeNotionalUsd = 0;
-      // Real entry fee (USD) summed over the hedge fills the venue
+      // Real entry fee (USD) summed over the hedge fills the exchange
       // reported a fee for; hedgeFeeSeen stays false when no hedge fill
       // carried a fee (column stays NULL — never estimated).
       let hedgeFeeUsd = 0;
@@ -589,7 +589,7 @@ export class OpenTradeService {
       let settledFilledBase = 0;
       let settledNotionalUsd = 0;
       let activeNotionalUsd = 0;
-      // Real entry fee (USD) ledger for the limit leg. Venue fee fields are
+      // Real entry fee (USD) ledger for the limit leg. Exchange fee fields are
       // cumulative per order, and each reprice/timeout settle re-reads an
       // order that may already have been swept — so every order's
       // contribution is captured exactly once as (latest seen − previously
@@ -670,7 +670,7 @@ export class OpenTradeService {
             status: hedge.status,
             averageFillPriceUsd: hedge.averageFillPriceUsd,
           });
-          // Venue acks can lag the fill: RISEx returns no status/price in
+          // Exchange acks can lag the fill: RISEx returns no status/price in
           // the ack and proves fills via position delta, and its
           // getExecutionOrder throws once the order is filled (it leaves
           // the open-orders list). Never roll back a quantity-complete
@@ -749,7 +749,7 @@ export class OpenTradeService {
           // Timeout: cancel the resting order and settle any fill that
           // raced the cancel before giving up on the trade. Extended has
           // accepted a cancel on an already-filled order (observed
-          // 2026-09-21), which left a naked position on the limit venue
+          // 2026-09-21), which left a naked position on the limit exchange
           // while the bot believed nothing filled. Re-read with bounded
           // retries, keep the max-filled state, and continue the loop on
           // a late fill so the increment hedge runs before re-checking.
@@ -946,7 +946,7 @@ export class OpenTradeService {
           )
             continue;
           // Anti-chase guard: never reprice past the point where the
-          // cross-venue executable spread stops covering round-trip cost
+          // cross-exchange executable spread stops covering round-trip cost
           // + minimum profit. Without it, an aggressive limit chases a
           // moving book into a guaranteed-loss fill (observed 2026-09-21:
           // buy filled at 84800 while the hedge side bid was 84770 — a
@@ -1033,7 +1033,7 @@ export class OpenTradeService {
           try {
             await limit.cancelExecutionOrder(activeLimit.id);
           } catch (error) {
-            // Likely raced a fill: the venue rejects cancelling a filled
+            // Likely raced a fill: the exchange rejects cancelling a filled
             // order. Re-read it and let the loop top settle any new fill.
             console.warn("OpenTrade reprice cancel failed; re-reading", {
               token,
@@ -1299,7 +1299,7 @@ export class OpenTradeService {
         10_000;
       const breakevenUsd = entryFeesUsd + exitFeesUsd + slippageUsd;
       // Convergence still capturable at fills: the strategy is
-      // long-the-cheap-venue / short-the-expensive-venue, so both legs
+      // long-the-cheap-exchange / short-the-expensive-exchange, so both legs
       // profit as the prices meet: (P − longEntry) + (shortEntry − P) =
       // shortEntry − longEntry. (Design D4 wrote max(0, longEntry −
       // shortEntry); that sign aborts every normally-filled trade and
@@ -1387,7 +1387,7 @@ export class OpenTradeService {
               `🚨 fee-model drift detected: edge_below_cost close on ` +
                 `${token.slice(0, 8)} realized $${abortLossUsd.toFixed(2)} ` +
                 `(max loss bound $${maxLossUsd.toFixed(2)}). Check the ` +
-                `configured fee bps against the venues' actual fees.`,
+                `configured fee bps against the exchanges' actual fees.`,
             );
           }
         }
@@ -1771,7 +1771,7 @@ export class OpenTradeService {
     }
   }
   /** Re-reads an order after a cancel with bounded retries, tolerating the
-   * venue's read-after-write lag (Extended briefly 404s on recent orders).
+   * exchange's read-after-write lag (Extended briefly 404s on recent orders).
    * Returns the observed state with the highest filled quantity — a fill can
    * land between the cancel request and the first read. Falls back to the
    * pre-cancel state only if every re-poll fails (same tolerance as the main
@@ -1829,7 +1829,7 @@ export class OpenTradeService {
   }
 }
 
-/** Post-only rejects surface as venue-specific literals: RISEx reverts
+/** Post-only rejects surface as exchange-specific literals: RISEx reverts
  * with `PostOnlyOrderMatched()`, Arcus rejects with
  * `POST_ONLY_WOULD_CROSS`. Only these two mean the passive limit would
  * have crossed and a reprice-and-retry is safe. */

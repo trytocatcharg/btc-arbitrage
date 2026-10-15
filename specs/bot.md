@@ -77,7 +77,14 @@ Current chat commands:
   Restart** (paused) inline buttons, reflecting live state.
 - `/config`
 - `/trade`
-- `/volume`
+- `/volume` — volume by exchange (total, previous month, last 6 months),
+  sourced DIRECTLY from the exchanges: every registered exchange's account
+  fill history via `ExecutionAdapter.getAccountFills` (Extended user
+  trades, Arcus public fills, RISEx trade-history), attributed by fill
+  month (UTC). An exchange whose fetch fails falls back to its DB numbers and
+  is marked `· db`. Manual trades on the accounts count. The net-PnL
+  block stays DB-based (realized minus known trading fees). Aggregates
+  are cached in memory for 60 s.
 - `/lastsignal` — last 10 signals from DB, timestamps rendered in
   `TELEGRAM_OPERATOR_TIMEZONE` (IANA, default Europe/Madrid) with a
   relative age suffix ("hace 2 minutos"). Telegram never sends the
@@ -249,7 +256,7 @@ Spread-USD exits were removed by adjust-tpsl-volume-farming: there are no
 spread-USD comparisons on open trades (`OPEN_TRADE_SPREAD_TP_USD` /
 `OPEN_TRADE_SPREAD_SL_USD` are rejected at config load). The exit model is:
 
-- **Venue-side per-leg TP/SL backstop** (primary risk layer): reduce-only
+- **Exchange-side per-leg TP/SL backstop** (primary risk layer): reduce-only
   TP/SL orders anchored to each leg's OWN fill price — long TP = longFill ×
   (1+`OPEN_TRADE_TAKE_PROFIT_PERCENT`), long SL = longFill × (1−`OPEN_TRADE_STOP_LOSS_PERCENT`
   default 2.5); the short leg's TP sits below its fill and its SL above it.

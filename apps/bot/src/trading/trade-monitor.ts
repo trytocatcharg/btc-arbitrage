@@ -59,11 +59,11 @@ export async function monitorTrades(input: {
       )
         continue;
 
-      // A venue-side TP/SL fire (or a manual close / moved trigger) leaves
+      // An exchange-side TP/SL fire (or a manual close / moved trigger) leaves
       // the position record empty (RISEx drops it; Extended returns null),
       // so getPosition carries no exit data. Recover it post-hoc from the
       // protection order ids stored in the leg's raw JSON — or, when those
-      // ids resolve nothing, from venue fill history (Arcus) —
+      // ids resolve nothing, from exchange fill history (Arcus) —
       // (best-effort, adapter-owned, never throws).
       const protectionIds = readProtectionOrderIds(row.trade_legs.raw);
       let resolved: Awaited<
@@ -106,7 +106,7 @@ export async function monitorTrades(input: {
           ? positionCloseReason
           : (resolved?.closeReason ?? positionCloseReason ?? "unknown");
 
-      // Farmed volume (design D6): a venue-side TP/SL closure farms volume
+      // Farmed volume (design D6): an exchange-side TP/SL closure farms volume
       // too. Increment the closing leg's and the trade's
       // filled_notional_usd by qty × exit price inside this transaction;
       // skip the increment when the exit price is unknown. Computed after
@@ -171,7 +171,7 @@ export async function monitorTrades(input: {
             .where(eq(tradeLegs.tradeId, row.trades.id));
           // Always-GROSS convention (operator decision 2026-10-07): each
           // leg contributes its entry/exit/qty-derived gross; the
-          // venue-reported leg.realizedPnlUsd is only a fallback when the
+          // exchange-reported leg.realizedPnlUsd is only a fallback when the
           // exit price is unknown (Arcus nets the exit fee into its
           // reported value — trusting it here double-counts that fee via
           // trades.total_fees_usd; trade #637: stored net -0.11 vs real
@@ -292,7 +292,7 @@ export async function monitorTrades(input: {
 }
 
 /** Defensive read of the protection order ids persisted in the leg's raw
- * JSON (set when the venue TP/SL backstop was placed). Any other raw shape
+ * JSON (set when the exchange TP/SL backstop was placed). Any other raw shape
  * is ignored. */
 function readProtectionOrderIds(raw: unknown): {
   tpOrderId?: string;
@@ -337,10 +337,10 @@ function knownLegFeesUsd(leg: LegClosureSnapshot): number | null {
 /** Exchange-agnostic GROSS leg PnL under the "always gross" convention
  * (operator decision 2026-10-07): realized columns stay fee-free and the
  * net is always realized − fees. Computed from entry/exit/qty — never
- * from the venue-reported realizedPnlUsd, whose fee convention varies by
+ * from the exchange-reported realizedPnlUsd, whose fee convention varies by
  * exchange (Arcus nets the exit fee into it; Extended reports none at
  * all — trade #481: bot said -4.01, Extended's realized showed -4.17).
- * The venue value is only a fallback when the exit price is unknown. */
+ * The exchange value is only a fallback when the exit price is unknown. */
 function deriveLegGrossPnlUsd(leg: LegClosureSnapshot): number | null {
   const entry = leg.entryPriceUsd != null ? Number(leg.entryPriceUsd) : null;
   const exit = leg.exitPriceUsd != null ? Number(leg.exitPriceUsd) : null;

@@ -61,9 +61,9 @@ See `docs/exchanges/risex-integration.md` and `docs/exchanges/extended-execution
 
 ## Startup execution preflight
 
-- At boot, after restoring persisted runtime overrides, the bot runs `validateExecutionPreflight` for each configured exchange that has execution enabled. The preflight aligns the venue account leverage with the configured leverage (including restored overrides) and performs the venue-specific signing setup (RISEx leverage write, Extended leverage write + WASM init).
-- Transient failures (request timeouts) are retried with bounded backoff: the Extended preflight retries its checks once internally, and the whole startup preflight retries up to 3 attempts with 5 s / 15 s backoff. Persistent venue rejections (bad credentials, leverage above the market cap, insufficient balance, HTTP error statuses) abort startup immediately — they cannot succeed by re-running.
-- Runtime leverage changes via the Telegram `/config` panel prepare all active venues through the same preflight before the new value is applied; a venue rejection leaves the previous value in place. Runtime pair changes reuse the same mechanism for the new symbol.
+- At boot, after restoring persisted runtime overrides, the bot runs `validateExecutionPreflight` for each configured exchange that has execution enabled. The preflight aligns the exchange account leverage with the configured leverage (including restored overrides) and performs the exchange-specific signing setup (RISEx leverage write, Extended leverage write + WASM init).
+- Transient failures (request timeouts) are retried with bounded backoff: the Extended preflight retries its checks once internally, and the whole startup preflight retries up to 3 attempts with 5 s / 15 s backoff. Persistent exchange rejections (bad credentials, leverage above the market cap, insufficient balance, HTTP error statuses) abort startup immediately — they cannot succeed by re-running.
+- Runtime leverage changes via the Telegram `/config` panel prepare all active exchanges through the same preflight before the new value is applied; an exchange rejection leaves the previous value in place. Runtime pair changes reuse the same mechanism for the new symbol.
 - Extended-specific details (timeout error naming, idempotency notes) live in `docs/exchanges/extended-execution.md`.
 
 ## Guardrails

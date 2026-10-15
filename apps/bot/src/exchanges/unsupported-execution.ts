@@ -1,6 +1,6 @@
 import type { ExecutionAdapter, ExecutionOrder, ExecutionOrderRequest, ExchangePosition, MarketMetadata, PriceRequest } from '@btc-arbitrage/exchange-core';
 
-/** Safe default until each venue has a reviewed signed-order implementation. */
+/** Safe default until each exchange has a reviewed signed-order implementation. */
 export function createUnsupportedExecutionAdapter(exchangeName: string): ExecutionAdapter {
   const blocked = (): never => { throw new Error(`${exchangeName} live execution is intentionally blocked: signed order, fill, position and protection endpoints are not verified.`); };
   return {

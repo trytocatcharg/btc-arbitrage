@@ -358,7 +358,7 @@ function resolveLegSummary(
 
 /** Exchange-agnostic GROSS realized PnL for a closed leg, mirroring the
  * convention in trade-monitor.ts (operator decision 2026-10-07): derived
- * from entry/exit/qty; the venue-reported realizedPnlUsd is only a fallback
+ * from entry/exit/qty; the exchange-reported realizedPnlUsd is only a fallback
  * because its fee convention varies by exchange (Arcus nets the exit fee
  * into it; Extended reports none at all). */
 function deriveClosedLegGrossPnlUsd(
@@ -490,7 +490,7 @@ function formatLegSummary(leg: ResolvedLegSummary): string {
   ];
 
   // Closed legs report the realized exit, never a live-mark estimate: the
-  // venue mark is irrelevant once the position no longer exists, and the
+  // exchange mark is irrelevant once the position no longer exists, and the
   // estimate both misses the real exit price and ignores fees.
   if (leg.status === "closed") {
     lines.push(`Exit: ${formatUsd(leg.exitPriceUsd)}`);

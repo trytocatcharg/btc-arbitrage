@@ -55,7 +55,7 @@ and returns normalized `ExchangeBalance` / `ExchangeBalancesResponse` payloads f
 (`volume-farming` / `volume-stats-api` specs):
 
 - lifetime total `sum(trades.filled_notional_usd)`,
-- per-venue lifetime totals `sum(trade_legs.filled_notional_usd) group by exchange_id`,
+- per-exchange lifetime totals `sum(trade_legs.filled_notional_usd) group by exchange_id`,
 - the same two aggregates for the trailing 24h / 7d / 30d windows, filtered on
   `trades.updated_at` (a trade last written inside the window contributes its
   cumulative volume to that window).

@@ -114,7 +114,7 @@ export interface EventRecord {
  * canonical bot symbol (normalized, quote included, e.g. "NVDAUSDT");
  * each exchange resolves it to its native market name through base-asset
  * matching in findMarket() (RISEx lists "NVDA", Extended/Arcus "NVDA-USD"),
- * so no per-venue mapping table is needed. Adding a pair = one entry here:
+ * so no per-exchange mapping table is needed. Adding a pair = one entry here:
  * the Telegram Pairs panel and the runtime applier both render/validate
  * from this catalog. */
 export interface TradingPair {

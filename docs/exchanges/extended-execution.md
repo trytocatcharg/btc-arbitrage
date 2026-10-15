@@ -34,16 +34,16 @@ Execution is default-disabled. Enable only after account, market, BBO, margin, p
 - Read market metadata, available margin, order status and positions.
 - Submit signed `LIMIT`, `MARKET`, `TPSL` orders using the official Stark signing model.
 - Cancel orders by id.
-- Preflight aligns the venue leverage per market via `PATCH /api/v1/user/leverage` (API-key auth, no Stark signature — it is an Account endpoint, not Order management). Venue rejections (open position + triggered orders too large for the selected leverage, or available balance insufficient for the additional margin) surface as preflight failures, both at startup and on the Telegram `/config` leverage change.
+- Preflight aligns the exchange leverage per market via `PATCH /api/v1/user/leverage` (API-key auth, no Stark signature — it is an Account endpoint, not Order management). Exchange rejections (open position + triggered orders too large for the selected leverage, or available balance insufficient for the additional margin) surface as preflight failures, both at startup and on the Telegram `/config` leverage change.
 
 ## Leverage alignment and resilience
 
 Behavior documented here is authoritative; code comments only point back to this section.
 
-- **Leverage write**: `validateExecutionPreflight` aligns the venue leverage with the bot-configured value at every startup and whenever the Telegram `/config` leverage change prepares the venues before applying the new value. A venue rejection keeps the previous config value untouched (same "prepare venues before applying" pattern as the Pairs flow).
+- **Leverage write**: `validateExecutionPreflight` aligns the exchange leverage with the bot-configured value at every startup and whenever the Telegram `/config` leverage change prepares the exchanges before applying the new value. An exchange rejection keeps the previous config value untouched (same "prepare exchanges before applying" pattern as the Pairs flow).
 - **Timeout budget**: every Extended REST call carries a 10 s abort budget. On timeout the client throws an `ExtendedRequestTimeoutError` naming the method, path, and elapsed time, so a multi-call preflight failure identifies the exact hung request.
-- **Preflight retry**: the Extended preflight retries all of its checks once when a call times out — every call is idempotent (GET markets, GET balance, PATCH leverage, local WASM init); HTTP rejections and venue validation failures still fail fast without a retry.
-- **Startup retry**: the bot startup preflight retries a full preflight up to 3 attempts with 5 s / 15 s backoff, only for timeout-class errors. Persistent errors (bad credentials, leverage above the market cap, insufficient balance, HTTP error statuses) abort startup immediately — they cannot succeed by re-running. See `specs/exchange-execution.md` for the cross-venue policy.
+- **Preflight retry**: the Extended preflight retries all of its checks once when a call times out — every call is idempotent (GET markets, GET balance, PATCH leverage, local WASM init); HTTP rejections and exchange validation failures still fail fast without a retry.
+- **Startup retry**: the bot startup preflight retries a full preflight up to 3 attempts with 5 s / 15 s backoff, only for timeout-class errors. Persistent errors (bad credentials, leverage above the market cap, insufficient balance, HTTP error statuses) abort startup immediately — they cannot succeed by re-running. See `specs/exchange-execution.md` for the cross-exchange policy.
 
 ## Verified behavior
 

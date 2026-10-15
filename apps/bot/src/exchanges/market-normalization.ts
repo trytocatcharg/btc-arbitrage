@@ -78,12 +78,12 @@ export function extractTimestamp(market: Record<string, unknown>): string | numb
 }
 
 /** Candidate payload keys for 24h traded volume in USD NOTIONAL, ordered
- * most-specific first. Venue reference (verified live 2026-10-08):
+ * most-specific first. Exchange reference (verified live 2026-10-08):
  * - Extended: `marketStats.dailyVolume` (USD notional; the `dailyVolumeBase`
  *   sibling is base-asset volume and must NOT be rendered as USD).
  * - Arcus: `volume24hNotional` (USD notional; plain `volume24h` is
  *   base-asset volume — shares — and mislabels badly as dollars).
- * Base-unit-only fields are deliberately excluded: a venue exposing only
+ * Base-unit-only fields are deliberately excluded: an exchange exposing only
  * base volume renders "n/d" instead of a mislabeled number. */
 const VOLUME_24H_NOTIONAL_KEYS = [
   'volume24hNotional',
@@ -103,7 +103,7 @@ const VOLUME_24H_NOTIONAL_KEYS = [
 ] as const;
 
 /** 24h traded volume in USD as a decimal string, or undefined when the
- * venue payload does not expose a positive finite value for it. Never
+ * exchange payload does not expose a positive finite value for it. Never
  * estimated — the caller shows "n/d" instead. */
 export function extractVolume24hUsd(market: Record<string, unknown>): string | undefined {
   for (const source of nestedRecords(market)) {

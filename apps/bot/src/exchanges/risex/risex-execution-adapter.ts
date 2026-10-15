@@ -1,5 +1,6 @@
 import { formatDecimal, parseDecimal } from "@btc-arbitrage/domain";
 import type {
+  AccountFill,
   BestBidOffer,
   ExecutionAdapter,
   ExecutionOrder,
@@ -40,7 +41,15 @@ const PLACE_ORDER_SELECTOR = "RISE_PERPS_PLACE_ORDER_V1";
 const CANCEL_ORDER_SELECTOR = "RISE_PERPS_CANCEL_ORDER_V1";
 const UPDATE_LEVERAGE_SELECTOR = "RISE_PERPS_UPDATE_LEVERAGE_V1";
 
-/** Where a market-order fill price came from. `order_ack` is the venue's own
+/** /v1/trade-history page size and page-loop bound for getAccountFills
+ * (verified live 2026-10-15: `page` + `limit` params, `has_next_page`
+ * flag; `time` is epoch NANOSECONDS). The account history is small
+ * (~$9k volume), 50 pages is far beyond anything realistic and only
+ * guards an exchange-side pagination bug. */
+const TRADE_HISTORY_PAGE_SIZE = 50;
+const TRADE_HISTORY_MAX_PAGES = 50;
+
+/** Where a market-order fill price came from. `order_ack` is the exchange's own
  * acknowledgment (authoritative). `order_history` is a qty-weighted average of
  * the order's fills read back from `/v1/orders` / `/v1/trade-history`.
  * `position_average` is the whole-position `avg_entry_price` fallback (blended
@@ -52,7 +61,7 @@ interface MarketFillResult {
   priceUsd?: string;
   source: FillPriceSource;
   /** Real fee in USD summed over the fills the price was derived from, when
-   * the venue payload exposes per-fill fees (RISEx trade history). Undefined
+   * the exchange payload exposes per-fill fees (RISEx trade history). Undefined
    * when unknown — never estimated. */
   feeUsd?: string;
   /** True when the price came from the signed-size/quote-amount derivation in
@@ -461,8 +470,74 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
     };
   }
 
+  /** Exchange-direct account fill history for /volume: GET /v1/trade-history
+   * (same endpoint readOrderHistoryFillPrice uses, shape verified live
+   * 2026-10-15: data.trades[] with data.page / data.has_next_page, `side`
+   * BUY|SELL, `time` epoch NANOSECONDS). Plain GET with the account param —
+   * no signing, same posture as the other account reads. Paginated with
+   * the `page` param until has_next_page turns false or an empty page.
+   * Notional = size × price with decimal-string math (parseDecimal /
+   * formatDecimal — no raw Number round-trips). Rows without a usable
+   * size/price/side/timestamp are skipped with a warning — never
+   * estimated. */
+  async getAccountFills(input: { symbol: string }): Promise<AccountFill[]> {
+    const account = this.requireAccountAddress();
+    const info = await this.getMarketInfo({
+      symbol: input.symbol,
+      marketType: "perpetual",
+      priceSource: "last",
+    });
+    const fills: AccountFill[] = [];
+    for (let page = 1; page <= TRADE_HISTORY_MAX_PAGES; page += 1) {
+      const payload = await this.http.get("/v1/trade-history", {
+        account,
+        market_id: String(info.marketId),
+        limit: String(TRADE_HISTORY_PAGE_SIZE),
+        page: String(page),
+      });
+      const body = firstRecord(unwrapData(payload));
+      const trades =
+        body && Array.isArray(body.trades) ? body.trades.filter(isRecord) : [];
+      for (const trade of trades) {
+        const size = optionalDecimalDeep(trade, ["size", "filled_size"]);
+        const price = optionalDecimalDeep(trade, ["price", "price_usd"]);
+        const side = risexFillSide(trade.side);
+        const occurredAt = risexFillDate(trade.time);
+        if (
+          size === undefined ||
+          price === undefined ||
+          side === undefined ||
+          occurredAt === undefined
+        ) {
+          console.warn(
+            "RISEx trade-history row missing size/price/side/time; skipping for volume",
+            { orderId: risexOptionalString(trade.order_id ?? trade.orderId) },
+          );
+          continue;
+        }
+        fills.push({
+          notionalUsd: formatDecimal(
+            parseDecimal(size, "RISEx fill size") *
+              parseDecimal(price, "RISEx fill price"),
+            8,
+          ),
+          side,
+          occurredAt,
+          ...(optionalDecimalDeep(trade, ["fee", "fee_usd", "feeUsd"]) !==
+          undefined
+            ? {
+                feeUsd: optionalDecimalDeep(trade, ["fee", "fee_usd", "feeUsd"]),
+              }
+            : {}),
+        });
+      }
+      if (trades.length === 0 || body?.has_next_page !== true) break;
+    }
+    return fills;
+  }
+
   /** Best-effort recovery of the exit data for a leg the position monitor
-   * already detected as flat (venue-side TP/SL fire): /v1/account/position
+   * already detected as flat (exchange-side TP/SL fire): /v1/account/position
    * drops the record once flat, so the closure is reconstructed from the
    * stored TP/SL order ids instead — /v1/orders/tpsl for the fired trigger,
    * /v1/orders for the triggered on-chain reduce-only order (VWAP fill
@@ -1822,6 +1897,32 @@ function risexTimestampSeconds(value: string | undefined): number | undefined {
   if (raw >= 1e14) return raw / 1e6; // microseconds
   if (raw >= 1e11) return raw / 1e3; // milliseconds
   return raw; // already seconds
+}
+
+/** Trade-history `side` ("BUY"/"SELL", any case) to the AccountFill side;
+ * anything else is undefined so the caller skips the row — never guessed. */
+function risexFillSide(value: unknown): "buy" | "sell" | undefined {
+  const normalized =
+    typeof value === "string" ? value.toUpperCase() : undefined;
+  if (normalized === "BUY") return "buy";
+  if (normalized === "SELL") return "sell";
+  return undefined;
+}
+
+/** Trade-history `time` (epoch nanoseconds — see risexTimestampSeconds)
+ * to a Date; undefined when missing/unusable — a fill without a timestamp
+ * cannot be attributed to a month. */
+function risexFillDate(value: unknown): Date | undefined {
+  if (typeof value !== "string" && typeof value !== "number") return undefined;
+  const seconds = risexTimestampSeconds(String(value));
+  return seconds === undefined ? undefined : new Date(seconds * 1000);
+}
+
+/** Soft string coercion for log-only fields (never throws). */
+function risexOptionalString(value: unknown): string | undefined {
+  return typeof value === "string" || typeof value === "number"
+    ? String(value)
+    : undefined;
 }
 
 function assertUint(value: number | bigint, bits: number, label: string): void {

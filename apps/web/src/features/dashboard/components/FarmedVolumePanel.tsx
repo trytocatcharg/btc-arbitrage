@@ -87,19 +87,19 @@ export const FarmedVolumePanel: FC<FarmedVolumePanelProps> = ({
 
       <div className="mt-5">
         <p className="text-xs uppercase tracking-[0.2em] text-slate-500">
-          Per-venue breakdown (lifetime)
+          Per-exchange breakdown (lifetime)
         </p>
         <div className="mt-2 grid gap-3 sm:grid-cols-2">
-          {lifetime.byVenue.length > 0 ? (
-            lifetime.byVenue.map((venue) => (
+          {lifetime.byExchange.length > 0 ? (
+            lifetime.byExchange.map((exchange) => (
               <SummaryItem
-                key={venue.exchangeId}
-                label={venue.exchangeId}
-                value={formatUsd(Number(venue.volumeUsd))}
+                key={exchange.exchangeId}
+                label={exchange.exchangeId}
+                value={formatUsd(Number(exchange.volumeUsd))}
               />
             ))
           ) : (
-            <SummaryItem label="No venue volume yet" value={formatUsd(0)} />
+            <SummaryItem label="No exchange volume yet" value={formatUsd(0)} />
           )}
         </div>
       </div>
