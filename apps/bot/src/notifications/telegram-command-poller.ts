@@ -40,6 +40,7 @@ import {
   applyMinSpreadUsd,
   applyTradingPair,
   isRuntimeSettingOverridden,
+  MAX_LEVERAGE,
   snapshotRuntimeSettings,
   type RuntimeSettingChange,
   type RuntimeSettingsBaseline,
@@ -326,6 +327,45 @@ export class TelegramCommandPoller {
     if (!kind) return;
     try {
       const value = Number(text.replace(",", "."));
+      // Leverage is written to the venues inside
+      // validateExecutionPreflight, so venues are prepared BEFORE the
+      // config value changes; a venue rejection keeps the current value.
+      // Policy: specs/exchange-execution.md ("Startup execution preflight").
+      if (kind === "leverage") {
+        if (!Number.isInteger(value) || value < 1 || value > MAX_LEVERAGE) {
+          await this.sendMessage(
+            `❌ Leverage must be an integer between 1 and ${MAX_LEVERAGE}.\nTry again, or tap /config to start over.`,
+          );
+          return;
+        }
+        const failures: string[] = [];
+        for (const exchangeId of [
+          this.config.exchangeA,
+          this.config.exchangeB,
+        ]) {
+          const adapter = this.registry.get(exchangeId);
+          if (!adapter.capabilities.orderPlacement || !adapter.execution)
+            continue;
+          try {
+            await adapter.execution.validateExecutionPreflight({
+              symbol: this.config.btcSymbol,
+              leverage: value,
+            });
+          } catch (error) {
+            failures.push(
+              `${exchangeId}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+        if (failures.length > 0) {
+          this.pendingSettingPrompt = null;
+          await this.sendMessage(
+            "❌ Could not set the leverage on the venue(s); leverage stays " +
+              `at ${this.config.leverage}x.\n${failures.join("\n")}`,
+          );
+          return;
+        }
+      }
       let change: RuntimeSettingChange;
       try {
         change =
@@ -350,7 +390,11 @@ export class TelegramCommandPoller {
       this.pendingSettingPrompt = null;
       console.warn("Runtime setting updated", { updateId, kind, ...change });
       const persistNote = await this.persistAppliedChange(change);
-      await this.sendMessage(`✅ ${change.summary}${persistNote}`);
+      const venueSyncNote =
+        kind === "leverage" ? "\n(venue leverage updated)" : "";
+      await this.sendMessage(
+        `✅ ${change.summary}${persistNote}${venueSyncNote}`,
+      );
     } catch (error) {
       console.error("Telegram setting input failed", {
         updateId,

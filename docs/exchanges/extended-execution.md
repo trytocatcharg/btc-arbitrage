@@ -23,6 +23,8 @@ Execution is default-disabled. Enable only after account, market, BBO, margin, p
 - `GET /api/v1/user/balance`
 - `GET /api/v1/user/orders/{id}`
 - `GET /api/v1/user/positions`
+- `GET /api/v1/user/leverage?market={market}`
+- `PATCH /api/v1/user/leverage`
 - `POST /api/v1/user/order`
 - `DELETE /api/v1/user/order/{id}`
 
@@ -32,6 +34,16 @@ Execution is default-disabled. Enable only after account, market, BBO, margin, p
 - Read market metadata, available margin, order status and positions.
 - Submit signed `LIMIT`, `MARKET`, `TPSL` orders using the official Stark signing model.
 - Cancel orders by id.
+- Preflight aligns the venue leverage per market via `PATCH /api/v1/user/leverage` (API-key auth, no Stark signature — it is an Account endpoint, not Order management). Venue rejections (open position + triggered orders too large for the selected leverage, or available balance insufficient for the additional margin) surface as preflight failures, both at startup and on the Telegram `/config` leverage change.
+
+## Leverage alignment and resilience
+
+Behavior documented here is authoritative; code comments only point back to this section.
+
+- **Leverage write**: `validateExecutionPreflight` aligns the venue leverage with the bot-configured value at every startup and whenever the Telegram `/config` leverage change prepares the venues before applying the new value. A venue rejection keeps the previous config value untouched (same "prepare venues before applying" pattern as the Pairs flow).
+- **Timeout budget**: every Extended REST call carries a 10 s abort budget. On timeout the client throws an `ExtendedRequestTimeoutError` naming the method, path, and elapsed time, so a multi-call preflight failure identifies the exact hung request.
+- **Preflight retry**: the Extended preflight retries all of its checks once when a call times out — every call is idempotent (GET markets, GET balance, PATCH leverage, local WASM init); HTTP rejections and venue validation failures still fail fast without a retry.
+- **Startup retry**: the bot startup preflight retries a full preflight up to 3 attempts with 5 s / 15 s backoff, only for timeout-class errors. Persistent errors (bad credentials, leverage above the market cap, insufficient balance, HTTP error statuses) abort startup immediately — they cannot succeed by re-running. See `specs/exchange-execution.md` for the cross-venue policy.
 
 ## Verified behavior
 
@@ -48,3 +60,4 @@ Order ids are 19-digit integers returned as JSON numbers (> `Number.MAX_SAFE_INT
 
 - The bot still keeps global live placement disabled at config level until the full trade-opening workflow is promoted from guarded slice to production.
 - Balance `404` is normalized as zero because some accounts/environments do not expose `/api/v1/user/balance`; this is an explicit compatibility fallback in the HTTP client.
+- **Starknet → Arc migration (published 2026-10-08)**: Extended moves settlement to Arc (Circle's EVM L1) starting **2026-10-22 12:00 UTC**. The integration is Starknet-coupled end to end (base URL `api.starknet.extended.exchange`, Stark WASM signing, Stark private key + vault id, Starknet domain from `/api/v1/info/starknet`); the new API host, signing model, and credentials will very likely change, and Extended had **not published a developer/API migration guide as of 2026-10-15** — re-verify every endpoint (including the leverage PATCH) against the new environment when the guide appears. Operational risk to clear before **2026-10-21 12:00 UTC**: if any sub-account holds more than USD 1 of USDT or wBTC, Extended cancels ALL orders in it (including TP/SL and API orders) and closes positions at mark price; the bot's collateral is USDC, but sub-account balances must be checked, and extra free margin is needed for the deposit/withdrawal pause (~2 h) during the migration.

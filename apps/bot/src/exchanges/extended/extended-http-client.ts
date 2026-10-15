@@ -40,6 +40,14 @@ export class ExtendedHttpClient {
     return this.request("POST", path, body, options);
   }
 
+  async patch(
+    path: string,
+    body: unknown,
+    options: ExtendedHttpRequestOptions = {},
+  ): Promise<unknown> {
+    return this.request("PATCH", path, body, options);
+  }
+
   async delete(
     path: string,
     options: ExtendedHttpRequestOptions = {},
@@ -65,12 +73,35 @@ export class ExtendedHttpClient {
         );
       headers["x-api-key"] = this.apiKey;
     }
-    const response = await this.fetchImpl(this.url(path, options.query), {
-      method,
-      headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
+    const startedAt = Date.now();
+    let response: Response;
+    try {
+      response = await this.fetchImpl(this.url(path, options.query), {
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch (error) {
+      // Name timeout aborts with the request context (method, path,
+      // elapsed) instead of the anonymous DOMException; policy documented
+      // in docs/exchanges/extended-execution.md ("Leverage alignment and
+      // resilience"). Node >= 20.20 names the abort "TimeoutError", some
+      // paths "AbortError" — either can only mean the budget was spent.
+      if (
+        error instanceof Error &&
+        (error.name === "TimeoutError" || error.name === "AbortError")
+      ) {
+        const timeoutError = new Error(
+          `Extended ${method} ${path} timed out after ` +
+            `${Date.now() - startedAt} ms ` +
+            `(budget ${REQUEST_TIMEOUT_MS} ms)`,
+        );
+        timeoutError.name = "ExtendedRequestTimeoutError";
+        throw timeoutError;
+      }
+      throw error;
+    }
     const text = response.status === 204 ? "" : await response.text();
     const payload = parseResponseBody(text);
     if (

@@ -42,6 +42,16 @@ interface ExtendedHttpApi {
       >;
     },
   ): Promise<unknown>;
+  patch?(
+    path: string,
+    body: unknown,
+    options?: {
+      private?: boolean;
+      query?: Record<
+        string, string | number | boolean | Array<string | number | boolean> | undefined
+      >;
+    },
+  ): Promise<unknown>;
   delete?(
     path: string,
     options?: {
@@ -163,6 +173,30 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
   }): Promise<void> {
     this.requireTradingEnabled();
     this.requireCredentials();
+    // Transient (timeout) failures retry once; every call here is
+    // idempotent and non-timeout errors still fail fast. Policy:
+    // docs/exchanges/extended-execution.md ("Leverage alignment and
+    // resilience").
+    try {
+      await this.runPreflightChecks(input);
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        error.name !== "ExtendedRequestTimeoutError"
+      )
+        throw error;
+      console.warn(
+        "Extended execution preflight timed out; retrying once",
+        { symbol: input.symbol, leverage: input.leverage, error: error.message },
+      );
+      await this.runPreflightChecks(input);
+    }
+  }
+
+  private async runPreflightChecks(input: {
+    symbol: string;
+    leverage: number;
+  }): Promise<void> {
     const [metadata, availableMargin] = await Promise.all([
       this.getMarketMetadata({
         symbol: input.symbol,
@@ -181,6 +215,21 @@ class ExtendedExecutionAdapter implements ExecutionAdapter {
     if (Number(availableMargin) <= 0)
       throw new Error("Extended available margin is zero");
     await initExtendedSigningWasm();
+    // Align the venue leverage with the bot-configured value. Account
+    // endpoint, API-key auth, venue rejection surfaces as a preflight
+    // failure. See docs/exchanges/extended-execution.md.
+    if (!this.http.patch)
+      throw new Error("Extended HTTP client does not support PATCH");
+    const market = await this.getMarket({
+      symbol: input.symbol,
+      marketType: "perpetual",
+      priceSource: "last",
+    });
+    await this.http.patch(
+      "/api/v1/user/leverage",
+      { market: getMarketName(market), leverage: String(input.leverage) },
+      { private: true },
+    );
   }
 
   async submitExecutionOrder(

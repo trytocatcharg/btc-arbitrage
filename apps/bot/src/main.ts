@@ -4,6 +4,8 @@ import {
   redactSecrets,
 } from "@btc-arbitrage/config";
 import { getDb } from "@btc-arbitrage/db";
+import type { ExecutionAdapter } from "@btc-arbitrage/exchange-core";
+import { sleep } from "@btc-arbitrage/shared";
 import { createExchangeRegistry } from "./exchanges/registry.js";
 import type { ArcusExecutionHandle } from "./exchanges/arcus/arcus-execution-adapter.js";
 import { TelegramCommandPoller } from "./notifications/telegram-command-poller.js";
@@ -13,6 +15,52 @@ import { createBotControl } from "./runtime/runtime-control.js";
 import { snapshotRuntimeSettings } from "./runtime/runtime-settings.js";
 import { applyPersistedRuntimeOverrides } from "./runtime/runtime-settings-store.js";
 import { ExecutionQueue } from "./trading/execution-queue.js";
+
+// Startup preflight retry policy: transient (timeout-class) failures
+// retry with bounded backoff; persistent venue rejections still abort
+// the boot immediately. Authoritative spec:
+// specs/exchange-execution.md ("Startup execution preflight").
+const STARTUP_PREFLIGHT_MAX_ATTEMPTS = 3;
+const STARTUP_PREFLIGHT_RETRY_BACKOFF_MS = [5_000, 15_000] as const;
+
+function isTransientPreflightError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return (
+    error.name === "ExtendedRequestTimeoutError" ||
+    /timed? ?out|aborted due to timeout/i.test(error.message)
+  );
+}
+
+async function runStartupPreflightWithTransientRetry(
+  exchangeId: string,
+  execution: ExecutionAdapter,
+  symbol: string,
+  leverage: number,
+): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await execution.validateExecutionPreflight({ symbol, leverage });
+      return;
+    } catch (error) {
+      if (
+        attempt >= STARTUP_PREFLIGHT_MAX_ATTEMPTS ||
+        !isTransientPreflightError(error)
+      )
+        throw error;
+      const backoff = STARTUP_PREFLIGHT_RETRY_BACKOFF_MS[attempt - 1];
+      console.warn(
+        "Execution preflight hit a transient error; retrying after backoff",
+        {
+          exchange: exchangeId,
+          attempt,
+          nextAttemptInMs: backoff,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      );
+      await sleep(backoff);
+    }
+  }
+}
 
 async function main() {
   console.log("btc-arbitrage bot process booting", {
@@ -128,12 +176,12 @@ async function main() {
   console.log("Initializing exchange registry");
   const registry = createExchangeRegistry(config);
 
-  // One-time execution setup, hoisted from the per-trade preflight: sets
-  // the account leverage on RISEx and initializes Extended order-signing
-  // WASM. These are process-lifetime steps, not per-trade checks —
-  // re-running them on every trade added avoidable latency to the entry
-  // path. Fail fast here: if live trading is enabled but the venue
-  // rejects the setup, better to die at boot than mid-trade.
+  // One-time execution setup, hoisted from the per-trade preflight:
+  // aligns venue account leverage (RISEx write, Extended PATCH) and
+  // initializes signing setup. Fail fast on persistent venue rejection —
+  // except transient timeouts, retried with backoff (see
+  // runStartupPreflightWithTransientRetry and
+  // specs/exchange-execution.md).
   for (const exchangeId of [config.exchangeA, config.exchangeB]) {
     const adapter = registry.get(exchangeId);
     // Each client mirrors its config.<exchange>.tradingEnabled into
@@ -150,10 +198,12 @@ async function main() {
       leverage: config.leverage,
     });
     try {
-      await adapter.execution.validateExecutionPreflight({
-        symbol: config.btcSymbol,
-        leverage: config.leverage,
-      });
+      await runStartupPreflightWithTransientRetry(
+        exchangeId,
+        adapter.execution,
+        config.btcSymbol,
+        config.leverage,
+      );
     } catch (error) {
       console.error("Execution preflight failed at startup", {
         exchange: exchangeId,

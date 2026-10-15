@@ -32,7 +32,7 @@ export interface RuntimeSettingsBaseline {
 
 const MAX_COOLDOWN_MINUTES = 10_080; // 7 days
 const MAX_USD_VALUE = 10_000;
-const MAX_LEVERAGE = 50;
+export const MAX_LEVERAGE = 50;
 
 export function snapshotRuntimeSettings(
   config: BotConfig,
