@@ -71,6 +71,11 @@ export interface TradeLegUpdate {
   entryPriceUsd?: string;
   exitPriceUsd?: string;
   realizedPnlUsd?: string;
+  /** The leg's actual filled quantity (covered, BTC decimal string).
+   * Persisted so closure math (gross PnL, fill-history fallback) uses the
+   * real filled size instead of the planned preview quantity; undefined
+   * leaves the column untouched. */
+  quantityBase?: string;
   /** Monotonic farmed-volume increment (USD notional) applied with
    * `coalesce(filled_notional_usd, 0) + delta` inside the transition's
    * transaction. */
@@ -728,6 +733,16 @@ export class OpenTradeService {
                 status: "open",
                 entryOrderId: hedge.id,
                 entryPriceUsd: resolvedHedge.averageFillPriceUsd,
+                quantityBase: formatDecimal(covered, 10),
+              },
+              // The resting limit leg tracks the same cumulative covered
+              // size, so later closure math uses the filled quantity, not
+              // the planned one (trade #1101: planned-vs-filled divergence
+              // scaled PnL 6.14× and broke the fill-history fallback).
+              {
+                exchangeId: preview.limitExchange,
+                side: limitSide === "buy" ? "long" : "short",
+                quantityBase: formatDecimal(covered, 10),
               },
             ],
           });
@@ -1327,6 +1342,7 @@ export class OpenTradeService {
         minEdgeUsd,
         keepOpen,
       });
+      const coveredQuantityBase = formatDecimal(covered, 10);
       // STRATEGY CHANGE (2026-09-21, SL-only exits): the fill-time edge
       // band's abort path is disabled — the operator runs an SL-only
       // exit strategy and the band must not close trades. Evaluation +
@@ -1341,7 +1357,6 @@ export class OpenTradeService {
           breakevenUsd,
           minEdgeUsd,
         });
-        const coveredQuantityBase = formatDecimal(covered, 10);
         const close = await closeTradeBothLegs({
           store: this.store,
           registry: this.registry,
@@ -1407,6 +1422,12 @@ export class OpenTradeService {
             status: "open",
             entryOrderId: activeLimit.id,
             entryPriceUsd: limitFillPrice,
+            quantityBase: coveredQuantityBase,
+          },
+          {
+            exchangeId: preview.marketExchange,
+            side: marketSide === "buy" ? "long" : "short",
+            quantityBase: coveredQuantityBase,
           },
         ],
       });

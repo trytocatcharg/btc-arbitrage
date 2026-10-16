@@ -10,6 +10,14 @@ import { formatDecimal, parseDecimal } from "@btc-arbitrage/domain";
 import { shouldNotifyLegClosure } from "./trade-guards.js";
 import { formatPnlColored } from "./trade-close.js";
 
+// Bounded retry for post-hoc leg-closure resolution. A TP/SL fill can land
+// in the same second the flat position is first detected while the
+// order/fill reads still lag; one-shot resolution then persists
+// exit_price NULL / close_reason 'unknown' (and a Telegram "n/a") forever
+// — closureNotifiedAt is irreversible (trade #1101).
+const CLOSURE_RESOLVE_MAX_ATTEMPTS = 3;
+const CLOSURE_RESOLVE_RETRY_MS = 5_000;
+
 export async function monitorTrades(input: {
   db: Awaited<ReturnType<typeof getDb>>;
   registry: { get(id: string): ExchangeAdapter };
@@ -73,23 +81,37 @@ export async function monitorTrades(input: {
         (position?.exitPriceUsd == null || position?.realizedPnlUsd == null) &&
         adapter.resolveLegClosure
       ) {
-        try {
-          resolved = await adapter.resolveLegClosure({
-            symbol: row.trades.symbol,
-            side: row.trade_legs.side,
-            tpOrderId: protectionIds.tpOrderId,
-            slOrderId: protectionIds.slOrderId,
-            quantityBase: row.trade_legs.quantityBase ?? undefined,
-          });
-        } catch (error) {
-          console.warn(
-            "Leg closure resolution failed; continuing with position data",
-            {
-              tradeId: row.trades.id,
-              legId: row.trade_legs.id,
-              message: error instanceof Error ? error.message : String(error),
-            },
-          );
+        for (
+          let attempt = 1;
+          attempt <= CLOSURE_RESOLVE_MAX_ATTEMPTS;
+          attempt += 1
+        ) {
+          try {
+            resolved = await adapter.resolveLegClosure({
+              symbol: row.trades.symbol,
+              side: row.trade_legs.side,
+              tpOrderId: protectionIds.tpOrderId,
+              slOrderId: protectionIds.slOrderId,
+              quantityBase: row.trade_legs.quantityBase ?? undefined,
+            });
+          } catch (error) {
+            console.warn(
+              "Leg closure resolution failed; continuing with position data",
+              {
+                tradeId: row.trades.id,
+                legId: row.trade_legs.id,
+                attempt,
+                message:
+                  error instanceof Error ? error.message : String(error),
+              },
+            );
+          }
+          if (resolved != null) break;
+          if (attempt < CLOSURE_RESOLVE_MAX_ATTEMPTS) {
+            await new Promise<void>((resolve) =>
+              setTimeout(resolve, CLOSURE_RESOLVE_RETRY_MS),
+            );
+          }
         }
       }
       // Merge recovered data behind the position data: prices only when the

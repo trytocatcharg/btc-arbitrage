@@ -288,6 +288,8 @@ export class DbPreviewStore implements PreviewStore {
           legSet.exitPriceUsd = leg.exitPriceUsd;
         if (leg.realizedPnlUsd !== undefined)
           legSet.realizedPnlUsd = leg.realizedPnlUsd;
+        if (leg.quantityBase !== undefined)
+          legSet.quantityBase = leg.quantityBase;
         if (leg.entryFeeUsd !== undefined)
           legSet.entryFeeUsd = leg.entryFeeUsd;
         if (leg.exitFeeUsd !== undefined) legSet.exitFeeUsd = leg.exitFeeUsd;
