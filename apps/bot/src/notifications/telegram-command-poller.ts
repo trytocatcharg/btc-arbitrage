@@ -21,7 +21,10 @@ import {
   previousMonthRange,
   type NetPnlTotals,
 } from "../trading/volume-stats.js";
-import { loadExchangeVolume } from "../trading/exchange-volume.js";
+import {
+  loadAvailableBalances,
+  loadExchangeVolume,
+} from "../trading/exchange-volume.js";
 import {
   isAllowedTelegramChat,
   isAllowedTelegramUser,
@@ -1514,6 +1517,29 @@ function formatSignedUsd(value: number): string {
     : `-$${formatCompactUsd(Math.abs(value))}`;
 }
 
+/** Available-balance block for every /volume view: one line per registered
+ * exchange, exchange-direct via each execution adapter's
+ * getAvailableMarginUsd, plus a total over the exchanges that reported.
+ * A fetch failure renders "n/d" — never estimated; the total only sums
+ * known balances and is omitted when every fetch failed. */
+async function formatAvailableBalanceLines(
+  registry: ExchangeRegistryLike,
+): Promise<string[]> {
+  const balances = await loadAvailableBalances(registry);
+  if (balances.length === 0) return [];
+  const known = balances.filter((entry) => entry.usd !== null);
+  const totalUsd = known.reduce((sum, entry) => sum + (entry.usd ?? 0), 0);
+  return [
+    "Available balance (USDC):",
+    ...balances.map((entry) =>
+      `  ${entry.exchangeId}: ${entry.usd === null ? "n/d" : `$${formatCompactUsd(entry.usd)}`}`,
+    ),
+    ...(known.length > 0
+      ? [`  Total (${known.length}/${balances.length}): $${formatCompactUsd(totalUsd)}`]
+      : []),
+  ];
+}
+
 function formatExchangeVolumeLines(
   byExchange: Array<{ exchangeId: string; usd: number }>,
   exchangesFromDb: string[],
@@ -1541,22 +1567,29 @@ async function buildVolumeMessage(
 ): Promise<string> {
   if (view === "prevmonth") {
     const range = previousMonthRange();
-    const stats = await loadExchangeVolume(db, registry, {
-      from: range.from,
-      to: range.to,
-    });
+    const [stats, balanceLines] = await Promise.all([
+      loadExchangeVolume(db, registry, {
+        from: range.from,
+        to: range.to,
+      }),
+      formatAvailableBalanceLines(registry),
+    ]);
     const net = await loadNetPnlTotals(db, range);
     return [
       `📊 Generated volume — ${range.label}`,
       `Total: $${formatCompactUsd(stats.totalUsd)}`,
       ...formatNetPnlLines(net),
       ...formatExchangeVolumeLines(stats.byExchange, stats.exchangesFromDb),
+      ...balanceLines,
       VOLUME_ATTRIBUTION_NOTE,
     ].join("\n");
   }
   if (view === "6m") {
     const from = lastSixMonthsFrom();
-    const stats = await loadExchangeVolume(db, registry, { from });
+    const [stats, balanceLines] = await Promise.all([
+      loadExchangeVolume(db, registry, { from }),
+      formatAvailableBalanceLines(registry),
+    ]);
     const netMonths = await loadMonthlyNetPnlBreakdown(db, from);
     const net = await loadNetPnlTotals(db, { from });
     const byMonth = stats.byMonth;
@@ -1597,16 +1630,21 @@ async function buildVolumeMessage(
       `Period total: $${formatCompactUsd(stats.totalUsd)}`,
       ...formatNetPnlLines(net),
       ...formatExchangeVolumeLines(stats.byExchange, stats.exchangesFromDb),
+      ...balanceLines,
       VOLUME_ATTRIBUTION_NOTE,
     ].join("\n");
   }
-  const stats = await loadExchangeVolume(db, registry);
+  const [stats, balanceLines] = await Promise.all([
+    loadExchangeVolume(db, registry),
+    formatAvailableBalanceLines(registry),
+  ]);
   const net = await loadNetPnlTotals(db);
   return [
     "📊 Generated volume",
     `Lifetime total: $${formatCompactUsd(stats.totalUsd)}`,
     ...formatNetPnlLines(net),
     ...formatExchangeVolumeLines(stats.byExchange, stats.exchangesFromDb),
+    ...balanceLines,
     VOLUME_ATTRIBUTION_NOTE,
   ].join("\n");
 }

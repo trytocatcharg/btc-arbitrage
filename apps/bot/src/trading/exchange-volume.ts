@@ -37,6 +37,54 @@ export interface ExchangeVolumeRegistry {
  * skipped via the get() throw. */
 const EXCHANGE_IDS = ["risex", "extended", "arcus"] as const;
 
+/** Available-margin snapshot for the Telegram /volume command: one entry
+ * per registered exchange (same EXCHANGE_IDS mirror as loadExchangeVolume),
+ * sourced from each execution adapter's getAvailableMarginUsd. `usd` is null
+ * when the exchange has no execution adapter or the fetch throws — the
+ * renderer must show "n/d", never estimate. Never throws. */
+export interface ExchangeAvailableBalance {
+  exchangeId: string;
+  usd: number | null;
+}
+
+export async function loadAvailableBalances(
+  registry: ExchangeVolumeRegistry,
+): Promise<ExchangeAvailableBalance[]> {
+  const results = await Promise.all(
+    EXCHANGE_IDS.map(async (id) => {
+      let adapter: ExchangeAdapter;
+      try {
+        adapter = registry.get(id);
+      } catch {
+        // Not registered in this runtime — skip it.
+        return { exchangeId: id, usd: null, registered: false } as const;
+      }
+      const execution = adapter.execution;
+      if (!execution)
+        return { exchangeId: id, usd: null, registered: false } as const;
+      try {
+        const raw = await execution.getAvailableMarginUsd();
+        const usd = Number(raw);
+        return {
+          exchangeId: id,
+          usd: Number.isFinite(usd) ? usd : null,
+          registered: true,
+        } as const;
+      } catch (error) {
+        console.warn("Available balance fetch failed for exchange", {
+          exchangeId: id,
+          message: error instanceof Error ? error.message : String(error),
+        });
+        return { exchangeId: id, usd: null, registered: true } as const;
+      }
+    }),
+  );
+  // Only registered exchanges, in the registry's declaration order.
+  return results
+    .filter((entry) => entry.registered)
+    .map(({ exchangeId, usd }) => ({ exchangeId, usd }));
+}
+
 /** In-memory TTL for the exchange aggregates: /volume is operator-driven and
  * the underlying exchange histories change only when a trade fills, so a
  * 60-second window keeps repeated view switches cheap without serving
