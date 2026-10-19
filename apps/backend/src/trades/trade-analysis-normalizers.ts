@@ -157,8 +157,10 @@ export function normalizeUnhedgedActive(
         shortExchange: trade.shortExchange,
         leverage: trade.leverage,
         entrySpreadUsd: trade.entrySpreadUsd,
-        openedAt: iso(trade.openedAt),
-        unhedgedSince: unhedgedSince.toISOString(),
+        openedAt: iso(trade.openedAt, `trade.openedAt (trade ${trade.id})`),
+        unhedgedSince:
+          iso(unhedgedSince, `unhedgedSince (trade ${trade.id})`) ??
+          new Date(0).toISOString(),
         unhedgedSinceApproximate: raw.unhedgedHistoryAt == null,
         openLeg: openLeg
           ? {
@@ -167,7 +169,7 @@ export function normalizeUnhedgedActive(
               entryPriceUsd: openLeg.entryPriceUsd,
               quantityBase: openLeg.quantityBase,
               quantityUsd: openLeg.quantityUsd,
-              openedAt: iso(openLeg.openedAt),
+              openedAt: iso(openLeg.openedAt, `leg.openedAt (trade ${trade.id})`),
             }
           : null,
         closedLeg: closedLeg
@@ -175,7 +177,7 @@ export function normalizeUnhedgedActive(
               side: closedLeg.side,
               exchangeId: closedLeg.exchangeId,
               closeReason: closedLeg.closeReason,
-              closedAt: iso(closedLeg.closedAt),
+              closedAt: iso(closedLeg.closedAt, `leg.closedAt (trade ${trade.id})`),
               exitPriceUsd: closedLeg.exitPriceUsd,
               realizedPnlUsd: closedLeg.realizedPnlUsd,
               entryFeeUsd: closedLeg.entryFeeUsd,
@@ -201,10 +203,13 @@ export function normalizeUnhedgedEvents(
         longExchange: trade.longExchange,
         shortExchange: trade.shortExchange,
         leverage: trade.leverage,
-        windowStartAt: iso(raw.windowStartAt),
-        windowEndAt: iso(raw.windowEndAt),
+        windowStartAt: iso(raw.windowStartAt, `windowStartAt (trade ${trade.id})`),
+        windowEndAt: iso(raw.windowEndAt, `windowEndAt (trade ${trade.id})`),
         durationMs:
-          raw.windowStartAt != null && raw.windowEndAt != null
+          raw.windowStartAt != null &&
+          raw.windowEndAt != null &&
+          !Number.isNaN(raw.windowStartAt.getTime()) &&
+          !Number.isNaN(raw.windowEndAt.getTime())
             ? raw.windowEndAt.getTime() - raw.windowStartAt.getTime()
             : null,
         approximateStart: raw.approximateStart,
@@ -221,7 +226,7 @@ export function normalizeUnhedgedEvents(
           entryFeeUsd: leg.entryFeeUsd,
           exitFeeUsd: leg.exitFeeUsd,
           closeReason: leg.closeReason,
-          closedAt: iso(leg.closedAt),
+          closedAt: iso(leg.closedAt, `leg.closedAt (trade ${trade.id})`),
         })),
         realizedPnlUsd: trade.realizedPnlUsd,
         totalFeesUsd: trade.totalFeesUsd,
@@ -262,30 +267,41 @@ export function normalizeTradeTimeline(
       realizedPnlUsd: trade.realizedPnlUsd,
       totalFeesUsd: trade.totalFeesUsd,
       unrealizedPnlUsd: trade.unrealizedPnlUsd,
-      openedAt: iso(trade.openedAt),
-      closedAt: iso(trade.closedAt),
-      createdAt: trade.createdAt.toISOString(),
-      updatedAt: trade.updatedAt.toISOString(),
+      openedAt: iso(trade.openedAt, `trade.openedAt (trade ${trade.id})`),
+      closedAt: iso(trade.closedAt, `trade.closedAt (trade ${trade.id})`),
+      createdAt: iso(trade.createdAt, `trade.createdAt (trade ${trade.id})`) ?? new Date(0).toISOString(),
+      updatedAt: iso(trade.updatedAt, `trade.updatedAt (trade ${trade.id})`) ?? new Date(0).toISOString(),
     },
     legs: raw.legs.map((leg) => ({
       ...leg,
-      openedAt: iso(leg.openedAt),
-      closedAt: iso(leg.closedAt),
-      closureNotifiedAt: iso(leg.closureNotifiedAt),
+      openedAt: iso(leg.openedAt, `leg.openedAt (trade ${leg.tradeId})`),
+      closedAt: iso(leg.closedAt, `leg.closedAt (trade ${leg.tradeId})`),
+      closureNotifiedAt: iso(leg.closureNotifiedAt, `leg.closureNotifiedAt (trade ${leg.tradeId})`),
     })),
     statusHistory: raw.statusHistory.map((row) => ({
       id: row.id,
       fromStatus: row.fromStatus,
       toStatus: row.toStatus,
       reason: row.reason,
-      changedAt: row.changedAt.toISOString(),
+      changedAt: iso(row.changedAt, `statusHistory.changedAt (row ${row.id})`) ?? new Date(0).toISOString(),
     })),
     signal: raw.signal
-      ? { ...raw.signal, createdAt: raw.signal.createdAt.toISOString() }
+      ? {
+          ...raw.signal,
+          createdAt: iso(raw.signal.createdAt, `signal.createdAt (signal ${raw.signal.id})`) ?? new Date(0).toISOString(),
+        }
       : null,
   };
 }
 
-function iso(date: Date | null): string | null {
-  return date ? date.toISOString() : null;
+function iso(date: Date | null, label = "date"): string | null {
+  if (date == null) return null;
+  if (Number.isNaN(date.getTime())) {
+    // MariaDB zero-dates ('0000-00-00 00:00:00') parse into invalid Date
+    // objects that pass a truthiness check; log the field so the corrupt
+    // rows can be located, and emit null instead of crashing the endpoint.
+    console.error(`[trade-analysis] invalid ${label}: zero-date or corrupt value, emitting null`);
+    return null;
+  }
+  return date.toISOString();
 }

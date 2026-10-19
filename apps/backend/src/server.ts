@@ -122,6 +122,9 @@ export function createBackendApp(
       response: Response,
       _next: NextFunction,
     ) => {
+      // Log the full failure (stack included) so a 500 is diagnosable in
+      // the container logs instead of surfacing only as `{error}`.
+      console.error("[backend] unhandled request error", error);
       const message =
         error instanceof Error ? error.message : "Unknown backend error";
       response.status(500).json({ error: message });
