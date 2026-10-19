@@ -4,6 +4,7 @@ import type {
   RawActiveUnhedgedTrade,
   RawTradeTimeline,
   RawUnhedgedEvent,
+  UnhedgedLegSampleRow,
   UnhedgedResolution,
 } from "./trade-analysis-service.js";
 
@@ -133,6 +134,27 @@ export interface TradeTimelineResponseDto {
   legs: TradeLegDto[];
   statusHistory: TradeTimelineStatusHistoryDto[];
   signal: SignalDto | null;
+}
+
+export interface UnhedgedLegSampleDto {
+  id: number;
+  tradeId: number;
+  legId: number;
+  exchangeId: string;
+  side: string;
+  markPriceUsd: string;
+  entryPriceUsd: string | null;
+  quantityBase: string | null;
+  /** GROSS mark-to-market unrealized PnL (fee-free); null when the leg's
+   * entry/qty was unknown at sampling time — never estimated. */
+  unrealizedPnlUsd: string | null;
+  sampledAt: string;
+}
+
+export interface UnhedgedLegSamplesResponseDto {
+  generatedAt: string;
+  tradeId: number;
+  samples: UnhedgedLegSampleDto[];
 }
 
 /**
@@ -291,6 +313,31 @@ export function normalizeTradeTimeline(
           createdAt: iso(raw.signal.createdAt, `signal.createdAt (signal ${raw.signal.id})`) ?? new Date(0).toISOString(),
         }
       : null,
+  };
+}
+
+export function normalizeUnhedgedLegSamples(
+  generatedAt: Date,
+  tradeId: number,
+  samples: UnhedgedLegSampleRow[],
+): UnhedgedLegSamplesResponseDto {
+  return {
+    generatedAt: generatedAt.toISOString(),
+    tradeId,
+    samples: samples.map((sample) => ({
+      id: sample.id,
+      tradeId: sample.tradeId,
+      legId: sample.legId,
+      exchangeId: sample.exchangeId,
+      side: sample.side,
+      markPriceUsd: sample.markPriceUsd,
+      entryPriceUsd: sample.entryPriceUsd,
+      quantityBase: sample.quantityBase,
+      unrealizedPnlUsd: sample.unrealizedPnlUsd,
+      sampledAt:
+        iso(sample.sampledAt, `sample.sampledAt (trade ${tradeId})`) ??
+        new Date(0).toISOString(),
+    })),
   };
 }
 

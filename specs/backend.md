@@ -31,6 +31,7 @@ Implemented routes:
 - `GET /api/trades/unhedged/active`
 - `GET /api/trades/unhedged/events`
 - `GET /api/trades/:id/timeline`
+- `GET /api/trades/:id/unhedged-samples`
 
 There are no write endpoints.
 
@@ -68,8 +69,9 @@ exchange signing.
 
 ### 4. Unhedged-window observability (read-only)
 
-`GET /api/trades/unhedged/active`, `GET /api/trades/unhedged/events`, and
-`GET /api/trades/:id/timeline` expose trade-analysis data for unhedged
+`GET /api/trades/unhedged/active`, `GET /api/trades/unhedged/events`,
+`GET /api/trades/:id/timeline`, and `GET /api/trades/:id/unhedged-samples`
+expose trade-analysis data for unhedged
 windows and per-trade timelines (`unhedged-observability` spec):
 
 - **Active unhedged trades** — every trade in status `unhedged` with its open
@@ -95,6 +97,17 @@ windows and per-trade timelines (`unhedged-observability` spec):
 - **Per-trade timeline** — the trade row, both full leg rows, the status
   history ascending by `changed_at`, and the originating signals row (or
   null). A missing or non-integer id returns `404 { error: "Trade not found" }`.
+- **Unhedged-window PnL samples** (`GET /api/trades/:id/unhedged-samples`) —
+  the `unhedged_leg_samples` rows the bot's sampler wrote while the trade
+  was `unhedged`, ordered ascending by `sampled_at` (id as tiebreak).
+  `limit` is bounded 1..5000, default 1000; invalid values fall back to the
+  default. A non-integer id or an unknown trade returns
+  `404 { error: "Trade not found" }`; an existing trade with no samples
+  returns an empty `samples` array. PnL convention: `unrealizedPnlUsd` is
+  GROSS mark-to-market (fee-free) — samples are intra-window marks, so the
+  canonical net only exists at trade level (`realized − total_fees_usd`);
+  `unrealizedPnlUsd` is null when the leg's entry/qty was unknown at
+  sampling time and is never estimated.
 
 The monitor (`apps/bot/src/trading/trade-monitor.ts`) now writes a
 `trade_status_history` row inside the same transaction as every status flip

@@ -6,6 +6,7 @@ import {
   spreadSnapshots,
   trades,
   tradePreviews,
+  unhedgedLegSamples,
 } from "@btc-arbitrage/db";
 import { and, desc, isNotNull, lte, notInArray } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
@@ -89,6 +90,20 @@ export async function runDataRetention(
     priceSnapshots,
     priceSnapshots.id,
     priceSnapshots.receivedAt,
+    cutoff,
+    batchSize,
+    [],
+  );
+
+  // Unhedged-window samples are a pure time-series child table (FKs point
+  // OUT to trades/trade_legs; nothing references them), so the plain
+  // unguarded watermark delete applies, same as price_snapshots.
+  await pruneTable(
+    db,
+    "unhedged_leg_samples",
+    unhedgedLegSamples,
+    unhedgedLegSamples.id,
+    unhedgedLegSamples.sampledAt,
     cutoff,
     batchSize,
     [],

@@ -286,6 +286,28 @@ The bot monitors open/unhedged legs and sends urgent Telegram alerts when one le
 
 Close reasons are best-effort and depend on each exchange adapter.
 
+### Unhedged-window PnL sampling
+
+Implemented in:
+
+- `apps/bot/src/trading/unhedged-sampler.ts`
+
+While a trade is in status `unhedged`, the monitor pass samples the surviving
+leg (leg status `open`/`unhedged`) into the `unhedged_leg_samples` table. The
+interval is configured by `UNHEDGED_SAMPLE_INTERVAL_MS` (default 5000; `0`
+disables sampling entirely) and throttled from the latest `sampled_at` per
+trade, so sampling survives restarts without extra state.
+
+Each row stores the surviving leg's mark price (`getPriceSnapshot` on the
+leg's own exchange with the configured `MARKET_TYPE`/`PRICE_SOURCE`), the
+denormalized entry price and quantity, and the GROSS unrealized PnL
+`(mark − entry) × qty × (long ? 1 : −1)` — NULL when entry/quantity is
+unknown, never estimated. A failing adapter logs a warn and the pass
+continues with the next leg; sampling never breaks the monitor pass.
+
+Rows are pruned by the daily data-retention job on `sampled_at`, same as the
+snapshot tables.
+
 ## Logging and observability
 
 The bot does not write JSONL log files. Observability is provided by:

@@ -53,7 +53,7 @@ live order path.
 | Phase | Status | Notes |
 | --- | --- | --- |
 | 1. Unhedged observability APIs + monitor history instrumentation | Implemented (046ac50) | `GET /api/trades/unhedged/active`, `/api/trades/unhedged/events`, `/api/trades/:id/timeline`; monitor writes `trade_status_history`. Needs backend+bot rebuild/restart to take effect. Pre-deploy unhedged trades are `approximateStart: true`. |
-| 2. Unrealized-PnL sampling during unhedged windows | Not started | Bot tick must sample mark-to-market of the surviving leg while `unhedged` (new table or reuse `trade_status_history.metadata`); without it we measure only final outcomes, not intra-window drawdown. |
+| 2. Unrealized-PnL sampling during unhedged windows | Implemented (pending deploy) | Bot's monitor pass samples the surviving leg's mark price + GROSS unrealized PnL into `unhedged_leg_samples` every `UNHEDGED_SAMPLE_INTERVAL_MS` (default 5 s, 0 disables), throttled by last `sampledAt` per trade; pruned by daily retention. Backend exposes `GET /api/trades/:id/unhedged-samples` (ascending, limit ≤ 5000). Needs `yarn db:migrate` (0005) + bot/backend rebuild on the server. |
 | 3. Decision-event logging | Not started | Structured event per guardrail decision (`spread_dropped`, anti-chase abort, `edge_below_cost`) with the numbers that motivated it. The `events` table exists but has no writers — candidate sink. |
 | 4. Offline analysis agent (export → metrics → report) | Not started | Consumes phase 1-3 data; weekly or on-demand; writes `odd/` proposals. |
 | 5. Backtest/replay harness for exit policies | Not started | Replay candidate policies against historical unhedged events + spread paths before proposing. Guards against overfitting a handful of trades. |

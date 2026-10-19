@@ -18,6 +18,7 @@ import {
   normalizeTradeTimeline,
   normalizeUnhedgedActive,
   normalizeUnhedgedEvents,
+  normalizeUnhedgedLegSamples,
 } from "./trades/trade-analysis-normalizers.js";
 
 export function createBackendApp(
@@ -91,6 +92,32 @@ export function createBackendApp(
         sinceDays,
       });
       response.json(normalizeUnhedgedEvents(generatedAt, events));
+    }),
+  );
+
+  app.get(
+    "/api/trades/:id/unhedged-samples",
+    asyncHandler(async (request, response) => {
+      const tradeId = Number(request.params.id);
+      if (!Number.isInteger(tradeId)) {
+        response.status(404).json({ error: "Trade not found" });
+        return;
+      }
+      const limit = parseBoundedQueryInt(request.query.limit, 1, 5000, 1000);
+      const result = await tradeAnalysis.getUnhedgedLegSamples(tradeId, {
+        limit,
+      });
+      if (!result) {
+        response.status(404).json({ error: "Trade not found" });
+        return;
+      }
+      response.json(
+        normalizeUnhedgedLegSamples(
+          result.generatedAt,
+          result.tradeId,
+          result.samples,
+        ),
+      );
     }),
   );
 

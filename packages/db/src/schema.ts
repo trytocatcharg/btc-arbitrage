@@ -288,6 +288,45 @@ export const tradeStatusHistory = mysqlTable(
   }),
 );
 
+// Unhedged-window mark-to-market samples (phase 2, unhedged-pnl-sampling):
+// while a trade is `unhedged`, the monitor pass samples the surviving leg's
+// mark price and GROSS unrealized PnL on UNHEDGED_SAMPLE_INTERVAL_MS.
+// unrealized_pnl_usd stays NULL when the leg's entry/qty is unknown — never
+// estimated. entry_price_usd / quantity_base are denormalized so rows stay
+// immutable if the leg row later changes.
+export const unhedgedLegSamples = mysqlTable(
+  "unhedged_leg_samples",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    tradeId: int("trade_id")
+      .notNull()
+      .references(() => trades.id),
+    legId: int("leg_id")
+      .notNull()
+      .references(() => tradeLegs.id),
+    exchangeId: varchar("exchange_id", { length: 32 }).notNull(),
+    side: mysqlEnum("side", tradeLegSides).notNull(),
+    markPriceUsd: decimal("mark_price_usd", {
+      precision: 24,
+      scale: 8,
+    }).notNull(),
+    entryPriceUsd: decimal("entry_price_usd", { precision: 24, scale: 8 }),
+    quantityBase: decimal("quantity_base", { precision: 24, scale: 10 }),
+    unrealizedPnlUsd: decimal("unrealized_pnl_usd", {
+      precision: 24,
+      scale: 8,
+    }),
+    sampledAt: timestamp("sampled_at").notNull(),
+  },
+  (table) => ({
+    tradeSampledAtIdx: index("unhedged_leg_samples_trade_sampled_idx").on(
+      table.tradeId,
+      table.sampledAt,
+    ),
+    legIdx: index("unhedged_leg_samples_leg_idx").on(table.legId),
+  }),
+);
+
 export const telegramCommandLogs = mysqlTable(
   "telegram_command_logs",
   {

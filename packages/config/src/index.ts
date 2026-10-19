@@ -26,6 +26,9 @@ export interface BotConfig {
   marketType: MarketType;
   priceSource: PriceSource;
   pricePollIntervalMs: number;
+  /** UNHEDGED_SAMPLE_INTERVAL_MS: interval between unhedged-window mark-PnL
+   * samples of the surviving leg (0 disables sampling). */
+  unhedgedSampleIntervalMs: number;
   minPriceDiffUsd: string;
   leverage: number;
   botExecutionMode: ExecutionMode;
@@ -316,6 +319,10 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     pricePollIntervalMs: parsePositiveInteger(
       env.PRICE_POLL_INTERVAL_MS ?? "1000",
       "PRICE_POLL_INTERVAL_MS",
+    ),
+    unhedgedSampleIntervalMs: parseNonNegativeInteger(
+      env.UNHEDGED_SAMPLE_INTERVAL_MS ?? "5000",
+      "UNHEDGED_SAMPLE_INTERVAL_MS",
     ),
     minPriceDiffUsd,
     leverage,

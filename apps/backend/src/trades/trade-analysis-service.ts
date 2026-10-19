@@ -4,6 +4,7 @@ import {
   tradeLegs,
   trades,
   tradeStatusHistory,
+  unhedgedLegSamples,
 } from "@btc-arbitrage/db";
 import { and, asc, desc, eq, gte, inArray } from "drizzle-orm";
 
@@ -13,6 +14,8 @@ type TradeRow = typeof trades.$inferSelect;
 type TradeLegRow = typeof tradeLegs.$inferSelect;
 type TradeStatusHistoryRow = typeof tradeStatusHistory.$inferSelect;
 type SignalRow = typeof signals.$inferSelect;
+
+export type UnhedgedLegSampleRow = typeof unhedgedLegSamples.$inferSelect;
 
 export type UnhedgedResolution = "open" | "closed" | "failed";
 
@@ -65,6 +68,14 @@ export interface TradeAnalysisService {
     events: RawUnhedgedEvent[];
   }>;
   getTradeTimeline(tradeId: number): Promise<RawTradeTimeline | null>;
+  getUnhedgedLegSamples(
+    tradeId: number,
+    query: { limit: number },
+  ): Promise<{
+    generatedAt: Date;
+    tradeId: number;
+    samples: UnhedgedLegSampleRow[];
+  } | null>;
 }
 
 /**
@@ -329,6 +340,26 @@ export function createTradeAnalysisService(): TradeAnalysisService {
               .limit(1))[0] ?? null);
 
       return { trade, legs, statusHistory, signal };
+    },
+
+    async getUnhedgedLegSamples(tradeId, { limit }) {
+      const db = await getDb();
+      const generatedAt = new Date();
+      const tradeRows = await db
+        .select({ id: trades.id })
+        .from(trades)
+        .where(eq(trades.id, tradeId))
+        .limit(1);
+      if (!tradeRows[0]) return null;
+
+      const sampleRows = await db
+        .select()
+        .from(unhedgedLegSamples)
+        .where(eq(unhedgedLegSamples.tradeId, tradeId))
+        .orderBy(asc(unhedgedLegSamples.sampledAt), asc(unhedgedLegSamples.id))
+        .limit(limit);
+
+      return { generatedAt, tradeId, samples: sampleRows };
     },
   };
 }

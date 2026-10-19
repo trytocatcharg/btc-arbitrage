@@ -7,6 +7,7 @@ import type { getDb } from "@btc-arbitrage/db";
 import { signals, activeTradeStatuses, trades } from "@btc-arbitrage/db";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { monitorTrades } from "../trading/trade-monitor.js";
+import { sampleUnhedgedLegs } from "../trading/unhedged-sampler.js";
 import { recoverStaleClosingTrades } from "../trading/close-recovery-monitor.js";
 import { runDataRetention } from "../retention/data-retention.js";
 import { startRetentionScheduler } from "../retention/retention-scheduler.js";
@@ -109,6 +110,20 @@ export async function runPollingLoop(input: {
       } catch (error) {
         console.error(
           "Trade monitoring failed",
+          error instanceof Error
+            ? { pass, message: error.message }
+            : { pass, error },
+        );
+      }
+      try {
+        await sampleUnhedgedLegs({
+          db: input.db,
+          registry: input.registry,
+          config: input.config,
+        });
+      } catch (error) {
+        console.error(
+          "Unhedged sampling failed",
           error instanceof Error
             ? { pass, message: error.message }
             : { pass, error },
