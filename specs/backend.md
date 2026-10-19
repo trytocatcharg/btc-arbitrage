@@ -82,10 +82,16 @@ windows and per-trade timelines (`unhedged-observability` spec):
   (`toStatusChangedAtIdx`), ends at the earliest later `closed`/`failed`
   history row for the same trade, and resolves accordingly (`open` when no
   end row exists). Trades that went unhedged before the monitor wrote
-  history rows are merged in with `windowStartAt` from the closed leg's
-  `closed_at` (or null) and flagged `approximateStart: true`. Invalid
-  `limit` (1..200, default 50) or `sinceDays` (1..365, default 90) query
-  params fall back to the defaults instead of erroring.
+  history rows are merged in, flagged `approximateStart: true`: trades
+  still `unhedged` take the closed leg's `closed_at` (or null); resolved
+  (`closed`/`failed`) trades are reconstructed when their two legs closed
+  at least 5 minutes apart (a normal hedged close is near-simultaneous, so
+  the closed-leg gap approximates the naked-exposure window; window start
+  is the first leg's `closed_at`, end the last leg's). Reconstruction only
+  applies to trades with no `unhedged` history row at any time, so
+  instrumented windows are never duplicated. Invalid `limit` (1..200,
+  default 50) or `sinceDays` (1..365, default 90) query params fall back to
+  the defaults instead of erroring.
 - **Per-trade timeline** — the trade row, both full leg rows, the status
   history ascending by `changed_at`, and the originating signals row (or
   null). A missing or non-integer id returns `404 { error: "Trade not found" }`.

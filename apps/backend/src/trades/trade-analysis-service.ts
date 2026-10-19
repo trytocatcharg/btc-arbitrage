@@ -49,6 +49,12 @@ export interface UnhedgedEventsQuery {
   sinceDays: number;
 }
 
+/** Leg-closedAt gap that separates a real unhedged window from a normal
+ * near-simultaneous hedged close (both TP/SL triggers fire together when
+ * the move completes). Used only to reconstruct pre-instrumentation
+ * windows from resolved trades that have no history rows. */
+const MIN_RECONSTRUCTED_GAP_MINUTES = 5;
+
 export interface TradeAnalysisService {
   getActiveUnhedgedTrades(): Promise<{
     generatedAt: Date;
@@ -170,9 +176,60 @@ export function createTradeAnalysisService(): TradeAnalysisService {
         .select()
         .from(trades)
         .where(eq(trades.status, "unhedged"));
-      const fallbackTradeIds = openTradeRows
-        .filter((trade) => !startByTrade.has(trade.id))
-        .map((trade) => trade.id);
+
+      // Trades with ANY 'unhedged' history row, at any time: the primary
+      // source above only sees rows inside the cutoff, so this set is what
+      // guarantees the reconstruction below never duplicates an
+      // instrumented window.
+      const instrumentedRows = await db
+        .select({ tradeId: tradeStatusHistory.tradeId })
+        .from(tradeStatusHistory)
+        .where(eq(tradeStatusHistory.toStatus, "unhedged"));
+      const instrumentedTradeIds = new Set(
+        instrumentedRows.map((row) => row.tradeId),
+      );
+
+      // Reconstruct resolved pre-instrumentation windows: trades that
+      // closed/failed with no history row, whose two legs closed far enough
+      // apart that the survivor was naked in between. A normal hedged
+      // close is near-simultaneous, so the closed-leg gap approximates the
+      // window; start and end are flagged approximate by the normalizer.
+      const resolvedTradeRows = await db
+        .select()
+        .from(trades)
+        .where(inArray(trades.status, ["closed", "failed"]));
+      const reconstructedTradeRows = resolvedTradeRows.filter(
+        (trade) =>
+          !instrumentedTradeIds.has(trade.id) &&
+          !startByTrade.has(trade.id),
+      );
+      const reconstructedIds = reconstructedTradeRows.map(
+        (trade) => trade.id,
+      );
+      const reconstructedLegRows = reconstructedIds.length
+        ? await db
+            .select()
+            .from(tradeLegs)
+            .where(inArray(tradeLegs.tradeId, reconstructedIds))
+        : [];
+      const reconstructedWindows = reconstructedTradeRows.flatMap((trade) => {
+        const legs = reconstructedLegRows.filter(
+          (leg) => leg.tradeId === trade.id,
+        );
+        const first = firstClosedLeg(legs);
+        const last = lastClosedLeg(legs);
+        if (!first?.closedAt || !last?.closedAt) return [];
+        const gapMs = last.closedAt.getTime() - first.closedAt.getTime();
+        if (gapMs < MIN_RECONSTRUCTED_GAP_MINUTES * 60_000) return [];
+        if (first.closedAt < cutoff) return [];
+        return [{ trade, legs, first, last }];
+      });
+
+      const fallbackTradeIds = openTradeRows.flatMap((trade) =>
+        !startByTrade.has(trade.id) && !instrumentedTradeIds.has(trade.id)
+          ? [trade.id]
+          : [],
+      );
 
       const allTradeIds = [...historyTradeIds, ...fallbackTradeIds];
       const closedTradeRows = historyTradeIds.length
@@ -221,6 +278,17 @@ export function createTradeAnalysisService(): TradeAnalysisService {
           approximateStart: true,
           resolution: "open",
           closeReason: firstClosed?.closeReason ?? null,
+        });
+      }
+      for (const window of reconstructedWindows) {
+        events.push({
+          trade: window.trade,
+          legs: window.legs,
+          windowStartAt: window.first.closedAt,
+          windowEndAt: window.last.closedAt,
+          approximateStart: true,
+          resolution: window.trade.status as UnhedgedResolution,
+          closeReason: window.first.closeReason,
         });
       }
 
@@ -282,4 +350,14 @@ function firstClosedLeg(legs: TradeLegRow[]): TradeLegRow | null {
       first = leg;
   }
   return first;
+}
+
+/** Leg with the latest closedAt; null when no leg has closed yet. */
+function lastClosedLeg(legs: TradeLegRow[]): TradeLegRow | null {
+  let last: TradeLegRow | null = null;
+  for (const leg of legs) {
+    if (leg.closedAt == null) continue;
+    if (!last || leg.closedAt > (last.closedAt ?? leg.closedAt)) last = leg;
+  }
+  return last;
 }
