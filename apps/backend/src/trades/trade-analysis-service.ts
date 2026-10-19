@@ -341,23 +341,36 @@ function latestChangedAt(rows: TradeStatusHistoryRow[]): Date | null {
   return latest;
 }
 
-/** Leg with the earliest closedAt; null when no leg has closed yet. */
+/** Leg with the earliest valid closedAt; null when no leg has properly
+ * closed. Zero-dates ('0000-00-00', pre-monitor era) parse into invalid
+ * Date objects, not null — they must not count as closures. */
 function firstClosedLeg(legs: TradeLegRow[]): TradeLegRow | null {
   let first: TradeLegRow | null = null;
   for (const leg of legs) {
-    if (leg.closedAt == null) continue;
-    if (!first || leg.closedAt < (first.closedAt ?? leg.closedAt))
-      first = leg;
+    const closedAt = validClosedAt(leg);
+    if (closedAt == null) continue;
+    if (!first || closedAt < validClosedAt(first)!) first = leg;
   }
   return first;
 }
 
-/** Leg with the latest closedAt; null when no leg has closed yet. */
+/** Leg with the latest valid closedAt; null when no leg has properly
+ * closed. Same zero-date guard as firstClosedLeg. */
 function lastClosedLeg(legs: TradeLegRow[]): TradeLegRow | null {
   let last: TradeLegRow | null = null;
   for (const leg of legs) {
-    if (leg.closedAt == null) continue;
-    if (!last || leg.closedAt > (last.closedAt ?? leg.closedAt)) last = leg;
+    const closedAt = validClosedAt(leg);
+    if (closedAt == null) continue;
+    if (!last || closedAt > validClosedAt(last)!) last = leg;
   }
   return last;
+}
+
+/** The leg's closedAt only when it is a real timestamp — zero-dates from
+ * the pre-monitor era parse into invalid Date objects that must be treated
+ * as "not closed" by the window reconstruction. */
+function validClosedAt(leg: TradeLegRow): Date | null {
+  if (leg.closedAt == null || Number.isNaN(leg.closedAt.getTime()))
+    return null;
+  return leg.closedAt;
 }
