@@ -1,10 +1,16 @@
 import { calculateSpread } from "@btc-arbitrage/domain";
 import type { BotConfig } from "@btc-arbitrage/config";
+import type { SpreadSnapshot } from "@btc-arbitrage/domain";
 import type { ExchangeAdapter } from "@btc-arbitrage/exchange-core";
 import { SignalEngine } from "../signals/signal-engine.js";
 import type { Notifier } from "../notifications/notifier.js";
 import type { getDb } from "@btc-arbitrage/db";
-import { signals, activeTradeStatuses, trades } from "@btc-arbitrage/db";
+import {
+  signals,
+  activeTradeStatuses,
+  spreadSnapshots,
+  trades,
+} from "@btc-arbitrage/db";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { monitorTrades } from "../trading/trade-monitor.js";
 import { sampleUnhedgedLegs } from "../trading/unhedged-sampler.js";
@@ -345,9 +351,14 @@ export async function runPollingLoop(input: {
       exchangeB: priceB,
       thresholdUsd: input.config.minPriceDiffUsd,
     });
+    // Every tick is persisted so /lastsignal can show recent spreads
+    // regardless of the threshold. Failure-isolated on purpose: a logging
+    // failure must never block signal emission for the tick.
+    const spreadId = await persistSpreadSnapshot(input.db, spread);
     const signal = signalEngine.evaluate(spread);
     console.log("Spread snapshot", {
       tick,
+      spreadId,
       symbol: spread.symbol,
       exchangeA: spread.exchangeA,
       exchangeB: spread.exchangeB,
@@ -374,7 +385,7 @@ export async function runPollingLoop(input: {
         );
       } else {
         const signalRow = {
-          spreadId: signal.spreadId ? Number(signal.spreadId) : null,
+          spreadId: spreadId ?? null,
           longExchange: signal.longExchange,
           shortExchange: signal.shortExchange,
           source: signal.priceSource,
@@ -474,6 +485,41 @@ async function resolveInsertedSignalId(
     .orderBy(desc(signals.id));
 
   return Number(inserted[0]?.id ?? 0);
+}
+
+/** Persists one spread tick into spread_snapshots so /lastsignal can show
+ * recent spreads regardless of the threshold. Failure-isolated on
+ * purpose: returns null on error so a logging failure never blocks
+ * signal emission for the tick. */
+async function persistSpreadSnapshot(
+  db: Awaited<ReturnType<typeof getDb>>,
+  spread: SpreadSnapshot,
+): Promise<number | null> {
+  try {
+    const result = await db.insert(spreadSnapshots).values({
+      symbol: spread.symbol,
+      marketType: spread.marketType,
+      priceSource: spread.priceSource,
+      exchangeA: spread.exchangeA,
+      exchangeB: spread.exchangeB,
+      exchangeAPriceUsd: spread.exchangeAPriceUsd,
+      exchangeBPriceUsd: spread.exchangeBPriceUsd,
+      absoluteDiffUsd: spread.absoluteDiffUsd,
+      diffBps: spread.diffBps,
+      direction: spread.direction,
+      thresholdUsd: spread.thresholdUsd,
+      thresholdMatched: spread.thresholdMatched,
+      calculatedAt: spread.calculatedAt,
+    });
+    const insertId = extractInsertId(result);
+    return insertId !== undefined && insertId > 0 ? insertId : null;
+  } catch (error) {
+    console.error(
+      "Failed to persist spread snapshot",
+      error instanceof Error ? { message: error.message } : { error },
+    );
+    return null;
+  }
 }
 
 let shuttingDown = false;

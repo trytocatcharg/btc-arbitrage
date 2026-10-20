@@ -1,47 +1,63 @@
 import type { getDb } from "@btc-arbitrage/db";
-import { signals } from "@btc-arbitrage/db";
-import { desc } from "drizzle-orm";
+import { signals, spreadSnapshots } from "@btc-arbitrage/db";
+import { desc, eq } from "drizzle-orm";
 
 const LAST_SIGNALS_LIMIT = 10;
 
-type SignalRow = typeof signals.$inferSelect;
+type SpreadRow = typeof spreadSnapshots.$inferSelect;
 
-/** Renders the /lastsignal Telegram message: the most recent signals with
- * the timestamp in the operator's local timezone plus a relative age
- * ("hace 2 minutos"). Telegram never sends the sender's device timezone,
- * so the timezone comes from TELEGRAM_OPERATOR_TIMEZONE. */
+/** Renders the /lastsignal Telegram message: the most recent spread ticks,
+ * regardless of whether they crossed the threshold, with the timestamp in
+ * the operator's local timezone plus a relative age ("hace 2 minutos").
+ * Ticks that generated a signal link to it. Telegram never sends the
+ * sender's device timezone, so the timezone comes from
+ * TELEGRAM_OPERATOR_TIMEZONE. */
 export async function buildLastSignalsMessage(
   db: Awaited<ReturnType<typeof getDb>>,
   timeZone: string,
   now: Date = new Date(),
 ): Promise<string> {
   const rows = await db
-    .select()
-    .from(signals)
-    .orderBy(desc(signals.createdAt))
+    .select({ spread: spreadSnapshots, signalId: signals.id })
+    .from(spreadSnapshots)
+    .leftJoin(signals, eq(signals.spreadId, spreadSnapshots.id))
+    .orderBy(desc(spreadSnapshots.calculatedAt))
     .limit(LAST_SIGNALS_LIMIT);
 
   if (rows.length === 0) {
-    return "📡 Last signals\n\nNo signals recorded.";
+    return "📡 Last signals\n\nNo ticks recorded yet.";
   }
 
   return [
-    `📡 Last ${rows.length} signals (${timeZone})`,
+    `📡 Last ${rows.length} ticks (${timeZone})`,
     "",
-    ...rows.flatMap((row) => formatSignalLines(row, timeZone, now)),
+    ...rows.flatMap((row) =>
+      formatTickLines(row.spread, row.signalId, timeZone, now),
+    ),
   ].join("\n");
 }
 
-function formatSignalLines(
-  row: SignalRow,
+function formatTickLines(
+  row: SpreadRow,
+  signalId: number | null,
   timeZone: string,
   now: Date,
 ): string[] {
-  const createdAt = new Date(row.createdAt);
-  const spread = Number(row.observedDiffUsd);
+  const calculatedAt = new Date(row.calculatedAt);
+  const spread = Number(row.absoluteDiffUsd);
+  const longExchange =
+    row.direction === "a_above_b" ? row.exchangeB : row.exchangeA;
+  const shortExchange =
+    row.direction === "a_above_b" ? row.exchangeA : row.exchangeB;
+  const direction =
+    row.direction === "flat"
+      ? "flat"
+      : `long ${longExchange} / short ${shortExchange}`;
+  const marker = row.thresholdMatched ? "✅ threshold" : "below threshold";
+  const signalRef = signalId != null ? ` → signal #${signalId}` : "";
   return [
-    `#${row.id} · long ${row.longExchange} / short ${row.shortExchange}`,
-    `   $${Number.isFinite(spread) ? spread.toFixed(2) : row.observedDiffUsd} · ${formatLocalTimestamp(createdAt, timeZone, now)} (${formatRelativeAge(createdAt, now)})`,
+    `#${row.id} · ${direction}${signalRef}`,
+    `   $${Number.isFinite(spread) ? spread.toFixed(2) : row.absoluteDiffUsd} · ${marker} · ${formatLocalTimestamp(calculatedAt, timeZone, now)} (${formatRelativeAge(calculatedAt, now)})`,
   ];
 }
 

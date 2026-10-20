@@ -13,10 +13,11 @@ Current capabilities:
 - Signals are suppressed while any trade is in an active status.
 - Sends Telegram alerts with a global cooldown (default one alert per hour, `TELEGRAM_ALERT_COOLDOWN_MS`).
 - Telegram commands `/config`, `/trade`, `/volume`, `/lastsignal` and `/bot` (pause/resume/restart control panel, guarded by no active trades and no in-flight execution), plus an `Open Trade` inline button on each signal with `Confirm`/`Cancel` preview flow.
+- `/lastsignal` shows the last 10 spread ticks from `spread_snapshots` regardless of threshold, marking which crossed it and which generated a signal.
 - Runtime settings adjusted at runtime via Telegram (`/config` buttons: cooldown, min spread, margin, auto-confirm) are persisted to `bot_runtime_overrides` (migration 0004) on apply and restored at boot.
 - Open trade execution (bot-only, Telegram-confirmed): passive maker-limit entry with retry, immediate market hedge per fill increment, then automatic TP/SL reduce-only orders on both legs.
 - Trade monitoring detects leg closure via position polling and notifies `closed` or `unhedged` states, and samples the surviving leg's mark price + gross unrealized PnL during unhedged windows into `unhedged_leg_samples`.
-- Persists price snapshots, spread snapshots, signals, trades, trade legs, trade previews, status history, Telegram command logs, operations, and events in MariaDB.
+- Persists one `spread_snapshots` row per tick (every tick, threshold or not; failure-isolated so it never blocks signal emission) plus signals, trades, trade legs, trade previews, status history, Telegram command logs, operations, and events in MariaDB. `price_snapshots` exists in the schema but is written nowhere (retention prunes both tables daily).
 
 Guardrails (non-goals, unless explicitly opted in):
 
