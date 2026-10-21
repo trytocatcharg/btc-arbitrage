@@ -27,6 +27,6 @@
 
 ## Evidence
 
-- Commit: _pending_
+- Commit: `05c9dae` on `feature/position-reconciler` (6 files, +339)
 - Typecheck: clean (exit 0)
 - Deviations landed: (1) `getPosition` real signature is `{symbol, side}` — detection is per (exchange, side); (2) registry has no list method — walks `exchangeA`/`exchangeB`; (3) leg sum joins legs to trades in `activeTradeStatuses`, excluding terminal leg states; (4) `.env.example` addition BLOCKED by host Gentle AI safety policy (parent included) — pending operator decision; AGENTS.md row documents the var meanwhile.

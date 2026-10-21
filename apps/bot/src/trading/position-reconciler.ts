@@ -1,4 +1,4 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, notInArray } from "drizzle-orm";
 import {
   activeTradeStatuses,
   tradeLegs,
@@ -55,6 +55,10 @@ let untrackedPosition: {
   exchangeId: string;
   quantityBase: string;
   detectedAt: string;
+  /** Whether the urgent arm alert was delivered. A failed delivery leaves
+   * this false so the next pass retries the alert — the block must never
+   * run silently (verifier finding, 2026-10-21). */
+  alerted: boolean;
 } | null = null;
 
 /** Wall-clock (ms) of the last completed run. Module-level: the cadence
@@ -95,6 +99,32 @@ export async function runPositionReconciliation(input: {
   }
 }
 
+/** Urgent arm alert with delivery tracking: a throwing notify logs a warn
+ * and leaves `state.alerted` false so a later pass retries — the block
+ * must never run silently. Never throws. */
+async function alertUntracked(
+  input: {
+    notify: (text: string) => Promise<void>;
+  },
+  finding: { exchangeId: string; quantityBase: string },
+  state: { alerted: boolean },
+): Promise<void> {
+  try {
+    await input.notify(
+      `🚨 UNTRACKED POSITION on ${finding.exchangeId}: ` +
+        `${finding.quantityBase} BTC with no matching active trade legs in the DB. ` +
+        `New trades are BLOCKED until the position is closed or accounted for ` +
+        `(position reconciler).`,
+    );
+    state.alerted = true;
+  } catch (error) {
+    console.warn(
+      "Position reconciliation untracked-position alert failed; will retry next pass",
+      error instanceof Error ? { message: error.message } : { error },
+    );
+  }
+}
+
 async function reconcileOnce(input: {
   db: Awaited<ReturnType<typeof getDb>>;
   registry: { get(id: string): ExchangeAdapter };
@@ -121,11 +151,13 @@ async function reconcileOnce(input: {
       .where(
         and(
           inArray(trades.status, [...activeTradeStatuses]),
-          inArray(tradeLegs.status, [
-            "planned",
-            "submitted",
-            "open",
-            "unhedged",
+          // Terminal leg states never hold a position; exclude them so a
+          // future non-terminal status stays tracked automatically
+          // (whitelist would silently drop it — verifier finding).
+          notInArray(tradeLegs.status, [
+            "closed",
+            "cancelled",
+            "failed",
           ]),
         ),
       );
@@ -225,18 +257,20 @@ async function reconcileOnce(input: {
       untrackedPosition.exchangeId !== finding.exchangeId
     ) {
       // New episode (none → detected, or a different venue became
-      // untracked): (re)alert and (re)arm the entry guard.
+      // untracked): arm the entry guard FIRST (fail closed), then attempt
+      // the alert. A throwing notify must not lose the episode: alerted
+      // stays false and a later pass retries the delivery.
       untrackedPosition = {
         exchangeId: finding.exchangeId,
         quantityBase: finding.quantityBase,
         detectedAt: new Date().toISOString(),
+        alerted: false,
       };
-      await input.notify(
-        `🚨 UNTRACKED POSITION on ${finding.exchangeId}: ` +
-          `${finding.quantityBase} BTC with no matching active trade legs in the DB. ` +
-          `New trades are BLOCKED until the position is closed or accounted for ` +
-          `(position reconciler).`,
-      );
+      await alertUntracked(input, finding, untrackedPosition);
+    } else if (!untrackedPosition.alerted) {
+      // Arm alert still undelivered (earlier notify failed): retry once
+      // per pass until Telegram accepts it — the block never runs silent.
+      await alertUntracked(input, finding, untrackedPosition);
     } else if (
       Math.abs(
         parseDecimal(finding.quantityBase, "quantityBase") -
@@ -257,10 +291,19 @@ async function reconcileOnce(input: {
     // exchange: clear the block and notify the resolution.
     const resolved = untrackedPosition;
     untrackedPosition = null;
-    await input.notify(
-      `✅ Untracked position on ${resolved.exchangeId} resolved — ` +
-        `no exchange position beyond tracked legs remains. ` +
-        `New trade entries are unblocked.`,
-    );
+    try {
+      await input.notify(
+        `✅ Untracked position on ${resolved.exchangeId} resolved — ` +
+          `no exchange position beyond tracked legs remains. ` +
+          `New trade entries are unblocked.`,
+      );
+    } catch (error) {
+      // The block is already cleared (the safety-critical part); only the
+      // resolution notice is lost. Log for the operator.
+      console.warn(
+        "Position reconciliation resolution alert failed",
+        error instanceof Error ? { message: error.message } : { error },
+      );
+    }
   }
 }
