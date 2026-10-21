@@ -15,6 +15,7 @@ import { and, desc, eq, inArray } from "drizzle-orm";
 import { monitorTrades } from "../trading/trade-monitor.js";
 import { sampleUnhedgedLegs } from "../trading/unhedged-sampler.js";
 import { recoverStaleClosingTrades } from "../trading/close-recovery-monitor.js";
+import { runPositionReconciliation } from "../trading/position-reconciler.js";
 import { runDataRetention } from "../retention/data-retention.js";
 import { startRetentionScheduler } from "../retention/retention-scheduler.js";
 import { shouldSuppressSignalForActiveTrades } from "../trading/trade-guards.js";
@@ -144,6 +145,23 @@ export async function runPollingLoop(input: {
       } catch (error) {
         console.error(
           "Stale-close recovery failed",
+          error instanceof Error
+            ? { pass, message: error.message }
+            : { pass, error },
+        );
+      }
+      try {
+        // The reconciler owns its own cadence (POSITION_RECONCILE_INTERVAL_MS,
+        // checked internally) — the pass invokes it unconditionally.
+        await runPositionReconciliation({
+          db: input.db,
+          registry: input.registry,
+          config: input.config,
+          notify: (text) => input.notifier.notifyUrgent(text),
+        });
+      } catch (error) {
+        console.error(
+          "Position reconciliation failed",
           error instanceof Error
             ? { pass, message: error.message }
             : { pass, error },

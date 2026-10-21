@@ -138,6 +138,7 @@ Copy `.env.example` to `.env` and fill in real values. Never commit `.env` or re
 | `PRICE_SOURCE` | `mark` | `mark` / `index` / `last` |
 | `PRICE_POLL_INTERVAL_MS` | `1000` | Main loop sleep between ticks |
 | `UNHEDGED_SAMPLE_INTERVAL_MS` | `5000` | Sampling interval for the unhedged-window mark-PnL series (`unhedged_leg_samples`); `0` disables sampling |
+| `POSITION_RECONCILE_INTERVAL_MS` | `60000` | Position reconciler cadence: compares exchange-reported positions against active DB legs; an untracked position alerts once per episode and blocks new trade entries until resolved; `0` disables |
 | `MIN_PRICE_DIFF_USD` | `40` | Spread threshold |
 | `LEVERAGE` | `3` | Leverage in signals and trades |
 | `BOT_RUN_ONCE` | `false` | Run a single tick and exit |

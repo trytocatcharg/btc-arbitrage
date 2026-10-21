@@ -12,6 +12,7 @@ import type {
   ExecutionAdapter,
 } from "@btc-arbitrage/exchange-core";
 import { closeTradeBothLegs } from "./trade-close.js";
+import { getUntrackedPosition } from "./position-reconciler.js";
 
 export type OpenTradeState =
   | "awaiting_confirmation"
@@ -508,6 +509,18 @@ export class OpenTradeService {
       });
       throw new Error(
         "Another trade is active or awaiting confirmation; refusing to open a duplicate",
+      );
+    }
+    // Position reconciler guard (position-reconciler): an untracked
+    // exchange position fails new entries closed until resolved. Mirrors the
+    // blocked_by_active_trade pattern: cancel the preview, then throw.
+    const untracked = getUntrackedPosition();
+    if (untracked) {
+      await this.store.transition(token, "cancelled", {
+        error: "blocked_by_untracked_position",
+      });
+      throw new Error(
+        `Untracked position on ${untracked.exchangeId} (${untracked.quantityBase} BTC) — new trades are blocked until it is resolved`,
       );
     }
     await this.store.startExecution(preview, this.options.leverage);
