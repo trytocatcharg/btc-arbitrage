@@ -4,6 +4,7 @@ import type { SpreadSnapshot } from "@btc-arbitrage/domain";
 import type { ExchangeAdapter } from "@btc-arbitrage/exchange-core";
 import { SignalEngine } from "../signals/signal-engine.js";
 import type { Notifier } from "../notifications/notifier.js";
+import type { TelegramInlineKeyboard } from "../notifications/telegram-notifier.js";
 import type { getDb } from "@btc-arbitrage/db";
 import {
   signals,
@@ -35,7 +36,16 @@ export interface CommandPoller {
 export async function runPollingLoop(input: {
   config: BotConfig;
   registry: ExchangeRegistry;
-  notifier: Notifier;
+  // Intersection with the keyboard-capable urgent signature: the position
+  // reconciler's arm alert carries the Close-position inline button, so
+  // the notify lambda forwards an optional TelegramInlineKeyboard. The
+  // base Notifier contract stays one-arg for every other caller.
+  notifier: Notifier & {
+    notifyUrgent(
+      text: string,
+      keyboard?: TelegramInlineKeyboard,
+    ): Promise<void>;
+  };
   db: Awaited<ReturnType<typeof getDb>>;
   commandPoller?: CommandPoller;
   executionQueue: ExecutionQueue;
@@ -157,7 +167,8 @@ export async function runPollingLoop(input: {
           db: input.db,
           registry: input.registry,
           config: input.config,
-          notify: (text) => input.notifier.notifyUrgent(text),
+          notify: (text, keyboard) =>
+            input.notifier.notifyUrgent(text, keyboard),
         });
       } catch (error) {
         console.error(

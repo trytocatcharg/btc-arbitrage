@@ -25,6 +25,13 @@
 - Interval check lives inside the reconciler run (pass passes `now`), same pattern as `sampleUnhedgedLegs`.
 - Unit tests stay paused (operator instruction 2026-08-16); verification is `yarn typecheck`.
 
+## Work unit 2 — Close button on the untracked alert + /trade untracked check (operator request, 2026-10-21)
+
+1. [x] Block state gains `side`; the arm alert carries an inline `Close position` button (two-step Confirm/Cancel, mirroring existing callback patterns).
+2. [x] `untracked:` callback family in the command poller: confirm re-reads the live position, submits a reduce-only market close on the serial execution queue.
+3. [x] Read-only `scanUntrackedPositions` export; `/trade` Active trade view lists unregistered open positions; the /trade panel no longer claims "no active trades" while a naked position exists.
+4. [x] Typecheck + commit.
+
 ## Evidence
 
 - Commit: `05c9dae` on `feature/position-reconciler` (6 files, +339)

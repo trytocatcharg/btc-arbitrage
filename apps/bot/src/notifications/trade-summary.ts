@@ -2,6 +2,11 @@ import { and, desc, inArray, isNotNull, sql } from "drizzle-orm";
 import { getDb, tradeLegs, trades, openTradeStatuses } from "@btc-arbitrage/db";
 import type { ExchangeAdapter } from "@btc-arbitrage/exchange-core";
 import type { MarketType, PriceSource } from "@btc-arbitrage/domain";
+import type { BotConfig } from "@btc-arbitrage/config";
+import {
+  scanUntrackedPositions,
+  type UntrackedScanResult,
+} from "../trading/position-reconciler.js";
 
 type BotDatabase = Awaited<ReturnType<typeof getDb>>;
 type TradeRow = typeof trades.$inferSelect;
@@ -14,6 +19,10 @@ export interface ExchangeRegistryLike {
 export interface TradeSummaryDependencies {
   db: BotDatabase;
   registry: ExchangeRegistryLike;
+  /** When present, the summary appends an untracked-positions section
+   * (position reconciler scan). Optional so existing callers and tests
+   * without a config keep the pre-scan message byte-for-byte. */
+  config?: BotConfig;
 }
 
 interface ResolvedTradeSummary {
@@ -58,9 +67,22 @@ interface QuoteSnapshot {
 export async function buildTradeSummaryMessage(
   deps: TradeSummaryDependencies,
 ): Promise<string> {
-  const activeTrades = await loadActiveTrades(deps.db);
+  const [activeTrades, untrackedScan] = await Promise.all([
+    loadActiveTrades(deps.db),
+    deps.config
+      ? scanUntrackedPositions({
+          db: deps.db,
+          registry: deps.registry,
+          config: deps.config,
+        })
+      : Promise.resolve(null),
+  ]);
+  const untrackedSection =
+    untrackedScan !== null
+      ? ["", ...formatUntrackedPositionsSection(untrackedScan)]
+      : [];
   if (activeTrades.length === 0) {
-    return "📭 No active trades found.";
+    return ["📭 No active trades found.", ...untrackedSection].join("\n");
   }
 
   const legsByTradeId = await loadTradeLegsByTradeId(
@@ -76,7 +98,36 @@ export async function buildTradeSummaryMessage(
     }),
   );
 
-  return formatTradeSummaryMessage(summaries);
+  return [formatTradeSummaryMessage(summaries), ...untrackedSection].join(
+    "\n",
+  );
+}
+
+/** Untracked-positions section for the Active-trade view (position
+ * reconciler, work unit 2): one line per exchange position with no
+ * matching active DB legs, plus a caveat line when an exchange could not
+ * be checked. A clean scan renders a single explicit "none" line. */
+function formatUntrackedPositionsSection(scan: UntrackedScanResult): string[] {
+  if (scan.findings.length === 0 && scan.readFailedExchanges.length === 0) {
+    return ["Untracked positions: none"];
+  }
+  const lines: string[] = [];
+  if (scan.findings.length > 0) {
+    lines.push("⚠️ Untracked positions (no matching active DB trade legs):");
+    for (const finding of scan.findings) {
+      lines.push(
+        `  ${finding.exchangeId} · ${finding.side} · ${finding.quantityBase} BTC`,
+      );
+    }
+  } else {
+    lines.push("Untracked positions: none found");
+  }
+  if (scan.readFailedExchanges.length > 0) {
+    lines.push(
+      `⚠️ Could not check: ${scan.readFailedExchanges.join(", ")} (position read unavailable)`,
+    );
+  }
+  return lines;
 }
 
 /** True when at least one trade is in an active (openTradeStatuses) state.

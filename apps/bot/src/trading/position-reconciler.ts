@@ -44,15 +44,47 @@ import { parseDecimal } from "@btc-arbitrage/domain";
  * is the TRADE status set exported by @btc-arbitrage/db), excluding legs in
  * terminal states (closed/cancelled/failed — e.g. the closed sibling of an
  * unhedged trade). Leg quantityBase NULL (planned/not yet filled) counts 0.
+ *
+ * Work unit 2 (2026-10-21): findings and the block state carry the position
+ * side, and the arm alert carries a "Close position" inline button handled
+ * by the Telegram command poller (untracked: callback family, two-step
+ * operator confirm). scanUntrackedPositions() exposes the same comparison
+ * read-only — no throttle, no state mutation, no notify — for the on-demand
+ * /trade Active-trade view.
  */
 
 /** Dust threshold (BTC): quantities at or below this are "no position". */
 const POSITION_EPSILON_BASE = 1e-6;
 
+/** Structural Telegram inline-keyboard shape for the untracked alert's
+ * Close-position button. Defined here instead of imported from the
+ * notifier to avoid a notifications → trading import cycle. */
+export interface UntrackedKeyboard {
+  inline_keyboard: Array<Array<{ text: string; callback_data: string }>>;
+}
+
+/** One untracked exchange position found by the scan: an exchange-reported
+ * position with no matching ACTIVE trade legs in the DB. */
+export interface UntrackedScanFinding {
+  exchangeId: string;
+  side: "long" | "short";
+  quantityBase: string;
+}
+
+export interface UntrackedScanResult {
+  findings: UntrackedScanFinding[];
+  /** Exchanges whose position could NOT be verified this scan (per-exchange
+   * position-read failure; also every configured exchange when the
+   * active-leg query itself failed, because then nothing can be checked).
+   * Lets the caller distinguish "none found" from "could not check". */
+  readFailedExchanges: string[];
+}
+
 /** The one untracked episode the process is blocking on, if any. Read by the
  * OpenTrade entry guard; owned exclusively by this module. */
 let untrackedPosition: {
   exchangeId: string;
+  side: "long" | "short";
   quantityBase: string;
   detectedAt: string;
   /** Whether the urgent arm alert was delivered. A failed delivery leaves
@@ -70,6 +102,7 @@ let lastCompletedRunMs: number | null = null;
  * Returns null when no untracked episode is active. */
 export function getUntrackedPosition(): {
   exchangeId: string;
+  side: "long" | "short";
   quantityBase: string;
   detectedAt: string;
 } | null {
@@ -80,7 +113,7 @@ export async function runPositionReconciliation(input: {
   db: Awaited<ReturnType<typeof getDb>>;
   registry: { get(id: string): ExchangeAdapter };
   config: BotConfig;
-  notify: (text: string) => Promise<void>;
+  notify: (text: string, keyboard?: UntrackedKeyboard) => Promise<void>;
 }): Promise<void> {
   const intervalMs = input.config.positionReconcileIntervalMs;
   // 0 disables the feature entirely.
@@ -104,9 +137,9 @@ export async function runPositionReconciliation(input: {
  * must never run silently. Never throws. */
 async function alertUntracked(
   input: {
-    notify: (text: string) => Promise<void>;
+    notify: (text: string, keyboard?: UntrackedKeyboard) => Promise<void>;
   },
-  finding: { exchangeId: string; quantityBase: string },
+  finding: UntrackedScanFinding,
   state: { alerted: boolean },
 ): Promise<void> {
   try {
@@ -115,6 +148,16 @@ async function alertUntracked(
         `${finding.quantityBase} BTC with no matching active trade legs in the DB. ` +
         `New trades are BLOCKED until the position is closed or accounted for ` +
         `(position reconciler).`,
+      {
+        inline_keyboard: [
+          [
+            {
+              text: "🚨 Close position",
+              callback_data: `untracked:close:${finding.exchangeId}:${finding.side}`,
+            },
+          ],
+        ],
+      },
     );
     state.alerted = true;
   } catch (error) {
@@ -125,12 +168,24 @@ async function alertUntracked(
   }
 }
 
-async function reconcileOnce(input: {
+/** Read-only untracked-position scan: the SAME comparison the periodic
+ * reconciler pass runs (exchange-reported position vs ACTIVE DB leg
+ * quantities per exchange+side), but with no throttle, no module-state
+ * mutation and no notify. Shared by reconcileOnce (episode transitions)
+ * and by the on-demand /trade Active-trade view. Never throws on exchange
+ * or DB errors: a failed exchange read contributes no findings and lands
+ * in readFailedExchanges; a failed active-leg query means nothing can be
+ * verified, so every configured exchange is reported as unread (callers
+ * must never mistake that result for "flat"). */
+export async function scanUntrackedPositions(input: {
   db: Awaited<ReturnType<typeof getDb>>;
   registry: { get(id: string): ExchangeAdapter };
   config: BotConfig;
-  notify: (text: string) => Promise<void>;
-}): Promise<void> {
+}): Promise<UntrackedScanResult> {
+  const exchangeIds = [
+    ...new Set([input.config.exchangeA, input.config.exchangeB]),
+  ];
+
   // Sum ACTIVE leg quantities per (exchange, side). Terminal leg states are
   // excluded even inside an active trade: a closed sibling of an unhedged
   // trade holds no exchange position.
@@ -166,7 +221,10 @@ async function reconcileOnce(input: {
       "Position reconciliation skipped: active-leg query failed",
       error instanceof Error ? { message: error.message } : { error },
     );
-    return;
+    // Without the tracked-leg quantities nothing can be checked: report
+    // every configured exchange as unread so the periodic pass never
+    // clears a block (and the /trade view never claims "none") on this.
+    return { findings: [], readFailedExchanges: exchangeIds };
   }
 
   const legQtyByExchangeSide = new Map<string, number>();
@@ -180,11 +238,8 @@ async function reconcileOnce(input: {
     );
   }
 
-  const findings: Array<{ exchangeId: string; quantityBase: string }> = [];
+  const findings: UntrackedScanFinding[] = [];
   const readFailedExchanges = new Set<string>();
-  const exchangeIds = [
-    ...new Set([input.config.exchangeA, input.config.exchangeB]),
-  ];
 
   for (const exchangeId of exchangeIds) {
     const execution = input.registry.get(exchangeId).execution;
@@ -226,7 +281,11 @@ async function reconcileOnce(input: {
       const legSum = legQtyByExchangeSide.get(`${exchangeId}:${side}`) ?? 0;
       const untrackedBase = positionQty - legSum;
       if (untrackedBase > POSITION_EPSILON_BASE) {
-        findings.push({ exchangeId, quantityBase: positionQuantityBase });
+        findings.push({
+          exchangeId,
+          side,
+          quantityBase: positionQuantityBase,
+        });
         console.warn("Position reconciliation found untracked position", {
           exchangeId,
           side,
@@ -243,6 +302,19 @@ async function reconcileOnce(input: {
       }
     }
   }
+
+  return { findings, readFailedExchanges: [...readFailedExchanges] };
+}
+
+async function reconcileOnce(input: {
+  db: Awaited<ReturnType<typeof getDb>>;
+  registry: { get(id: string): ExchangeAdapter };
+  config: BotConfig;
+  notify: (text: string, keyboard?: UntrackedKeyboard) => Promise<void>;
+}): Promise<void> {
+  const scan = await scanUntrackedPositions(input);
+  const { findings } = scan;
+  const readFailedExchanges = new Set(scan.readFailedExchanges);
 
   // Episode transitions: alert once per episode, keep the block fresh while
   // the episode lasts, and clear only on a confirmed resolution.
@@ -262,6 +334,7 @@ async function reconcileOnce(input: {
       // stays false and a later pass retries the delivery.
       untrackedPosition = {
         exchangeId: finding.exchangeId,
+        side: finding.side,
         quantityBase: finding.quantityBase,
         detectedAt: new Date().toISOString(),
         alerted: false,
@@ -278,8 +351,12 @@ async function reconcileOnce(input: {
       ) > POSITION_EPSILON_BASE
     ) {
       // Same episode, materially changed size: refresh without re-alerting.
+      // The side is refreshed too: a flip (old side closed, opposite side
+      // now untracked on the same venue) must not leave a stale side in
+      // the block state the Close button flow validates against.
       untrackedPosition = {
         ...untrackedPosition,
+        side: finding.side,
         quantityBase: finding.quantityBase,
       };
     }

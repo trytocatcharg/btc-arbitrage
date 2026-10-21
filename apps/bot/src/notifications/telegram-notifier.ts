@@ -15,6 +15,14 @@ export interface TelegramConfig {
 
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
+/** Telegram inline keyboard for urgent alerts that carry an action button
+ * (e.g. the position reconciler's Close-position button). Structurally
+ * identical to position-reconciler's UntrackedKeyboard; kept as a separate
+ * local type so neither module imports the other. */
+export interface TelegramInlineKeyboard {
+  inline_keyboard: Array<Array<{ text: string; callback_data: string }>>;
+}
+
 export interface TelegramChatLike {
   id?: string | number;
 }
@@ -83,7 +91,10 @@ export class TelegramNotifier implements Notifier {
       );
     }
   }
-  async notifyUrgent(text: string): Promise<void> {
+  async notifyUrgent(
+    text: string,
+    keyboard?: TelegramInlineKeyboard,
+  ): Promise<void> {
     if (!this.config.enabled || !this.config.botToken || !this.config.chatId)
       return;
     const response = await this.fetchWithTimeout(
@@ -95,6 +106,7 @@ export class TelegramNotifier implements Notifier {
           chat_id: normalizeTelegramChatId(this.config.chatId),
           text,
           disable_web_page_preview: true,
+          ...(keyboard ? { reply_markup: keyboard } : {}),
         }),
       },
     );

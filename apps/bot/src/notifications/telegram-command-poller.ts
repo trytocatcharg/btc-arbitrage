@@ -2,7 +2,7 @@ import type { BotConfig } from "@btc-arbitrage/config";
 import type { getDb } from "@btc-arbitrage/db";
 import { signals, tradePreviews } from "@btc-arbitrage/db";
 import { eq } from "drizzle-orm";
-import { findTradingPair, TRADING_PAIRS } from "@btc-arbitrage/domain";
+import { findTradingPair, parseDecimal, TRADING_PAIRS } from "@btc-arbitrage/domain";
 import {
   buildLastTradesMessage,
   buildTradeSummaryMessage,
@@ -51,6 +51,10 @@ import {
   type BotControl,
 } from "../runtime/runtime-control.js";
 import { persistRuntimeOverride } from "../runtime/runtime-settings-store.js";
+import {
+  getUntrackedPosition,
+  scanUntrackedPositions,
+} from "../trading/position-reconciler.js";
 
 // 2026-09-28: a hung Telegram request froze the bot's polling loop forever
 // (no timeout anywhere in the bot). Every outbound call now aborts after
@@ -278,17 +282,40 @@ export class TelegramCommandPoller {
       if (isTelegramCommand(text, "trade")) {
         // Panel with buttons: each button sends a NEW message (operator
         // decision 2026-10-09), so the panel stays available in the chat.
-        const hasActive = await hasActiveTrades(this.db);
-        await this.sendMessage(
-          hasActive
-            ? "Trade panel: choose what to view."
-            : "📭 No active trades right now.",
-          {
-            inline_keyboard: hasActive
+        // The panel also runs the read-only untracked-position scan
+        // (position reconciler): "no active trades" must never hide a
+        // naked exchange position.
+        const [hasActive, untrackedScan] = await Promise.all([
+          hasActiveTrades(this.db),
+          scanUntrackedPositions({
+            db: this.db,
+            registry: this.registry,
+            config: this.config,
+          }),
+        ]);
+        const untrackedCount = untrackedScan.findings.length;
+        let panelText: string;
+        if (hasActive) {
+          panelText = "Trade panel: choose what to view.";
+          if (untrackedCount > 0) {
+            panelText +=
+              `\n⚠️ ${untrackedCount} untracked position(s) detected with ` +
+              "no matching DB trade legs — tap 📊 Active trade for details.";
+          }
+        } else if (untrackedCount > 0) {
+          panelText =
+            "📭 No registered active trades right now.\n" +
+            `⚠️ But ${untrackedCount} untracked position(s) exist on the ` +
+            "exchange(s) with no matching DB legs — tap 📊 Active trade for details.";
+        } else {
+          panelText = "📭 No active trades right now.";
+        }
+        await this.sendMessage(panelText, {
+          inline_keyboard:
+            hasActive || untrackedCount > 0
               ? [TRADE_PANEL_BUTTONS]
               : [TRADE_HISTORY_BUTTON],
-          },
-        );
+        });
         return;
       }
 
@@ -1134,11 +1161,221 @@ export class TelegramCommandPoller {
             ? await buildTradeSummaryMessage({
                 db: this.db,
                 registry: this.registry,
+                config: this.config,
               })
             : await buildLastTradesMessage({
                 db: this.db,
               }, this.config.telegram.operatorTimezone),
         );
+      } else if (data.startsWith("untracked:")) {
+        // Position reconciler close flow (position-reconciler, work unit
+        // 2): two-step, operator-confirmed market close of an untracked
+        // exchange position. Chat/user authorization is already enforced
+        // above for every callback. The block is NOT cleared here — the
+        // reconciler's next pass confirms the position is gone and sends
+        // the ✅ resolution alert.
+        const [action, exchangeId, sideRaw] = data
+          .slice("untracked:".length)
+          .split(":");
+        if (
+          (action !== "close" && action !== "confirm" && action !== "cancel") ||
+          !exchangeId ||
+          (sideRaw !== "long" && sideRaw !== "short")
+        ) {
+          throw new Error(`Malformed untracked-position callback: ${data}`);
+        }
+        const side: "long" | "short" = sideRaw;
+        const messageId = callback.message?.message_id;
+        const episode = getUntrackedPosition();
+        const episodeMatches =
+          episode !== null &&
+          episode.exchangeId === exchangeId &&
+          episode.side === side;
+        if (action === "close") {
+          if (!episodeMatches || episode === null) {
+            await this.answerCallback(
+              callback.id,
+              "✅ That untracked position was already resolved.",
+            );
+            return;
+          }
+          if (typeof messageId === "number") {
+            await this.editMessageText(
+              messageId,
+              `Close ${episode.quantityBase} BTC ${side} on ${exchangeId} ` +
+                "at market (reduce-only)?",
+              {
+                inline_keyboard: [
+                  [
+                    {
+                      text: "✅ Confirm close",
+                      callback_data: `untracked:confirm:${exchangeId}:${side}`,
+                    },
+                    {
+                      text: "❌ Cancel",
+                      callback_data: `untracked:cancel:${exchangeId}:${side}`,
+                    },
+                  ],
+                ],
+              },
+            ).catch((error: unknown) => {
+              console.warn("Telegram untracked-close preview edit failed", {
+                messageId,
+                message:
+                  error instanceof Error ? error.message : String(error),
+              });
+            });
+          }
+        } else if (action === "cancel") {
+          if (typeof messageId === "number") {
+            await this.editMessageText(
+              messageId,
+              "Close cancelled — the untracked-position alert stands; " +
+                "new trades remain blocked.",
+            ).catch((error: unknown) => {
+              console.warn("Telegram untracked-close cancel edit failed", {
+                messageId,
+                message:
+                  error instanceof Error ? error.message : String(error),
+              });
+            });
+          }
+        } else {
+          // confirm: re-validate the episode at click time, then run the
+          // close on the shared serial execution queue (same queue as
+          // open-trade jobs) so the polling tick never blocks.
+          if (!episodeMatches || episode === null) {
+            await this.answerCallback(
+              callback.id,
+              "✅ That untracked position was already resolved.",
+            );
+            return;
+          }
+          const blockedQuantityBase = episode.quantityBase;
+          this.executionQueue.enqueue({
+            description: `untracked-close:${exchangeId}:${side}`,
+            run: async () => {
+              try {
+                const execution = this.registry.get(exchangeId).execution;
+                if (!execution) {
+                  throw new Error(
+                    `${exchangeId} has no execution adapter`,
+                  );
+                }
+                // Re-read the live position so the close covers the
+                // CURRENT size; on read failure fall back to the
+                // block-state quantity from the alert.
+                let quantityBase = blockedQuantityBase;
+                try {
+                  const position = await execution.getPosition({
+                    symbol: this.config.btcSymbol,
+                    side,
+                  });
+                  if (
+                    position === null ||
+                    position.status === "closed" ||
+                    parseDecimal(position.quantityBase, "quantityBase") <= 0
+                  ) {
+                    if (typeof messageId === "number") {
+                      await this.editMessageText(
+                        messageId,
+                        "✅ The position is already gone on the exchange — " +
+                          "nothing to close. The reconciler will unblock " +
+                          "new trades on its next pass.",
+                      ).catch((error: unknown) => {
+                        console.warn(
+                          "Telegram untracked-close gone edit failed",
+                          {
+                            messageId,
+                            message:
+                              error instanceof Error
+                                ? error.message
+                                : String(error),
+                          },
+                        );
+                      });
+                    }
+                    return;
+                  }
+                  quantityBase = position.quantityBase;
+                } catch (readError) {
+                  console.warn(
+                    "Untracked close: live position re-read failed; using the alert quantity",
+                    {
+                      exchangeId,
+                      side,
+                      message:
+                        readError instanceof Error
+                          ? readError.message
+                          : String(readError),
+                    },
+                  );
+                }
+                const order = await execution.submitExecutionOrder({
+                  clientOrderId: `untracked-close-${exchangeId}-${Date.now()}`,
+                  symbol: this.config.btcSymbol,
+                  // Closing a long sells; closing a short buys.
+                  side: side === "long" ? "sell" : "buy",
+                  type: "market",
+                  quantityBase,
+                  reduceOnly: true,
+                });
+                console.warn("Untracked position close submitted", {
+                  exchangeId,
+                  side,
+                  quantityBase,
+                  orderId: order.id,
+                });
+                if (typeof messageId === "number") {
+                  await this.editMessageText(
+                    messageId,
+                    `⏳ Close submitted: ${order.id}\n` +
+                      "The position reconciler will confirm the close and " +
+                      "unblock new trades.",
+                  ).catch((error: unknown) => {
+                    console.warn(
+                      "Telegram untracked-close submitted edit failed",
+                      {
+                        messageId,
+                        message:
+                          error instanceof Error
+                            ? error.message
+                            : String(error),
+                      },
+                    );
+                  });
+                }
+              } catch (jobError) {
+                const jobMessage =
+                  jobError instanceof Error
+                    ? jobError.message
+                    : String(jobError);
+                console.error("Untracked close job failed", {
+                  exchangeId,
+                  side,
+                  message: jobMessage,
+                });
+                if (typeof messageId === "number") {
+                  await this.editMessageText(
+                    messageId,
+                    `❌ Close failed: ${jobMessage}`,
+                  ).catch((error: unknown) => {
+                    console.warn(
+                      "Telegram untracked-close failure edit failed",
+                      {
+                        messageId,
+                        message:
+                          error instanceof Error
+                            ? error.message
+                            : String(error),
+                      },
+                    );
+                  });
+                }
+              }
+            },
+          });
+        }
       } else if (data.startsWith("volume:")) {
         const view = data.slice("volume:".length);
         if (view === "total" || view === "prevmonth" || view === "6m") {
