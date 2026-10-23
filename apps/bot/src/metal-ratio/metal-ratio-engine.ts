@@ -15,6 +15,13 @@ export interface MetalRatioEngineOptions {
   rsiPeriod: number;
   /** Decimal string band around RSI 50 (matches rsiToSide). */
   rsiConfirmBand: string;
+  /** Candle timeframe in milliseconds. Live ticks are bucketed by this
+   * granularity so the in-memory close series stays homogeneous with the
+   * candle warmup: the forming bucket's ratio is refreshed per tick and
+   * committed as one close when the bucket rolls — otherwise the RSI
+   * would silently become a per-poll (1 s) momentum reading a few
+   * minutes after boot. */
+  timeframeMs: number;
 }
 
 export interface MetalRatioTickInput {
@@ -35,11 +42,18 @@ export interface MetalRatioTickResult {
 }
 
 /** Stateful gold/silver ratio engine: holds the ratio close series, the
- * current confirmed side, and the last alert timestamp (cooldown). */
+ * current confirmed side, and the last alert timestamp (cooldown).
+ *
+ * Close-series semantics: one close per COMPLETED candle bucket. `onTick`
+ * updates the forming bucket's ratio and commits it to the series only
+ * when the bucket advances, matching how the warmup candle closes are
+ * built and how TradingView's timeframe RSI behaves. */
 export class MetalRatioEngine {
   private closes: string[] = [];
   private currentSide: MetalRatioSide | undefined;
   private lastAlertAtMs = 0;
+  private currentBucketStartMs: number | undefined;
+  private pendingBucketRatio: string | undefined;
 
   constructor(private readonly options: MetalRatioEngineOptions) {}
 
@@ -50,14 +64,38 @@ export class MetalRatioEngine {
   init(closes: readonly string[]): void {
     this.closes = closes.slice(-MAX_CLOSES);
     this.currentSide = undefined;
+    this.currentBucketStartMs = undefined;
+    this.pendingBucketRatio = undefined;
   }
 
   onTick(input: MetalRatioTickInput): MetalRatioTickResult {
     const ratio = computeMetalRatio(input.goldPriceUsd, input.silverPriceUsd);
-    this.closes.push(ratio);
-    if (this.closes.length > MAX_CLOSES) {
-      this.closes.splice(0, this.closes.length - MAX_CLOSES);
+    const bucketStartMs =
+      Math.floor(input.calculatedAt.getTime() / this.options.timeframeMs) *
+      this.options.timeframeMs;
+
+    if (this.currentBucketStartMs === undefined) {
+      // First tick after init: the forming bucket has no committed close
+      // yet (warmup covers only completed buckets). Track it without
+      // pushing, so the series stays completed-buckets-only.
+      this.currentBucketStartMs = bucketStartMs;
+      this.pendingBucketRatio = ratio;
+    } else if (bucketStartMs === this.currentBucketStartMs) {
+      // Same candle still forming: refresh its pending close.
+      this.pendingBucketRatio = ratio;
+    } else if (bucketStartMs > this.currentBucketStartMs) {
+      // Bucket rolled: commit the completed bucket's last ratio.
+      if (this.pendingBucketRatio !== undefined) {
+        this.closes.push(this.pendingBucketRatio);
+        if (this.closes.length > MAX_CLOSES) {
+          this.closes.splice(0, this.closes.length - MAX_CLOSES);
+        }
+      }
+      this.currentBucketStartMs = bucketStartMs;
+      this.pendingBucketRatio = ratio;
     }
+    // bucketStartMs < current (out-of-order clock): keep the existing
+    // pending close; the next in-order tick resumes the normal path.
 
     const rsi = computeRsi(this.closes, this.options.rsiPeriod);
     if (rsi === undefined) {

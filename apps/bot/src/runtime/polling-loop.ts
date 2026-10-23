@@ -286,6 +286,8 @@ export async function runPollingLoop(input: {
         engine: new MetalRatioEngine({
           rsiPeriod: input.config.goldSilver.rsiPeriod,
           rsiConfirmBand: input.config.goldSilver.rsiConfirmBand,
+          timeframeMs:
+            GOLD_SILVER_TIMEFRAME_MS[input.config.goldSilver.candleTimeframe],
         }),
         warmedUpAtMs: 0,
         lastTickAtMs: 0,
