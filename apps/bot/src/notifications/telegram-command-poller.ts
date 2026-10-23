@@ -2,7 +2,12 @@ import type { BotConfig } from "@btc-arbitrage/config";
 import type { getDb } from "@btc-arbitrage/db";
 import { signals, tradePreviews } from "@btc-arbitrage/db";
 import { eq } from "drizzle-orm";
-import { findTradingPair, parseDecimal, TRADING_PAIRS } from "@btc-arbitrage/domain";
+import {
+  findTradingPair,
+  GOLD_SILVER_SYMBOL,
+  parseDecimal,
+  TRADING_PAIRS,
+} from "@btc-arbitrage/domain";
 import {
   buildLastTradesMessage,
   buildTradeSummaryMessage,
@@ -369,23 +374,27 @@ export class TelegramCommandPoller {
           );
           return;
         }
+        // The GOLD/SILVER pseudo-pair is monitor-only: no exchange
+        // execution exists for it, so there is nothing to preflight.
         const failures: string[] = [];
-        for (const exchangeId of [
-          this.config.exchangeA,
-          this.config.exchangeB,
-        ]) {
-          const adapter = this.registry.get(exchangeId);
-          if (!adapter.capabilities.orderPlacement || !adapter.execution)
-            continue;
-          try {
-            await adapter.execution.validateExecutionPreflight({
-              symbol: this.config.btcSymbol,
-              leverage: value,
-            });
-          } catch (error) {
-            failures.push(
-              `${exchangeId}: ${error instanceof Error ? error.message : String(error)}`,
-            );
+        if (this.config.btcSymbol !== GOLD_SILVER_SYMBOL) {
+          for (const exchangeId of [
+            this.config.exchangeA,
+            this.config.exchangeB,
+          ]) {
+            const adapter = this.registry.get(exchangeId);
+            if (!adapter.capabilities.orderPlacement || !adapter.execution)
+              continue;
+            try {
+              await adapter.execution.validateExecutionPreflight({
+                symbol: this.config.btcSymbol,
+                leverage: value,
+              });
+            } catch (error) {
+              failures.push(
+                `${exchangeId}: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
           }
         }
         if (failures.length > 0) {
@@ -727,27 +736,31 @@ export class TelegramCommandPoller {
                 );
               }
             } else {
-              // Prepare the exchanges BEFORE applying: RISEx sets the account
-              // leverage per market, so the new symbol must be preflighted
-              // while the bot still operates the previous pair. Any
-              // failure keeps the current pair untouched.
+              // Prepare the exchanges BEFORE applying: RISEx sets the
+              // account leverage per market, so the new symbol must be
+              // preflighted while the bot still operates the previous
+              // pair. Any failure keeps the current pair untouched. The
+              // GOLD/SILVER pseudo-pair is monitor-only (v1): no execution
+              // exists for it, so there is nothing to preflight.
               const failures: string[] = [];
-              for (const exchangeId of [
-                this.config.exchangeA,
-                this.config.exchangeB,
-              ]) {
-                const adapter = this.registry.get(exchangeId);
-                if (!adapter.capabilities.orderPlacement || !adapter.execution)
-                  continue;
-                try {
-                  await adapter.execution.validateExecutionPreflight({
-                    symbol: pair.symbol,
-                    leverage: this.config.leverage,
-                  });
-                } catch (error) {
-                  failures.push(
-                    `${exchangeId}: ${error instanceof Error ? error.message : String(error)}`,
-                  );
+              if (pair.symbol !== GOLD_SILVER_SYMBOL) {
+                for (const exchangeId of [
+                  this.config.exchangeA,
+                  this.config.exchangeB,
+                ]) {
+                  const adapter = this.registry.get(exchangeId);
+                  if (!adapter.capabilities.orderPlacement || !adapter.execution)
+                    continue;
+                  try {
+                    await adapter.execution.validateExecutionPreflight({
+                      symbol: pair.symbol,
+                      leverage: this.config.leverage,
+                    });
+                  } catch (error) {
+                    failures.push(
+                      `${exchangeId}: ${error instanceof Error ? error.message : String(error)}`,
+                    );
+                  }
                 }
               }
               if (failures.length > 0) {
@@ -767,11 +780,16 @@ export class TelegramCommandPoller {
               } else {
                 const change = applyTradingPair(this.config, pair.symbol);
                 const persistNote = await this.persistAppliedChange(change);
+                const monitorNote =
+                  pair.symbol === GOLD_SILVER_SYMBOL
+                    ? "\n\nThe gold/silver ratio monitor runs from the next " +
+                      "tick (monitor-only v1 — no orders). Switch back to a " +
+                      "spread pair anytime from this menu."
+                    : `\n\nThe bot trades ${pair.label} from the next signal.`;
                 if (typeof messageId === "number") {
                   await this.editMessageText(
                     messageId,
-                    `✅ ${change.summary}${persistNote}\n\n` +
-                      `The bot trades ${pair.label} from the next signal.`,
+                    `✅ ${change.summary}${persistNote}${monitorNote}`,
                   ).catch((error: unknown) => {
                     console.warn("Telegram pair-apply edit failed", {
                       messageId,
@@ -972,6 +990,26 @@ export class TelegramCommandPoller {
           }
         }
       } else if (data.startsWith("open:")) {
+        // The GOLD/SILVER pseudo-pair is monitor-only: it never creates
+        // signal rows, but a stale "Open Trade" button from a previous
+        // spread pair can still be tapped after the switch — refuse it.
+        if (this.config.btcSymbol === GOLD_SILVER_SYMBOL) {
+          const messageId = callback.message?.message_id;
+          if (typeof messageId === "number") {
+            await this.editMessageText(
+              messageId,
+              "⛔ GOLD/SILVER is monitor-only (v1): opening trades is not " +
+                "available for this pair. Switch to a spread pair first.",
+            ).catch((error: unknown) => {
+              console.warn("Telegram open-gold-silver edit failed", {
+                messageId,
+                message:
+                  error instanceof Error ? error.message : String(error),
+              });
+            });
+          }
+          return;
+        }
         const signalId = Number(data.slice(5));
         const signal = (
           await this.db.select().from(signals).where(eq(signals.id, signalId))

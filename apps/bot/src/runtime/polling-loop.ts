@@ -1,4 +1,5 @@
 import { calculateSpread } from "@btc-arbitrage/domain";
+import { GOLD_SILVER_SYMBOL } from "@btc-arbitrage/domain";
 import type { BotConfig } from "@btc-arbitrage/config";
 import type { SpreadSnapshot } from "@btc-arbitrage/domain";
 import type { ExchangeAdapter } from "@btc-arbitrage/exchange-core";
@@ -24,6 +25,18 @@ import type { ExecutionQueue } from "../trading/execution-queue.js";
 import { autoConfirmSignalTrade } from "../trading/open-trade-factory.js";
 import { extractInsertId } from "../db-result.js";
 import type { BotControl } from "./runtime-control.js";
+import {
+  createArcusMarketDataClient,
+  type ArcusMarketDataClient,
+} from "../exchanges/arcus/arcus-client.js";
+import { MetalRatioEngine } from "../metal-ratio/metal-ratio-engine.js";
+import {
+  GOLD_MARKET,
+  GOLD_SILVER_TIMEFRAME_MS,
+  loadMetalRatioWarmupCloses,
+  SILVER_MARKET,
+} from "../metal-ratio/metal-ratio-warmup.js";
+import { persistRatioSnapshot } from "../metal-ratio/metal-ratio-store.js";
 
 export interface ExchangeRegistry {
   get(id: string): ExchangeAdapter;
@@ -249,6 +262,76 @@ export async function runPollingLoop(input: {
     isShuttingDown,
   });
 
+  // Gold/silver ratio monitor (v1 monitor-only). Activated by selecting
+  // the GOLD/SILVER pseudo-pair via the Telegram Pairs panel
+  // (config.btcSymbol === GOLD_SILVER_SYMBOL). The pair can switch at
+  // runtime without a restart, so the context initializes lazily on the
+  // first active tick and re-warms its candle history when the ratio
+  // series has gone stale (e.g. the operator traded a spread pair for
+  // longer than the candle timeframe in between).
+  interface MetalRatioContext {
+    client: ArcusMarketDataClient;
+    engine: MetalRatioEngine;
+    /** 0 until the first warmup (successful or cold) has run. */
+    warmedUpAtMs: number;
+    /** Wall clock of the most recent ratio tick; 0 if never. */
+    lastTickAtMs: number;
+  }
+  let metalRatio: MetalRatioContext | undefined;
+
+  async function ensureMetalRatioContext(): Promise<MetalRatioContext> {
+    if (!metalRatio) {
+      metalRatio = {
+        client: createArcusMarketDataClient(input.config.arcus),
+        engine: new MetalRatioEngine({
+          rsiPeriod: input.config.goldSilver.rsiPeriod,
+          rsiConfirmBand: input.config.goldSilver.rsiConfirmBand,
+        }),
+        warmedUpAtMs: 0,
+        lastTickAtMs: 0,
+      };
+    }
+    const stalenessMs =
+      2 *
+      GOLD_SILVER_TIMEFRAME_MS[input.config.goldSilver.candleTimeframe];
+    const seriesStale =
+      metalRatio.lastTickAtMs > 0 &&
+      Date.now() - metalRatio.lastTickAtMs > stalenessMs;
+    if (metalRatio.warmedUpAtMs === 0 || seriesStale) {
+      try {
+        const closes = await loadMetalRatioWarmupCloses({
+          client: metalRatio.client,
+          timeframe: input.config.goldSilver.candleTimeframe,
+          candleLimit: input.config.goldSilver.candleLimit,
+        });
+        // init() resets the confirmed side, so the first tick after a
+        // (re-)warmup announces the current regime — an intentional
+        // boot/switch-time status alert.
+        metalRatio.engine.init(closes);
+        metalRatio.warmedUpAtMs = Date.now();
+        console.log("Gold/silver ratio monitor ready", {
+          rewarm: seriesStale,
+          timeframe: input.config.goldSilver.candleTimeframe,
+          warmupCloses: closes.length,
+          rsiPeriod: input.config.goldSilver.rsiPeriod,
+          rsiConfirmBand: input.config.goldSilver.rsiConfirmBand,
+          alertCooldownMs: input.config.goldSilver.alertCooldownMs,
+        });
+      } catch (error) {
+        // Cold start is acceptable degradation (RSI stays undefined until
+        // enough live ticks); only stamp warmedUpAtMs so the failure does
+        // not retry the warmup on every single tick.
+        console.warn(
+          "Gold/silver ratio warmup failed; starting cold (RSI stays undefined until enough live ticks)",
+          error instanceof Error ? { message: error.message } : { error },
+        );
+        metalRatio.engine.init([]);
+        metalRatio.warmedUpAtMs = Date.now();
+      }
+    }
+    return metalRatio;
+  }
+
   // Restart is cooperative: the loop exits when control.requestRestart()
   // sets the flag, the monitor timer is cleared below, and the process
   // exits cleanly (code 0) when main() returns; Docker (restart:
@@ -348,6 +431,14 @@ export async function runPollingLoop(input: {
   // Price snapshots + spread evaluation + signal emission + auto-confirm
   // enqueue, extracted from the tick so a paused bot skips it wholesale.
   async function runSignalPass(tick: number): Promise<void> {
+    // GOLD/SILVER pseudo-pair: the entire signal pass IS the metal-ratio
+    // monitor. The BTC spread work below does not apply, so it is skipped
+    // wholesale (the exchanges' spread prices are irrelevant for the
+    // ratio strategy).
+    if (input.config.btcSymbol === GOLD_SILVER_SYMBOL) {
+      await runMetalRatioPass(tick);
+      return;
+    }
     const [priceA, priceB] = await Promise.all([
       exchangeA.getPriceSnapshot({
         symbol: input.config.btcSymbol,
@@ -473,6 +564,73 @@ export async function runPollingLoop(input: {
           });
         }
       }
+    }
+  }
+
+  // Gold/silver ratio monitor tick (v1 monitor-only): runs in place of the
+  // BTC spread pass while the GOLD/SILVER pseudo-pair is active. Own
+  // try/catch so a metal-ratio failure never breaks the tick, and snapshot
+  // persistence is failure-isolated (persistRatioSnapshot swallows DB
+  // errors).
+  async function runMetalRatioPass(tick: number): Promise<void> {
+    try {
+      const ctx = await ensureMetalRatioContext();
+      ctx.lastTickAtMs = Date.now();
+      const calculatedAt = new Date();
+      // The ratio monitor always uses mark prices, independent of the
+      // configured BTC PRICE_SOURCE.
+      const [gold, silver] = await Promise.all([
+        ctx.client.getPriceSnapshot({
+          symbol: GOLD_MARKET,
+          marketType: "perpetual",
+          priceSource: "mark",
+        }),
+        ctx.client.getPriceSnapshot({
+          symbol: SILVER_MARKET,
+          marketType: "perpetual",
+          priceSource: "mark",
+        }),
+      ]);
+      const result = ctx.engine.onTick({
+        goldPriceUsd: gold.priceUsd,
+        silverPriceUsd: silver.priceUsd,
+        calculatedAt,
+      });
+      await persistRatioSnapshot(input.db, {
+        goldPriceUsd: gold.priceUsd,
+        silverPriceUsd: silver.priceUsd,
+        ratio: result.ratio,
+        rsi: result.rsi,
+        side: result.side,
+        crossed: result.crossed,
+        calculatedAt,
+      });
+      if (
+        result.crossed &&
+        result.side !== undefined &&
+        result.rsi !== undefined &&
+        ctx.engine.consumeAlertEligibility(
+          input.config.goldSilver.alertCooldownMs,
+        )
+      ) {
+        await input.notifier.notifyMetalRatioSignal({
+          side: result.side,
+          rsi: result.rsi,
+          rsiPeriod: input.config.goldSilver.rsiPeriod,
+          ratio: result.ratio,
+          goldPriceUsd: gold.priceUsd,
+          silverPriceUsd: silver.priceUsd,
+          takeProfitNetUsd: input.config.goldSilver.takeProfitNetUsd,
+          calculatedAt,
+        });
+      }
+    } catch (error) {
+      console.error(
+        "Gold/silver ratio tick failed",
+        error instanceof Error
+          ? { tick, message: error.message }
+          : { tick, error },
+      );
     }
   }
 }

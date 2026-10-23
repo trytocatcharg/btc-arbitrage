@@ -1,4 +1,7 @@
-import { isSupportedTradingSymbol } from "@btc-arbitrage/domain";
+import {
+  isSupportedTradingSymbol,
+  TRADING_PAIRS,
+} from "@btc-arbitrage/domain";
 import type { BotConfig } from "@btc-arbitrage/config";
 
 // Runtime-adjustable bot settings. These appliers mutate the live BotConfig
@@ -157,8 +160,9 @@ export function applyTradingPair(
 ): RuntimeSettingChange {
   const normalized = symbol.trim().toUpperCase();
   if (!isSupportedTradingSymbol(normalized)) {
+    const available = TRADING_PAIRS.map((pair) => pair.label).join(", ");
     throw new Error(
-      `Unsupported pair: ${symbol}. Available pairs: BTC/USD, ETH/USD, NVDA/USD.`,
+      `Unsupported pair: ${symbol}. Available pairs: ${available}.`,
     );
   }
   config.btcSymbol = normalized;

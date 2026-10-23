@@ -59,3 +59,26 @@ export interface ArcusBboResponse {
   globalSequenceId?: number;
   timestamp?: number;
 }
+
+/** One row of `GET /v1/candles` (public, no auth). Verified live 2026-XX:
+ * response is `{ candles: [...] }` NEWEST-first; `openTime` is epoch
+ * microseconds; OHLCV are decimal strings; the in-progress candle carries
+ * `isFinal: false`. Query params `market`, `timeframe`, `from`, `to`
+ * (µs) are required; `limit` is ignored server-side (snapshot ≤ ~300). */
+export interface ArcusCandle {
+  marketDisplayName?: string;
+  marketId?: number | string;
+  timeframe?: string;
+  openTime?: number | string;
+  open?: string;
+  high?: string;
+  low?: string;
+  close?: string;
+  volume?: string;
+  isFinal?: boolean;
+  [key: string]: unknown;
+}
+
+export interface ArcusCandlesResponse {
+  candles?: ArcusCandle[];
+}

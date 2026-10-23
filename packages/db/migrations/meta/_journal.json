@@ -43,6 +43,13 @@
       "when": 1792417391777,
       "tag": "0005_fresh_amazoness",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "5",
+      "when": 1792677119013,
+      "tag": "0006_gold_silver_ratio",
+      "breakpoints": true
     }
   ]
 }

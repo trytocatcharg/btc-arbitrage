@@ -1,5 +1,5 @@
 import type { TradingSignal } from "@btc-arbitrage/domain";
-import type { Notifier } from "./notifier.js";
+import type { MetalRatioSignalNotification, Notifier } from "./notifier.js";
 
 // 2026-09-28: a hung Telegram request froze the bot's polling loop forever
 // (no timeout anywhere in the bot). Every outbound call now aborts after
@@ -116,6 +116,32 @@ export class TelegramNotifier implements Notifier {
       );
   }
 
+  /** Gold/silver ratio RSI-cross alert (v1 monitor-only). No inline
+   * buttons and no notifier-side cooldown: the metal-ratio engine owns the
+   * alert cadence via GOLDSILVER_ALERT_COOLDOWN_MS. */
+  async notifyMetalRatioSignal(
+    signal: MetalRatioSignalNotification,
+  ): Promise<void> {
+    if (!this.config.enabled || !this.config.botToken || !this.config.chatId)
+      return;
+    const response = await this.fetchWithTimeout(
+      `https://api.telegram.org/bot${this.config.botToken}/sendMessage`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          chat_id: normalizeTelegramChatId(this.config.chatId),
+          text: formatMetalRatioSignal(signal),
+          disable_web_page_preview: true,
+        }),
+      },
+    );
+    if (!response.ok)
+      throw new Error(
+        `Telegram metal-ratio message failed with HTTP ${response.status}`,
+      );
+  }
+
   private fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
     return this.fetchImpl(url, {
       ...init,
@@ -147,6 +173,43 @@ export function formatTelegramSignal(signal: TradingSignal): string {
     `Leverage: ${signal.leverage}x`,
     "Action: tap Open Trade to open the trade immediately (no confirmation step)",
   ].join("\n");
+}
+
+/** Metal-equivalent conversion factor for the ETF ratio display: one GLD
+ * share tracks ~0.0934 oz of gold and one SLV share ~0.918 oz of silver, so
+ * metal_ratio = (GLD/0.0934)/(SLV/0.918) = etf_ratio x (0.918/0.0934) ~ x9.83.
+ * Operator decision: display with the rounded factor 10.0. */
+const ETF_TO_METAL_RATIO_FACTOR = 10.0;
+
+export function formatMetalRatioSignal(
+  signal: MetalRatioSignalNotification,
+): string {
+  const direction =
+    signal.side === "short_gold_long_silver"
+      ? "SHORT GOLD / LONG SILVER"
+      : "LONG GOLD / SHORT SILVER";
+  const crossDescription =
+    signal.side === "short_gold_long_silver"
+      ? "crossed above 50"
+      : "crossed below 50";
+  const metalRatio = Number(signal.ratio) * ETF_TO_METAL_RATIO_FACTOR;
+  return [
+    "🥇🥈 Gold/Silver ratio signal (monitor-only)",
+    `Direction: ${direction}`,
+    `RSI(${signal.rsiPeriod}): ${formatRsi(signal.rsi)} (${crossDescription})`,
+    `Ratio (ETF shares): ${signal.ratio}`,
+    `Ratio (metal-equivalent): ${Number.isFinite(metalRatio) ? metalRatio.toFixed(1) : signal.ratio}`,
+    `GLD-USD mark: $${formatUsdAmount(signal.goldPriceUsd)}`,
+    `SLV-USD mark: $${formatUsdAmount(signal.silverPriceUsd)}`,
+    `Future execution target: $${formatUsdAmount(signal.takeProfitNetUsd)} net TP`,
+    "Note: v1 is monitor-only — no orders are placed.",
+  ].join("\n");
+}
+
+function formatRsi(value: string): string {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return value;
+  return parsed.toFixed(2);
 }
 
 function formatUsdAmount(value: string): string {

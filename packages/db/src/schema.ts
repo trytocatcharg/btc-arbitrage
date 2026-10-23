@@ -114,6 +114,35 @@ export const spreadSnapshots = mysqlTable(
   }),
 );
 
+// Gold/silver ratio monitor snapshots (v1 monitor-only): one row per ratio
+// tick computed from Arcus GLD-USD / SLV-USD perp prices. rsi stays NULL until
+// enough candle closes exist for the configured period; side holds the
+// MetalRatioSide value only on ticks where the RSI leaves the dead zone
+// around 50, and crossed is true only when that side changed vs the previous
+// tick.
+export const ratioSnapshots = mysqlTable(
+  "ratio_snapshots",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    goldPriceUsd: decimal("gold_price_usd", {
+      precision: 24,
+      scale: 8,
+    }).notNull(),
+    silverPriceUsd: decimal("silver_price_usd", {
+      precision: 24,
+      scale: 8,
+    }).notNull(),
+    ratio: decimal("ratio", { precision: 24, scale: 8 }).notNull(),
+    rsi: decimal("rsi", { precision: 12, scale: 4 }),
+    side: varchar("side", { length: 32 }),
+    crossed: boolean("crossed").notNull().default(false),
+    calculatedAt: timestamp("calculated_at").notNull().defaultNow(),
+  },
+  (table) => ({
+    calculatedAtIdx: index("ratio_calculated_at_idx").on(table.calculatedAt),
+  }),
+);
+
 export const signals = mysqlTable(
   "signals",
   {

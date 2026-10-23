@@ -139,8 +139,48 @@ export interface BotConfig {
     retentionDays: number;
     batchSize: number;
   };
+  /** Gold/silver ratio monitor (v1: monitor-only, no execution). Watches the
+   * GLD-USD / SLV-USD perp ratio on Arcus and alerts on RSI crosses of 50. */
+  goldSilver: {
+    /** Activation switch for the ratio monitor is the trading pair itself
+     * (btcSymbol === GOLD_SILVER_SYMBOL via the Telegram Pairs panel) —
+     * there is deliberately no separate env flag. */
+    /** GOLDSILVER_RSI_PERIOD: Wilder RSI period (>= 2). */
+    rsiPeriod: number;
+    /** GOLDSILVER_RSI_CONFIRM_BAND: confirmation band around RSI 50, stored
+     * as a decimal string (matches rsiToSide(rsi, band) in domain). A cross
+     * only counts when RSI >= 50 + band or RSI <= 50 - band. */
+    rsiConfirmBand: string;
+    /** GOLDSILVER_CANDLE_TIMEFRAME: candle timeframe for ratio closes. */
+    candleTimeframe: GoldSilverCandleTimeframe;
+    /** GOLDSILVER_CANDLE_LIMIT: candles fetched per build (clamped 1..200). */
+    candleLimit: number;
+    /** GOLDSILVER_TAKE_PROFIT_NET_USD: net USD take-profit target per trade,
+     * reserved for the future execution phase (> 0). */
+    takeProfitNetUsd: string;
+    /** GOLDSILVER_ALERT_COOLDOWN_MS: global cooldown between ratio alerts. */
+    alertCooldownMs: number;
+  };
   logLevel: string;
 }
+
+export const GOLD_SILVER_CANDLE_TIMEFRAMES = [
+  "1m",
+  "3m",
+  "5m",
+  "15m",
+  "30m",
+  "1h",
+  "2h",
+  "4h",
+  "8h",
+  "12h",
+  "1d",
+  "3d",
+  "1w",
+] as const;
+export type GoldSilverCandleTimeframe =
+  (typeof GOLD_SILVER_CANDLE_TIMEFRAMES)[number];
 
 export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   // Spread-USD exits were deleted by adjust-tpsl-volume-farming: these vars
@@ -307,6 +347,37 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     "OPEN_TRADE_MARGIN_USD",
   );
   const notionalUsd = (Number(marginUsd) * leverage).toFixed(8);
+
+  // Gold/silver ratio monitor (v1 monitor-only; takeProfitNetUsd is stored
+  // now for the future execution phase).
+  const goldSilverRsiPeriod = parsePositiveInteger(
+    env.GOLDSILVER_RSI_PERIOD ?? "14",
+    "GOLDSILVER_RSI_PERIOD",
+  );
+  if (goldSilverRsiPeriod < 2) {
+    throw new Error("GOLDSILVER_RSI_PERIOD must be at least 2");
+  }
+  const goldSilverRsiConfirmBand = parseNonNegativeDecimalString(
+    env.GOLDSILVER_RSI_CONFIRM_BAND ?? "0",
+    "GOLDSILVER_RSI_CONFIRM_BAND",
+  );
+  const goldSilverCandleTimeframe = parseGoldSilverCandleTimeframe(
+    env.GOLDSILVER_CANDLE_TIMEFRAME ?? "1h",
+  );
+  const goldSilverCandleLimit = parseClampedInteger(
+    env.GOLDSILVER_CANDLE_LIMIT ?? "200",
+    "GOLDSILVER_CANDLE_LIMIT",
+    1,
+    200,
+  );
+  const goldSilverTakeProfitNetUsd = parsePositiveDecimalString(
+    env.GOLDSILVER_TAKE_PROFIT_NET_USD ?? "1.0",
+    "GOLDSILVER_TAKE_PROFIT_NET_USD",
+  );
+  const goldSilverAlertCooldownMs = parseNonNegativeInteger(
+    env.GOLDSILVER_ALERT_COOLDOWN_MS ?? "3600000",
+    "GOLDSILVER_ALERT_COOLDOWN_MS",
+  );
 
   return {
     database,
@@ -475,6 +546,14 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       retentionDays: dataRetentionDays,
       batchSize: dataRetentionBatchSize,
     },
+    goldSilver: {
+      rsiPeriod: goldSilverRsiPeriod,
+      rsiConfirmBand: goldSilverRsiConfirmBand,
+      candleTimeframe: goldSilverCandleTimeframe,
+      candleLimit: goldSilverCandleLimit,
+      takeProfitNetUsd: goldSilverTakeProfitNetUsd,
+      alertCooldownMs: goldSilverAlertCooldownMs,
+    },
     logLevel: env.LOG_LEVEL ?? "info",
   };
 }
@@ -597,6 +676,27 @@ function parseBoolean(value: string): boolean {
   if (value === "true") return true;
   if (value === "false") return false;
   throw new Error(`Expected boolean string true/false, got ${value}`);
+}
+
+function parseGoldSilverCandleTimeframe(
+  value: string,
+): GoldSilverCandleTimeframe {
+  if ((GOLD_SILVER_CANDLE_TIMEFRAMES as readonly string[]).includes(value))
+    return value as GoldSilverCandleTimeframe;
+  throw new Error(
+    `GOLDSILVER_CANDLE_TIMEFRAME must be one of: ${GOLD_SILVER_CANDLE_TIMEFRAMES.join(", ")}`,
+  );
+}
+
+function parseClampedInteger(
+  value: string,
+  field: string,
+  min: number,
+  max: number,
+): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed)) throw new Error(`${field} must be an integer`);
+  return Math.min(max, Math.max(min, parsed));
 }
 
 function parsePositiveInteger(value: string, field: string): number {

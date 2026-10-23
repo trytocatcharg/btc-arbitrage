@@ -126,10 +126,19 @@ export interface TradingPair {
 
 export const DEFAULT_TRADING_PAIR_SYMBOL = "BTCUSDT";
 
+/** Pseudo-pair symbol for the gold/silver ratio monitor (RSI-50 pairs
+ * strategy on Arcus GLD-USD / SLV-USD mark prices). Unlike the spread
+ * pairs it is NOT resolved by the per-exchange spread adapters — the
+ * polling loop routes it to the dedicated metal-ratio monitor instead.
+ * Selecting it via the Telegram Pairs panel switches the whole strategy:
+ * the BTC spread pass is skipped and only the ratio monitor runs. */
+export const GOLD_SILVER_SYMBOL = "GOLDSILVER";
+
 export const TRADING_PAIRS: readonly TradingPair[] = [
   { label: "BTC/USD", symbol: "BTCUSDT" },
   { label: "ETH/USD", symbol: "ETHUSDT" },
   { label: "NVDA/USD", symbol: "NVDAUSDT" },
+  { label: "GOLD/SILVER", symbol: GOLD_SILVER_SYMBOL },
 ];
 
 export function findTradingPair(
@@ -174,6 +183,76 @@ export function calculateSpread(input: CalculateSpreadInput): SpreadSnapshot {
     thresholdMatched: absoluteDiff >= threshold,
     calculatedAt: input.calculatedAt ?? new Date(),
   };
+}
+
+export type MetalRatioSide = "short_gold_long_silver" | "long_gold_short_silver";
+
+/** Gold/silver ratio from USD-denominated perp prices. Throws on an invalid
+ * or non-positive silver price (division by zero / negative denominator). */
+export function computeMetalRatio(
+  goldPriceUsd: string,
+  silverPriceUsd: string,
+): string {
+  const gold = parseDecimal(goldPriceUsd, "goldPriceUsd");
+  const silver = parseDecimal(silverPriceUsd, "silverPriceUsd");
+  if (silver <= 0) {
+    throw new Error(
+      "silverPriceUsd must be positive to compute the gold/silver ratio",
+    );
+  }
+  return formatDecimal(gold / silver);
+}
+
+/** Wilder-smoothed RSI over decimal-string closes (oldest first). Returns
+ * undefined when there are not enough closes (closes.length <= period).
+ * A series with zero average loss resolves to 100 (all gains), or 50 when
+ * the series is completely flat (no gains and no losses). */
+export function computeRsi(
+  closes: readonly string[],
+  period: number,
+): string | undefined {
+  if (!Number.isInteger(period) || period < 2) {
+    throw new Error("period must be an integer >= 2");
+  }
+  if (closes.length <= period) return undefined;
+  const values = closes.map((close, index) =>
+    parseDecimal(close, `closes[${index}]`),
+  );
+
+  let gainSum = 0;
+  let lossSum = 0;
+  for (let i = 1; i <= period; i++) {
+    const change = values[i] - values[i - 1];
+    if (change > 0) gainSum += change;
+    else lossSum += -change;
+  }
+  let avgGain = gainSum / period;
+  let avgLoss = lossSum / period;
+
+  for (let i = period + 1; i < values.length; i++) {
+    const change = values[i] - values[i - 1];
+    const gain = change > 0 ? change : 0;
+    const loss = change < 0 ? -change : 0;
+    avgGain = (avgGain * (period - 1) + gain) / period;
+    avgLoss = (avgLoss * (period - 1) + loss) / period;
+  }
+
+  if (avgLoss === 0) return formatDecimal(avgGain === 0 ? 50 : 100, 4);
+  const rs = avgGain / avgLoss;
+  return formatDecimal(100 - 100 / (1 + rs), 4);
+}
+
+/** Maps an RSI value to the mean-reversion side of the ratio trade: RSI
+ * >= 50 + band => ratio overbought => short gold / long silver; RSI <= 50 -
+ * band => ratio oversold => long gold / short silver. Returns undefined
+ * inside the dead zone around 50. */
+export function rsiToSide(rsi: string, band: string): MetalRatioSide | undefined {
+  const value = parseDecimal(rsi, "rsi");
+  const bandValue = parseDecimal(band, "band");
+  if (bandValue < 0) throw new Error("band must be >= 0");
+  if (value >= 50 + bandValue) return "short_gold_long_silver";
+  if (value <= 50 - bandValue) return "long_gold_short_silver";
+  return undefined;
 }
 
 export function parseDecimal(value: string, fieldName = "decimal"): number {

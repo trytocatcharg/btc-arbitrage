@@ -3,7 +3,7 @@ import type { ExchangeAdapter, ExchangeMarket, MarketStats, PriceRequest } from 
 import { normalizeSymbol } from '@btc-arbitrage/exchange-core';
 import { extractVolume24hUsd, findMarket, getMarketId } from '../market-normalization.js';
 import { ArcusHttpClient } from './arcus-http-client.js';
-import type { ArcusBboResponse, ArcusConfig, ArcusMarketInfo, ArcusPriceEntry, ArcusPricesResponse } from './arcus.types.js';
+import type { ArcusBboResponse, ArcusCandle, ArcusCandlesResponse, ArcusConfig, ArcusMarketInfo, ArcusPriceEntry, ArcusPricesResponse } from './arcus.types.js';
 import { createArcusExecutionAdapter } from './arcus-execution-adapter.js';
 
 const DEFAULT_ARCUS_MARKET = 'BTC-USD';
@@ -69,6 +69,52 @@ export function createArcusAdapter(config: ArcusConfig, http = new ArcusHttpClie
       };
     }
   };
+}
+
+export interface ArcusCandlesRequest {
+  /** Arcus market display name, e.g. 'GLD-USD'. */
+  market: string;
+  /** Candle timeframe, e.g. '1h' (validated server-side). */
+  timeframe: string;
+  /** Range bounds in epoch microseconds (required by the API). */
+  fromUs: number;
+  toUs: number;
+}
+
+/** Market-data-only Arcus client: price snapshots plus candle history.
+ * Used by the gold/silver ratio monitor, which needs Arcus market data
+ * INDEPENDENT of the configured BTC pair (exchangeA/B may not include
+ * arcus). All endpoints are public, so no signing material is required —
+ * the HTTP client is constructed without the API key. */
+export interface ArcusMarketDataClient {
+  getPriceSnapshot(input: PriceRequest): Promise<PriceSnapshot>;
+  /** Raw candles NEWEST-first, exactly as the API returns them; callers
+   * sort/filter. Empty/invalid payloads resolve to an empty array. */
+  getCandles(input: ArcusCandlesRequest): Promise<ArcusCandle[]>;
+}
+
+export function createArcusMarketDataClient(config: ArcusConfig): ArcusMarketDataClient {
+  const http = new ArcusHttpClient(config.apiBaseUrl, config.userAgent);
+  const adapter = createArcusAdapter(config, http);
+  return {
+    getPriceSnapshot: (input) => adapter.getPriceSnapshot(input),
+    async getCandles(input) {
+      const payload = await http.get('/v1/candles', {
+        market: input.market,
+        timeframe: input.timeframe,
+        from: String(Math.trunc(input.fromUs)),
+        to: String(Math.trunc(input.toUs))
+      });
+      return extractArcusCandles(payload);
+    }
+  };
+}
+
+function extractArcusCandles(payload: unknown): ArcusCandle[] {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return [];
+  const candles = (payload as ArcusCandlesResponse).candles;
+  if (!Array.isArray(candles)) return [];
+  return candles.filter((candle) => candle && typeof candle === 'object');
 }
 
 export function toArcusMarketName(symbol: string): string {
