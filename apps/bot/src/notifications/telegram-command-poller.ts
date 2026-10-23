@@ -7,6 +7,7 @@ import {
   GOLD_SILVER_SYMBOL,
   parseDecimal,
   TRADING_PAIRS,
+  type MetalRatioSide,
 } from "@btc-arbitrage/domain";
 import {
   buildLastTradesMessage,
@@ -56,6 +57,10 @@ import {
   type BotControl,
 } from "../runtime/runtime-control.js";
 import { persistRuntimeOverride } from "../runtime/runtime-settings-store.js";
+import {
+  createMetalTrade,
+  executeMetalTradeEntry,
+} from "../metal-ratio/metal-trade-service.js";
 import {
   getUntrackedPosition,
   scanUntrackedPositions,
@@ -988,6 +993,63 @@ export class TelegramCommandPoller {
             // and the process ends when main() returns (Docker restarts it).
             this.control.requestRestart();
           }
+        }
+      } else if (data.startsWith("metaltrade:open:")) {
+        // One-click open of a gold/silver pair trade from the ratio-cross
+        // alert. Same contract as the BTC one-click: create + confirm are
+        // one action, entry runs on the serial execution queue.
+        const side = data.slice("metaltrade:open:".length);
+        const messageId = callback.message?.message_id;
+        const validSide: MetalRatioSide =
+          side === "long_gold_short_silver"
+            ? "long_gold_short_silver"
+            : "short_gold_long_silver";
+        const reply = async (text: string) => {
+          if (typeof messageId === "number") {
+            await this.editMessageText(messageId, text).catch(
+              (error: unknown) => {
+                console.warn("Telegram metal-open edit failed", {
+                  messageId,
+                  message:
+                    error instanceof Error ? error.message : String(error),
+                });
+              },
+            );
+          }
+        };
+        let arcusExecution = this.registry.get("arcus").execution;
+        if (!arcusExecution) {
+          await reply(
+            "⛔ Arcus execution is not available (check ARCUS_TRADING_ENABLED).",
+          );
+          return;
+        }
+        try {
+          const metalCtx = {
+            db: this.db,
+            config: this.config,
+            execution: arcusExecution,
+            notify: async (text: string) => {
+              await this.sendMessage(text);
+            },
+            notifyUrgent: async (text: string) => {
+              await this.sendMessage(text);
+            },
+          };
+          const tradeId = await createMetalTrade(metalCtx, validSide);
+          await reply(
+            `⏳ Opening gold/silver trade ${tradeId}...\n` +
+              "Passive limit on GLD + immediate market hedge on SLV. " +
+              `This can take up to ~${Math.round(this.config.openTrade.limitTimeoutMs / 1000)}s.`,
+          );
+          this.executionQueue.enqueue({
+            description: `metal-open:${tradeId}`,
+            run: () => executeMetalTradeEntry(metalCtx, tradeId),
+          });
+        } catch (error) {
+          await reply(
+            `❌ ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
       } else if (data.startsWith("open:")) {
         // The GOLD/SILVER pseudo-pair is monitor-only: it never creates

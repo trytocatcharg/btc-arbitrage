@@ -121,6 +121,7 @@ export class TelegramNotifier implements Notifier {
    * alert cadence via GOLDSILVER_ALERT_COOLDOWN_MS. */
   async notifyMetalRatioSignal(
     signal: MetalRatioSignalNotification,
+    keyboard?: TelegramInlineKeyboard,
   ): Promise<void> {
     if (!this.config.enabled || !this.config.botToken || !this.config.chatId)
       return;
@@ -133,6 +134,7 @@ export class TelegramNotifier implements Notifier {
           chat_id: normalizeTelegramChatId(this.config.chatId),
           text: formatMetalRatioSignal(signal),
           disable_web_page_preview: true,
+          reply_markup: keyboard ? { inline_keyboard: keyboard } : undefined,
         }),
       },
     );

@@ -1,4 +1,5 @@
 import type { MetalRatioSide, TradingSignal } from '@btc-arbitrage/domain';
+import type { TelegramInlineKeyboard } from './telegram-notifier.js';
 
 /** Payload for a gold/silver ratio RSI-cross alert. */
 export interface MetalRatioSignalNotification {
@@ -18,5 +19,8 @@ export interface MetalRatioSignalNotification {
 export interface Notifier {
   notifySignal(signal: TradingSignal): Promise<void>;
   notifyUrgent(text: string): Promise<void>;
-  notifyMetalRatioSignal(signal: MetalRatioSignalNotification): Promise<void>;
+  notifyMetalRatioSignal(
+    signal: MetalRatioSignalNotification,
+    keyboard?: TelegramInlineKeyboard,
+  ): Promise<void>;
 }

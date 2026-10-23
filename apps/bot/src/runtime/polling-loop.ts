@@ -37,6 +37,7 @@ import {
   SILVER_MARKET,
 } from "../metal-ratio/metal-ratio-warmup.js";
 import { persistRatioSnapshot } from "../metal-ratio/metal-ratio-store.js";
+import { evaluateMetalTradeExitTriggers } from "../metal-ratio/metal-trade-monitor.js";
 
 export interface ExchangeRegistry {
   get(id: string): ExchangeAdapter;
@@ -607,6 +608,37 @@ export async function runPollingLoop(input: {
         crossed: result.crossed,
         calculatedAt,
       });
+
+      // Exit triggers for the active pair trade (SL / TP floor / time-stop).
+      // Failure-isolated: a trigger-eval error must never break the tick.
+      try {
+        const arcusAdapter = input.registry.get("arcus");
+        if (arcusAdapter.execution) {
+          await evaluateMetalTradeExitTriggers(
+            {
+              db: input.db,
+              config: input.config,
+              execution: arcusAdapter.execution,
+              notify: (text) => input.notifier.notifyUrgent(text),
+              notifyUrgent: (text) => input.notifier.notifyUrgent(text),
+              enqueue: (job) => input.executionQueue.enqueue(job),
+            },
+            {
+              crossed: result.crossed,
+              side: result.side,
+              goldPriceUsd: gold.priceUsd,
+              silverPriceUsd: silver.priceUsd,
+            },
+          );
+        }
+      } catch (error) {
+        console.error(
+          "Gold/silver exit trigger evaluation failed",
+          error instanceof Error
+            ? { tick, message: error.message }
+            : { tick, error },
+        );
+      }
       if (
         result.crossed &&
         result.side !== undefined &&
@@ -615,18 +647,30 @@ export async function runPollingLoop(input: {
           input.config.goldSilver.alertCooldownMs,
         )
       ) {
-        await input.notifier.notifyMetalRatioSignal({
-          side: result.side,
-          rsi: result.rsi,
-          rsiPeriod: input.config.goldSilver.rsiPeriod,
-          ratio: result.ratio,
-          goldPriceUsd: gold.priceUsd,
-          silverPriceUsd: silver.priceUsd,
-          tpMinNetUsd: input.config.goldSilver.tpMinNetUsd,
-          stopLossMarginPercent:
-            input.config.goldSilver.stopLossMarginPercent,
-          calculatedAt,
-        });
+        await input.notifier.notifyMetalRatioSignal(
+          {
+            side: result.side,
+            rsi: result.rsi,
+            rsiPeriod: input.config.goldSilver.rsiPeriod,
+            ratio: result.ratio,
+            goldPriceUsd: gold.priceUsd,
+            silverPriceUsd: silver.priceUsd,
+            tpMinNetUsd: input.config.goldSilver.tpMinNetUsd,
+            stopLossMarginPercent:
+              input.config.goldSilver.stopLossMarginPercent,
+            calculatedAt,
+          },
+          {
+            inline_keyboard: [
+              [
+                {
+                  text: "Open Trade",
+                  callback_data: `metaltrade:open:${result.side}`,
+                },
+              ],
+            ],
+          },
+        );
       }
     } catch (error) {
       console.error(
