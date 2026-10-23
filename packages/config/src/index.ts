@@ -155,11 +155,35 @@ export interface BotConfig {
     candleTimeframe: GoldSilverCandleTimeframe;
     /** GOLDSILVER_CANDLE_LIMIT: candles fetched per build (clamped 1..200). */
     candleLimit: number;
-    /** GOLDSILVER_TAKE_PROFIT_NET_USD: net USD take-profit target per trade,
-     * reserved for the future execution phase (> 0). */
-    takeProfitNetUsd: string;
     /** GOLDSILVER_ALERT_COOLDOWN_MS: global cooldown between ratio alerts. */
     alertCooldownMs: number;
+    /** GOLDSILVER_STOP_LOSS_MARGIN_PERCENT: net-PnL stop (percent of TOTAL
+     * margin, both legs) executed as immediate market close on both legs.
+     * 50 = the position is market-closed when net PnL <= -50% of
+     * 2 x OPEN_TRADE_MARGIN_USD. */
+    stopLossMarginPercent: number;
+    /** GOLDSILVER_TP_MIN_NET_USD: profit floor for the RSI-50 take-profit:
+     * the cross only closes the trade when net PnL >= estimated exit
+     * breakeven (fees) + this buffer. */
+    tpMinNetUsd: string;
+    /** GOLDSILVER_EXIT_REPRICE_INTERVAL_MS: dual-limit close repricing
+     * cadence for the not-yet-filled leg. */
+    exitRepriceIntervalMs: number;
+    /** GOLDSILVER_EXIT_SLIPPAGE_BUDGET_BPS: total slippage budget (basis
+     * points of the remaining notional) for the unfilled leg before the
+     * remainder goes to market. */
+    exitSlippageBudgetBps: number;
+    /** GOLDSILVER_EXIT_MAX_WAIT_MS: hard cap on the paired-close window
+     * before the remainder goes to market. */
+    exitMaxWaitMs: number;
+    /** GOLDSILVER_EXIT_MAX_REPRICES: reprice-count cap before the
+     * remainder goes to market. */
+    exitMaxReprices: number;
+    /** GOLDSILVER_TIME_STOP_HOURS: backstop while the RSI-50 profit floor
+     * is unmet — after this many hours from the completed hedge, the trade
+     * closes at market IF net PnL >= breakeven; a losing trade keeps
+     * running until the TP floor or the SL. */
+    timeStopHours: number;
   };
   logLevel: string;
 }
@@ -370,13 +394,39 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     1,
     200,
   );
-  const goldSilverTakeProfitNetUsd = parsePositiveDecimalString(
-    env.GOLDSILVER_TAKE_PROFIT_NET_USD ?? "1.0",
-    "GOLDSILVER_TAKE_PROFIT_NET_USD",
-  );
   const goldSilverAlertCooldownMs = parseNonNegativeInteger(
     env.GOLDSILVER_ALERT_COOLDOWN_MS ?? "3600000",
     "GOLDSILVER_ALERT_COOLDOWN_MS",
+  );
+  const goldSilverStopLossMarginPercent = parseClampedInteger(
+    env.GOLDSILVER_STOP_LOSS_MARGIN_PERCENT ?? "50",
+    "GOLDSILVER_STOP_LOSS_MARGIN_PERCENT",
+    1,
+    100,
+  );
+  const goldSilverTpMinNetUsd = parsePositiveDecimalString(
+    env.GOLDSILVER_TP_MIN_NET_USD ?? "10",
+    "GOLDSILVER_TP_MIN_NET_USD",
+  );
+  const goldSilverExitRepriceIntervalMs = parseNonNegativeInteger(
+    env.GOLDSILVER_EXIT_REPRICE_INTERVAL_MS ?? "2000",
+    "GOLDSILVER_EXIT_REPRICE_INTERVAL_MS",
+  );
+  const goldSilverExitSlippageBudgetBps = parsePositiveInteger(
+    env.GOLDSILVER_EXIT_SLIPPAGE_BUDGET_BPS ?? "40",
+    "GOLDSILVER_EXIT_SLIPPAGE_BUDGET_BPS",
+  );
+  const goldSilverExitMaxWaitMs = parsePositiveInteger(
+    env.GOLDSILVER_EXIT_MAX_WAIT_MS ?? "60000",
+    "GOLDSILVER_EXIT_MAX_WAIT_MS",
+  );
+  const goldSilverExitMaxReprices = parsePositiveInteger(
+    env.GOLDSILVER_EXIT_MAX_REPRICES ?? "8",
+    "GOLDSILVER_EXIT_MAX_REPRICES",
+  );
+  const goldSilverTimeStopHours = parsePositiveInteger(
+    env.GOLDSILVER_TIME_STOP_HOURS ?? "48",
+    "GOLDSILVER_TIME_STOP_HOURS",
   );
 
   return {
@@ -551,8 +601,14 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       rsiConfirmBand: goldSilverRsiConfirmBand,
       candleTimeframe: goldSilverCandleTimeframe,
       candleLimit: goldSilverCandleLimit,
-      takeProfitNetUsd: goldSilverTakeProfitNetUsd,
       alertCooldownMs: goldSilverAlertCooldownMs,
+      stopLossMarginPercent: goldSilverStopLossMarginPercent,
+      tpMinNetUsd: goldSilverTpMinNetUsd,
+      exitRepriceIntervalMs: goldSilverExitRepriceIntervalMs,
+      exitSlippageBudgetBps: goldSilverExitSlippageBudgetBps,
+      exitMaxWaitMs: goldSilverExitMaxWaitMs,
+      exitMaxReprices: goldSilverExitMaxReprices,
+      timeStopHours: goldSilverTimeStopHours,
     },
     logLevel: env.LOG_LEVEL ?? "info",
   };

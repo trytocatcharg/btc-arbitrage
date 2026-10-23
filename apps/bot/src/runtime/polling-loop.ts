@@ -622,7 +622,9 @@ export async function runPollingLoop(input: {
           ratio: result.ratio,
           goldPriceUsd: gold.priceUsd,
           silverPriceUsd: silver.priceUsd,
-          takeProfitNetUsd: input.config.goldSilver.takeProfitNetUsd,
+          tpMinNetUsd: input.config.goldSilver.tpMinNetUsd,
+          stopLossMarginPercent:
+            input.config.goldSilver.stopLossMarginPercent,
           calculatedAt,
         });
       }

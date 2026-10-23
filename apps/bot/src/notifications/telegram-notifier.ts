@@ -201,8 +201,8 @@ export function formatMetalRatioSignal(
     `Ratio (metal-equivalent): ${Number.isFinite(metalRatio) ? metalRatio.toFixed(1) : signal.ratio}`,
     `GLD-USD mark: $${formatUsdAmount(signal.goldPriceUsd)}`,
     `SLV-USD mark: $${formatUsdAmount(signal.silverPriceUsd)}`,
-    `Future execution target: $${formatUsdAmount(signal.takeProfitNetUsd)} net TP`,
-    "Note: v1 is monitor-only — no orders are placed.",
+    `Plan: TP when RSI returns to 50 with net >= breakeven + $${formatUsdAmount(signal.tpMinNetUsd)} · SL at -${signal.stopLossMarginPercent}% margin (market)`,
+    "Entry on confirm: passive limit on GLD + immediate market hedge on SLV.",
   ].join("\n");
 }
 

@@ -1,6 +1,6 @@
 import type { MetalRatioSide, TradingSignal } from '@btc-arbitrage/domain';
 
-/** Payload for a gold/silver ratio RSI-cross alert (v1 monitor-only). */
+/** Payload for a gold/silver ratio RSI-cross alert. */
 export interface MetalRatioSignalNotification {
   side: MetalRatioSide;
   rsi: string;
@@ -9,8 +9,9 @@ export interface MetalRatioSignalNotification {
   ratio: string;
   goldPriceUsd: string;
   silverPriceUsd: string;
-  /** Configured net TP target reserved for the future execution phase. */
-  takeProfitNetUsd: string;
+  /** Configured execution gates, shown so the operator sees the live plan. */
+  tpMinNetUsd: string;
+  stopLossMarginPercent: number;
   calculatedAt: Date;
 }
 
