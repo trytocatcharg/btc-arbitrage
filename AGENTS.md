@@ -240,6 +240,62 @@ Entry legs are routed with this priority (`docs/open-trade-routing.md` is the pe
 
 Maker = limit order, taker = market order. Short leg goes to the higher-bid venue; long leg to the other side.
 
+### Gold/silver ratio strategy (GOLD/SILVER pair)
+
+Arcus-only pairs strategy on the GLD-USD / SLV-USD perp ratio (docs in `odd/tasks/gold-silver-ratio.md`).
+
+- **Activation**: `GOLD/SILVER` is a pseudo-pair in the `TRADING_PAIRS` catalog
+  (domain), selected from the Telegram 🪙 Pairs panel. When
+  `config.btcSymbol === GOLDSILVER_SYMBOL` the polling loop runs ONLY the
+  metal-ratio pass (the BTC spread pass is skipped wholesale). No env flag —
+  the pair selection is the single switch. Arcus-only by operator decision:
+  Extended/RISEx never resolve GOLDSILVER, and every `btcSymbol` consumer
+  guards it (signal pass branch, position-reconciler scan skip, boot
+  execution preflight skip, `pair:apply:`/leverage preflight skips, stale
+  `open:` refusal).
+- **Monitor**: RSI(14) (Wilder) of the ratio, computed on candle closes of
+  `GOLDSILVER_CANDLE_TIMEFRAME` (default `1h`). Live ticks are bucketed by
+  timeframe — the forming bucket refreshes per tick and commits ONE close
+  when the bucket rolls (per-tick appends would degrade the RSI into
+  per-poll noise). Warmup at (re)activation fetches Arcus
+  `GET /v1/candles` (both markets, aligned by openTime). Alerts on RSI
+  crosses of 50 with confirmation band (`GOLDSILVER_RSI_CONFIRM_BAND`),
+  hysteresis, and `GOLDSILVER_ALERT_COOLDOWN_MS`. One `ratio_snapshots` row
+  per tick (migration 0006).
+- **Execution (manual only — operator decision 2026-10-23: no
+  auto-confirm)**: one-click from the alert's `Open Trade` button
+  (`metaltrade:open:` callback → serial execution queue). Entry: passive
+  post-only ALO limit on GLD (reprice loop, cancel-race on timeout) +
+  immediate market IOC hedge on SLV per fill increment. Sizing reuses
+  `OPEN_TRADE_MARGIN_USD` (per leg) × `LEVERAGE`; dollar-neutral legs
+  (direction derived from legs: the gold leg's base qty is always the
+  smaller). Exits: **TP** = RSI crosses back to the opposite side AND net
+  PnL ≥ exit-fee breakeven + `GOLDSILVER_TP_MIN_NET_USD` (default $10) →
+  paired dual-limit close (reduce-only GTT at the touch, reprice every
+  `GOLDSILVER_EXIT_REPRICE_INTERVAL_MS`); **time-stop**
+  `GOLDSILVER_TIME_STOP_HOURS` (48h) at market when ≥ breakeven;
+  **SL** net ≤ -`GOLDSILVER_STOP_LOSS_MARGIN_PERCENT` (50) of TOTAL margin
+  → immediate market both legs. Paired-close fallback: first of 40 bps
+  slippage / 60 s / 8 reprices (`GOLDSILVER_EXIT_*`) → market the
+  remainder. Reuses `trades`/`trade_legs` (symbol `GOLDSILVER`, both legs
+  `arcus`) — no schema change beyond migration 0006.
+- **`/ratio` command**: Telegram photo of a TradingView-style chart
+  (ratio candles + RSI panel) via the Python renderer
+  `apps/bot/src/metal-ratio/metal-ratio-chart.py` (JSON stdin → PNG
+  stdout, palette ported from the operator's wolfe-wave project). The bot
+  build copies the `.py` into `dist/`; the runtime image needs `python3` +
+  `Pillow` (only `/ratio` uses it — a missing Python degrades to a
+  friendly error, never a crash).
+
+## Working principles
+
+- **If a requirement is unclear or partially specified, ASK — do not
+  invent** (operator rule). Guess-then-implement is a defect: one focused
+  question up front beats a wrong implementation delivered with confidence.
+  Same for unexplained production behavior: reproduce/diagnose from
+  evidence first, and propose behavior changes instead of silently
+  "fixing" them.
+
 ## Testing strategy
 
 - Tests use Node.js built-in `node:test` and `node:assert/strict`, run via `tsx` importing source TypeScript directly.

@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "yarn run -T tsx src/main.ts",
     "start": "node dist/main.js",
-    "build": "yarn run -T tsc -p tsconfig.json",
+    "build": "yarn run -T tsc -p tsconfig.json && mkdir -p dist/metal-ratio && cp src/metal-ratio/metal-ratio-chart.py dist/metal-ratio/",
     "typecheck": "yarn run -T tsc -b tsconfig.json --pretty false",
     "lint": "yarn run -T tsc -b tsconfig.json --pretty false",
     "test": "node --import tsx --test test/**/*.test.ts",

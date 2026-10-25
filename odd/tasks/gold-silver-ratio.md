@@ -49,15 +49,53 @@ ratio snapshots. No execution in v1 (execution design is agreed but deferred).
   openTime, string OHLCV, isFinal on in-progress bucket; params
   market/timeframe/from/to.
 
-## Deferred (agreed, not built)
-- Execution: limit entry one leg + market hedge other (bot pattern).
-  **Sizing reuses the existing `OPEN_TRADE_MARGIN_USD`
-  (`config.openTrade.marginUsd`, per leg) and `LEVERAGE` (`config.leverage`)** —
-  the same runtime-adjustable /config variables as the BTC strategy, no
-  gold/silver-specific copies.
-- Close: net-profit target = `GOLDSILVER_TAKE_PROFIT_NET_USD` (default $1.0).
-  **TP/SL protective orders deferred to a later iteration** (operator decision
-  2026-10-23); the v1 close is the net PnL target only.
+## Execution phase (operator decisions 2026-10-23, locked)
+- **Entry**: one-click from the RSI-cross alert (Open Trade button, execution queue),
+  mirroring the BTC flow. Passive post-only LIMIT on GLD + immediate MARKET
+  hedge on SLV. Sizing reuses `OPEN_TRADE_MARGIN_USD` (per leg) x `LEVERAGE`
+  (notional per leg); dollar-neutral legs. Preflight: arcus execution adapter.
+- **TP**: RSI(14) of the ratio returns across 50 AND net PnL >= estimated
+  exit breakeven (fees) + `GOLDSILVER_TP_MIN_NET_USD` (default $10) ->
+  paired dual-limit close (reduce-only, top-of-book + improve ticks).
+- **Floor unmet**: `GOLDSILVER_TIME_STOP_HOURS` (48h) after the completed
+  hedge -> market close if net >= breakeven; a losing trade keeps running to
+  TP floor or SL.
+- **SL**: net PnL <= -`GOLDSILVER_STOP_LOSS_MARGIN_PERCENT` (50) of TOTAL
+  margin (2 x marginUsd) -> IMMEDIATE market close on both legs.
+- **Paired-close mechanics**: when one leg fills, the other is repriced every
+  `GOLDSILVER_EXIT_REPRICE_INTERVAL_MS` (2s) toward the new top of book;
+  first of (slippage budget `GOLDSILVER_EXIT_SLIPPAGE_BUDGET_BPS` 40bps /
+  `GOLDSILVER_EXIT_MAX_WAIT_MS` 60s / `GOLDSILVER_EXIT_MAX_REPRICES` 8) ->
+  market the remainder. If even market fails -> trade `unhedged` + urgent
+  notify (existing emergency contract).
+- **Persistence**: reuse `trades`/`trade_legs` (symbol GOLDSILVER, both legs
+  exchange arcus; leg market derived from side: short leg = GLD-USD, long leg
+  = SLV-USD for short_gold_long_silver, reversed otherwise). No schema change.
+- Fees: real per-fill fees from Arcus `/v1/fills` (adapter already recovers
+  them); funding ignored in v1 net (noted as follow-up).
+
+## Tasks (execution phase)
+- [x] Spec + config vars (GOLDSILVER_TP_MIN_NET_USD, _STOP_LOSS_MARGIN_PERCENT,
+  _EXIT_*, _TIME_STOP_HOURS; GOLDSILVER_TAKE_PROFIT_NET_USD removed as
+  superseded). Typecheck green.
+- [x] Metal-trade service: entry limit+market state machine
+  (metal-trade-service.ts: createMetalTrade / executeMetalTradeEntry /
+  closeMetalTrade / finalizeClosedTrade)
+- [x] Monitor de PnL + triggers (metal-trade-monitor.ts:
+  evaluateMetalTradeExitTriggers — wired per ratio tick in polling-loop)
+- [x] Paired dual-limit close + repricing + market fallback
+  (40bps/60s/8 budget, atomic open->closing claim, stale-closing recovery
+  owns failures)
+- [x] Telegram: Open Trade button on the ratio alert (`metaltrade:open:`
+  one-click, execution queue) + state notices
+- [x] Verify: typecheck + build:bot green (live dry-run smoke pending
+  operator deploy with DB + Arcus credentials)
+
+## Deferred (post-execution)
+- **Auto-confirm/auto-trade: REJECTED by operator (2026-10-23)** — entry stays
+  manual (alert button only). Do not re-propose unless asked.
+- TP/SL protective resting orders per leg (operator: "mas adelante").
+- Funding-fee accrual in net PnL.
 - /lastsignal-style ratio history command.
 - RISEx XAU/XAG metal-native ratio source.
-- Arcus candle WebSocket (REST poll is fine at tick cadence).
+- Arcus candle WebSocket.

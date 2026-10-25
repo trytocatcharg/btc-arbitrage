@@ -1,7 +1,7 @@
 import type { BotConfig } from "@btc-arbitrage/config";
 import type { getDb } from "@btc-arbitrage/db";
-import { signals, tradePreviews } from "@btc-arbitrage/db";
-import { eq } from "drizzle-orm";
+import { signals, tradePreviews, ratioSnapshots } from "@btc-arbitrage/db";
+import { desc, eq } from "drizzle-orm";
 import {
   findTradingPair,
   GOLD_SILVER_SYMBOL,
@@ -61,6 +61,8 @@ import {
   createMetalTrade,
   executeMetalTradeEntry,
 } from "../metal-ratio/metal-trade-service.js";
+import { createArcusMarketDataClient } from "../exchanges/arcus/arcus-client.js";
+import { renderMetalRatioChart } from "../metal-ratio/metal-ratio-chart.js";
 import {
   getUntrackedPosition,
   scanUntrackedPositions,
@@ -133,6 +135,10 @@ const AVAILABLE_COMMANDS = [
   {
     command: "lastsignal",
     description: "Last 10 signals (local time)",
+  },
+  {
+    command: "ratio",
+    description: "Gold/silver ratio chart + RSI (GOLD/SILVER pair)",
   },
 ] as const;
 
@@ -336,6 +342,11 @@ export class TelegramCommandPoller {
             inline_keyboard: [VOLUME_VIEW_BUTTONS],
           },
         );
+        return;
+      }
+
+      if (isTelegramCommand(text, "ratio")) {
+        await this.handleRatioChartCommand();
         return;
       }
 
@@ -1712,6 +1723,81 @@ export class TelegramCommandPoller {
   private async buildFillSummary(token: string): Promise<string> {
     return buildTradeOpenedSummary(this.db, token);
   }
+  /** /ratio — renders the gold/silver ratio candle chart with the RSI
+   * panel from live Arcus candle data and sends it as a photo. Only
+   * available while GOLD/SILVER is the active pair. */
+  private async handleRatioChartCommand(): Promise<void> {
+    if (this.config.btcSymbol !== GOLD_SILVER_SYMBOL) {
+      await this.sendMessage(
+        "⛔ /ratio is only available while GOLD/SILVER is the active pair.\n" +
+          "Switch it from the 🪙 Pairs panel (/config → Pairs).",
+      );
+      return;
+    }
+    try {
+      const client = createArcusMarketDataClient(this.config.arcus);
+      const live = (
+        await this.db
+          .select()
+          .from(ratioSnapshots)
+          .orderBy(desc(ratioSnapshots.id))
+          .limit(1)
+      )[0];
+      const chart = await renderMetalRatioChart({
+        client,
+        timeframe: this.config.goldSilver.candleTimeframe,
+        candleLimit: 60,
+        rsiPeriod: this.config.goldSilver.rsiPeriod,
+        live: live
+          ? {
+              rsi: live.rsi ? String(live.rsi) : undefined,
+              side: (live.side as MetalRatioSide | null) ?? undefined,
+              ratio: String(live.ratio),
+              goldPriceUsd: String(live.goldPriceUsd),
+              silverPriceUsd: String(live.silverPriceUsd),
+              calculatedAt: live.calculatedAt,
+            }
+          : undefined,
+      });
+      const liveRsi = live?.rsi ? Number(live.rsi).toFixed(2) : "n/d";
+      const liveRatio = live ? Number(live.ratio).toFixed(4) : chart.lastClose;
+      const metalEquiv = (Number(liveRatio) * 10).toFixed(1);
+      await this.sendPhoto(
+        chart.png,
+        `GOLDSILVER ratio ${liveRatio} (≈${metalEquiv} metal-equiv) · ` +
+          `RSI(${this.config.goldSilver.rsiPeriod}) ${liveRsi} · ` +
+          `${this.config.goldSilver.candleTimeframe} candles\n` +
+          (live?.side
+            ? `Side: ${live.side === "short_gold_long_silver" ? "SHORT GOLD / LONG SILVER" : "LONG GOLD / SHORT SILVER"}`
+            : "Side: — (RSI inside the dead zone)") +
+          (live?.goldPriceUsd
+            ? ` · GLD $${Number(live.goldPriceUsd).toFixed(2)} · SLV $${Number(live.silverPriceUsd).toFixed(2)}`
+            : ""),
+      );
+    } catch (error) {
+      await this.sendMessage(
+        `❌ Could not render the ratio chart: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  private async sendPhoto(photo: Buffer, caption: string): Promise<void> {
+    const form = new FormData();
+    form.append("chat_id", String(normalizeTelegramChatId(this.config.telegram.chatId!)));
+    form.append("caption", caption.slice(0, 1024));
+    form.append("photo", new Blob([photo], { type: "image/png" }), "ratio.png");
+    const response = await this.fetchWithTimeout(
+      `https://api.telegram.org/bot${this.config.telegram.botToken}/sendPhoto`,
+      {
+        method: "POST",
+        body: form,
+      },
+    );
+    if (!response.ok) {
+      throw new Error(`Telegram sendPhoto failed with HTTP ${response.status}`);
+    }
+  }
+
   private async sendMessage(
     text: string,
     replyMarkup?: unknown,
