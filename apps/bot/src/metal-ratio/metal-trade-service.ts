@@ -422,6 +422,7 @@ export async function executeMetalTradeEntry(
 
   let orderId: string | undefined;
   let lastRepriceAt = 0;
+  let lastRepriceNotifyAt = 0;
   let postOnlyRetries = 0;
   let restingPrice = 0;
   let goldFillPrice = 0;
@@ -478,6 +479,16 @@ export async function executeMetalTradeEntry(
       .update(tradeLegs)
       .set({ status: "submitted", entryOrderId: orderId })
       .where(eq(tradeLegs.id, goldLegRow.id));
+    await ctx
+      .notify(
+        `⏳ Trade #${tradeId}: limit ${goldLeg.side === "short" ? "SELL" : "BUY"} resting on GLD at $${formatDecimal(restingPrice, 2)} ` +
+          `(${formatDecimal(progress.targetQty, 6)} GLD). Hedging each fill on SLV at market. ` +
+          `Timeout in ${Math.round(ctx.config.openTrade.limitTimeoutMs / 1000)}s.`,
+      )
+      // Guarded like every sibling notification in this flow: a Telegram
+      // outage must never abort the fill-monitoring loop that owns the
+      // resting exchange order (review finding R3-unguarded-entry-notify).
+      .catch(() => undefined);
 
     while (Date.now() < deadline) {
       const order = await ctx.execution
@@ -526,6 +537,17 @@ export async function executeMetalTradeEntry(
             try {
               orderId = await placeLimit(nextPrice);
               postOnlyRetries = 0;
+              // Reprice feedback, throttled: one notice per 30 s so a slow
+              // book does not spam the chat (the order state is the
+              // source of truth; the ticker is informational).
+              if (Date.now() - lastRepriceNotifyAt >= 30_000) {
+                lastRepriceNotifyAt = Date.now();
+                await ctx
+                  .notify(
+                    `🔁 Trade #${tradeId}: GLD limit not filled — repriced to $${formatDecimal(nextPrice, 2)} (resting).`,
+                  )
+                  .catch(() => undefined);
+              }
             } catch (error) {
               if (
                 isPostOnlyRejection(
@@ -643,6 +665,12 @@ export async function executeMetalTradeEntry(
     progress.silverFilledQty += silverQty;
     progress.goldFilledQty += incrementGoldQty;
     progress.entryFeeUsd += fee;
+    await ctx
+      .notify(
+        `⚖️ Trade #${tradeId} hedge: +${formatDecimal(incrementGoldQty, 6)} GLD @ $${formatDecimal(goldPriceUsd, 2)} → ${silverLeg.side === "short" ? "sold" : "bought"} ${formatDecimal(silverQty, 4)} SLV @ $${formatDecimal(fillPrice, 2)} (fee $${formatDecimal(fee, 4)}). ` +
+          `Gold leg ${formatDecimal(progress.goldFilledQty, 6)}/${formatDecimal(progress.targetQty, 6)} filled.`,
+      )
+      .catch(() => undefined);
     await ctx.db
       .update(tradeLegs)
       .set({
@@ -765,34 +793,56 @@ export async function executeMetalTradeEntry(
   }
 
   async function abortEntry(reason: string): Promise<void> {
-    // Emergency: market-close any covered SILVER quantity (the hedge
-    // leg), then fail the trade.
-    if (progress.silverFilledQty > 1e-9) {
+    // Verified emergency closes on BOTH covered legs. Trade #1319: the
+    // old fire-and-forget close left live positions on Arcus after the
+    // trade was marked failed (Arcus order placement is async — a 202 ACK
+    // is not a fill), and the gold leg was never closed at all.
+    // Cancel the resting gold limit first, then close each covered leg
+    // and VERIFY the close order reached a terminal state.
+    if (orderId) {
+      await ctx.execution.cancelExecutionOrder(orderId).catch(() => undefined);
+    }
+    const failures: string[] = [];
+    const closeJobs = [
+      {
+        market: SILVER_MARKET,
+        side: silverLeg.side,
+        qty: progress.silverFilledQty,
+      },
+      {
+        market: GOLD_MARKET,
+        side: goldLeg.side,
+        qty: progress.goldFilledQty,
+      },
+    ];
+    for (const job of closeJobs) {
+      if (job.qty <= 1e-9) continue;
       try {
-        await ctx.execution.submitExecutionOrder({
-          clientOrderId: `mt${tradeId}er${Date.now().toString(36)}`,
-          symbol: SILVER_MARKET,
-          side: silverLeg.side === "short" ? "sell" : "buy",
+        const order = await ctx.execution.submitExecutionOrder({
+          clientOrderId: `mt${tradeId}er${job.market === GOLD_MARKET ? "g" : "s"}${Date.now().toString(36)}`,
+          symbol: job.market,
+          side: job.side === "short" ? "buy" : "sell",
           type: "market",
-          quantityBase: formatDecimal(progress.silverFilledQty, 8),
+          quantityBase: formatDecimal(job.qty, 8),
           reduceOnly: true,
         });
+        const terminal = await pollOrderTerminal(ctx, order.id);
+        if (terminal.status !== "filled") {
+          failures.push(`${job.market}: close order ended ${terminal.status}`);
+        }
       } catch (error) {
-        console.error("Metal trade emergency close failed", {
-          tradeId,
-          message: error instanceof Error ? error.message : String(error),
-        });
+        failures.push(
+          `${job.market}: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
     }
+    // ALL legs are cancelled on a failed entry — the hedge leg is 'open'
+    // by abort time and must not linger as a phantom open leg (trade
+    // #1319's DB/exchange mismatch).
     await ctx.db
       .update(tradeLegs)
       .set({ status: "cancelled" })
-      .where(
-        and(
-          eq(tradeLegs.tradeId, tradeId),
-          inArray(tradeLegs.status, ["planned", "submitted"]),
-        ),
-      );
+      .where(eq(tradeLegs.tradeId, tradeId));
     await transitionTrade(
       ctx,
       tradeId,
@@ -801,10 +851,14 @@ export async function executeMetalTradeEntry(
       `metal entry aborted: ${reason}`,
       { status: "failed", closedAt: new Date() },
     );
+    const coveredNote =
+      progress.silverFilledQty > 1e-9 || progress.goldFilledQty > 1e-9
+        ? ` Covered quantity was market-closed (SLV ${formatDecimal(progress.silverFilledQty, 4)}, GLD ${formatDecimal(progress.goldFilledQty, 6)}).`
+        : "";
     await ctx.notifyUrgent(
-      `🥇🥈 Gold/silver trade #${tradeId} FAILED at entry: ${reason}.` +
-        (progress.silverFilledQty > 1e-9
-          ? ` Covered quantity (${formatDecimal(progress.silverFilledQty, 8)} SLV) was market-closed.`
+      `🥇🥈 Gold/silver trade #${tradeId} FAILED at entry: ${reason}.${coveredNote}` +
+        (failures.length > 0
+          ? `\n🚨 UNVERIFIED CLOSES — POSITIONS MAY STILL BE OPEN ON ARCUS: ${failures.join("; ")}. MANUAL ACTION REQUIRED.`
           : ""),
     );
   }
@@ -845,6 +899,14 @@ export async function closeMetalTrade(
     { status: "closing" },
   );
   if (!claimed) return; // SL-vs-TP race: exactly one owner wins.
+  await ctx
+    .notify(
+      `⏳ Closing gold/silver trade #${tradeId} (${reason}, mode: ${mode}). ` +
+        (mode === "limit"
+          ? "Dual limits resting on both legs; the unfilled leg reprices toward the book and falls back to market if the budget is exhausted."
+          : "Market close on both legs."),
+    )
+    .catch(() => undefined);
 
   try {
     const trade = (
@@ -1001,6 +1063,11 @@ export async function closeMetalTrade(
           });
           if (baselinePrice === 0) baselinePrice = exitPrice;
           remaining.delete(legId);
+          await ctx
+            .notify(
+              `✅ Trade #${tradeId} close: ${leg.market} leg filled at $${formatDecimal(exitPrice, 2)}${remaining.size > 0 ? " — managing the other leg now" : ""}.`,
+            )
+            .catch(() => undefined);
           continue;
         }
         if (order.status === "cancelled" || order.status === "rejected") {
@@ -1052,6 +1119,11 @@ export async function closeMetalTrade(
           slippageConsumedBps(leg.side, baselinePrice, order) >=
             ctx.config.goldSilver.exitSlippageBudgetBps;
         if (budgetExhausted) {
+          await ctx
+            .notify(
+              `⚠️ Trade #${tradeId} close: ${leg.market} limit exhausted the budget (${ctx.config.goldSilver.exitSlippageBudgetBps}bps / ${Math.round(ctx.config.goldSilver.exitMaxWaitMs / 1000)}s / ${ctx.config.goldSilver.exitMaxReprices} reprices) — closing the remainder at MARKET.`,
+            )
+            .catch(() => undefined);
           const marketOrder = await marketRemainder(ctx, tradeId, leg, qtyLeft);
           exits.push({
             legId,

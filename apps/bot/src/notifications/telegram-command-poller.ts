@@ -1769,13 +1769,20 @@ export class TelegramCommandPoller {
           inline_keyboard: [
             [
               {
-                text: "⭐ Open LONG GOLD / SHORT SILVER",
+                // The star marks ONLY the strategy-suggested side (RSI vs 50
+                // with the confirmation band); the other button stays
+                // available for a manual override.
+                text:
+                  (side === "long_gold_short_silver" ? "⭐ " : "") +
+                  "Open LONG GOLD / SHORT SILVER",
                 callback_data: "metaltrade:open:long_gold_short_silver",
               },
             ],
             [
               {
-                text: "⭐ Open SHORT GOLD / LONG SILVER",
+                text:
+                  (side === "short_gold_long_silver" ? "⭐ " : "") +
+                  "Open SHORT GOLD / LONG SILVER",
                 callback_data: "metaltrade:open:short_gold_long_silver",
               },
             ],
