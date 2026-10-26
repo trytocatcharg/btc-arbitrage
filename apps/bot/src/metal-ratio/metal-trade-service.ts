@@ -642,14 +642,22 @@ export async function executeMetalTradeEntry(
       type: "market",
       quantityBase: formatDecimal(silverQty, 8),
     });
-    // Real per-fill fees come back on the polled order record.
-    const confirmed = await ctx.execution
-      .getExecutionOrder(hedge.id)
-      .catch(() => hedge);
+    // The fill price MUST be real: a single immediate read races Arcus's
+    // async fill reporting (trade #1320: averageFillPriceUsd was absent,
+    // the leg entry was recorded as $0.00, and the disaster stop computed
+    // an invalid $0 trigger — rejected by the exchange). Poll until the
+    // order reports a filled average price; abort the entry if it never
+    // does (a corrupt entry price poisons VWAP, PnL triggers, and stops).
+    const confirmed = await pollFilledOrder(ctx, hedge.id);
     const fillPrice = parseDecimal(
       confirmed.averageFillPriceUsd ?? "0",
       "hedgeFill",
     );
+    if (!(fillPrice > 0)) {
+      throw new Error(
+        `Hedge order ${hedge.id} filled without an average price`,
+      );
+    }
     const fee = confirmed.feeUsd ? parseDecimal(confirmed.feeUsd, "fee") : 0;
     const prevFee = silverLegRow.entryFeeUsd
       ? parseDecimal(String(silverLegRow.entryFeeUsd), "fee0")
@@ -724,40 +732,73 @@ export async function executeMetalTradeEntry(
         plan.side === "short"
           ? plan.entry * (1 + fraction)
           : plan.entry * (1 - fraction);
-      try {
-        const order = await ctx.execution.submitExecutionOrder({
-          clientOrderId: `mt${tradeId}sl${plan.row.id}`,
-          symbol: plan.market,
-          side: plan.side === "short" ? "buy" : "sell",
-          type: "stop-market",
-          quantityBase: formatDecimal(plan.qty, 8),
-          triggerPriceUsd: formatDecimal(trigger, 4),
-          reduceOnly: true,
-        });
-        const existing =
-          plan.row.raw &&
-          typeof plan.row.raw === "object" &&
-          !Array.isArray(plan.row.raw)
-            ? (plan.row.raw as Record<string, unknown>)
-            : {};
-        await ctx.db
-          .update(tradeLegs)
-          .set({ raw: { ...existing, slOrderId: order.id } })
-          .where(eq(tradeLegs.id, plan.row.id));
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : String(error);
+      // Place AND verify: Arcus acknowledges placement asynchronously (202
+      // = received, not resting) — a stop rejected after the ACK is
+      // invisible unless we read the order back (the silver SL of the
+      // first disaster-stop trade silently never rested). "Resting" for a
+      // stop = new/open/untriggered; rejected/cancelled means placement
+      // failed. One retry covers transient races; persistent failure is
+      // surfaced loud with whatever the exchange told us.
+      const restingStates = new Set(["new", "open", "untriggered"]);
+      const placeAndVerify = async (): Promise<
+        { failure?: string; orderId?: string }
+      > => {
+        try {
+          const order = await ctx.execution.submitExecutionOrder({
+            clientOrderId: `mt${tradeId}sl${plan.row.id}`,
+            symbol: plan.market,
+            side: plan.side === "short" ? "buy" : "sell",
+            type: "stop-market",
+            quantityBase: formatDecimal(plan.qty, 8),
+            triggerPriceUsd: formatDecimal(trigger, 4),
+            reduceOnly: true,
+          });
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            await sleep(2_000);
+            const state = await ctx.execution
+              .getExecutionOrder(order.id)
+              .catch(() => null);
+            if (!state) continue;
+            if (restingStates.has(state.status)) return { orderId: order.id };
+            if (state.status === "rejected" || state.status === "cancelled") {
+              return { failure: `order ${order.id} ended ${state.status}` };
+            }
+          }
+          // Still pending after ~6 s: treat as resting (Arcus ACK latency).
+          return { orderId: order.id };
+        } catch (error) {
+          return {
+            failure: error instanceof Error ? error.message : String(error),
+          };
+        }
+      };
+      let result = await placeAndVerify();
+      if (result.failure) result = await placeAndVerify();
+      if (result.failure || !result.orderId) {
+        const failure = result.failure ?? "unknown placement failure";
         console.error("Metal trade disaster stop placement failed", {
           tradeId,
           legId: plan.row.id,
           market: plan.market,
-          message,
+          message: failure,
         });
         await ctx.notifyUrgent(
-          `⚠️ Gold/silver trade #${tradeId}: disaster stop placement FAILED for ${plan.market} (${message}). ` +
-            "The leg has no exchange-resting protection; the bot-driven SL still applies while the bot is alive.",
+          `🚨 Gold/silver trade #${tradeId}: DISASTER STOP MISSING on ${plan.market} (${failure}). ` +
+            "The leg has NO exchange-resting protection; the bot-driven SL still applies while the bot is alive. " +
+            "Check Arcus order history for the rejection reason and consider a manual stop.",
         );
+        continue;
       }
+      const existing =
+        plan.row.raw &&
+        typeof plan.row.raw === "object" &&
+        !Array.isArray(plan.row.raw)
+          ? (plan.row.raw as Record<string, unknown>)
+          : {};
+      await ctx.db
+        .update(tradeLegs)
+        .set({ raw: { ...existing, slOrderId: result.orderId } })
+        .where(eq(tradeLegs.id, plan.row.id));
     }
   }
 
@@ -1217,6 +1258,31 @@ function slippageConsumedBps(
   const worse =
     legSide === "short" ? reference - baselinePrice : baselinePrice - reference;
   return Math.max(0, (worse / baselinePrice) * 10_000);
+}
+
+/** Poll an order until it reports FILLED with an average fill price.
+ * Arcus fills report asynchronously; a single read can precede the fill
+ * data. Bounded: ~15 s, then throws (the caller aborts the entry with
+ * verified closes rather than recording a corrupt price). */
+async function pollFilledOrder(
+  ctx: MetalTradeContext,
+  orderId: string,
+): Promise<ExecutionOrder> {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const order = await ctx.execution
+      .getExecutionOrder(orderId)
+      .catch(() => null);
+    if (order) {
+      if (order.status === "filled" && order.averageFillPriceUsd) {
+        return order;
+      }
+      if (order.status === "cancelled" || order.status === "rejected") {
+        throw new Error(`Hedge order ${orderId} ended ${order.status}`);
+      }
+    }
+    await sleep(500);
+  }
+  throw new Error(`Hedge order ${orderId} did not report a fill in time`);
 }
 
 async function marketRemainder(

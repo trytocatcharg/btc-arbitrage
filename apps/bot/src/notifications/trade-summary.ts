@@ -12,6 +12,15 @@ type BotDatabase = Awaited<ReturnType<typeof getDb>>;
 type TradeRow = typeof trades.$inferSelect;
 type TradeLegRow = typeof tradeLegs.$inferSelect;
 
+/** Per-leg market symbol persisted in the leg's raw JSON (metal-ratio
+ * trades: the trade symbol is the GOLDSILVER pseudo-pair, not resolvable
+ * by any exchange). Falls back to the trade-level symbol. */
+function readLegMarket(raw: unknown): string | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const market = (raw as Record<string, unknown>).market;
+  return typeof market === "string" && market.length > 0 ? market : undefined;
+}
+
 export interface ExchangeRegistryLike {
   get(id: string): ExchangeAdapter;
 }
@@ -275,10 +284,10 @@ async function buildTradeSummary(
 
   const [longQuote, shortQuote] = await Promise.all([
     longLegRow
-      ? fetchCurrentQuote(registry, trade, longLegRow.exchangeId, quoteCache)
+      ? fetchCurrentQuote(registry, trade, longLegRow, quoteCache)
       : Promise.resolve<QuoteError>({ error: "Missing long leg row" }),
     shortLegRow
-      ? fetchCurrentQuote(registry, trade, shortLegRow.exchangeId, quoteCache)
+      ? fetchCurrentQuote(registry, trade, shortLegRow, quoteCache)
       : Promise.resolve<QuoteError>({ error: "Missing short leg row" }),
   ]);
 
@@ -337,10 +346,12 @@ async function buildTradeSummary(
 async function fetchCurrentQuote(
   registry: ExchangeRegistryLike,
   trade: TradeRow,
-  exchangeId: string,
+  legRow: TradeLegRow,
   quoteCache: Map<string, Promise<QuoteSnapshot | QuoteError>>,
 ): Promise<QuoteSnapshot | QuoteError> {
-  const cacheKey = `${exchangeId}|${trade.symbol}|${trade.marketType}|${trade.priceSource}`;
+  const legSymbol = readLegMarket(legRow.raw) ?? trade.symbol;
+  const exchangeId = legRow.exchangeId;
+  const cacheKey = `${exchangeId}|${legSymbol}|${trade.marketType}|${trade.priceSource}`;
   const cached = quoteCache.get(cacheKey);
   if (cached) return cached;
 
@@ -348,7 +359,7 @@ async function fetchCurrentQuote(
     try {
       const adapter = registry.get(exchangeId);
       const snapshot = await adapter.getPriceSnapshot({
-        symbol: trade.symbol,
+        symbol: legSymbol,
         marketType: trade.marketType as MarketType,
         priceSource: trade.priceSource as PriceSource,
       });
