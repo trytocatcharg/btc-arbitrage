@@ -1,12 +1,14 @@
 import type { BotConfig } from "@btc-arbitrage/config";
 import type { getDb } from "@btc-arbitrage/db";
-import { signals, tradePreviews, ratioSnapshots } from "@btc-arbitrage/db";
-import { desc, eq } from "drizzle-orm";
+import { signals, tradePreviews } from "@btc-arbitrage/db";
+import { eq } from "drizzle-orm";
 import {
   findTradingPair,
   GOLD_SILVER_SYMBOL,
   parseDecimal,
   TRADING_PAIRS,
+  computeRsi,
+  rsiToSide,
   type MetalRatioSide,
 } from "@btc-arbitrage/domain";
 import {
@@ -61,8 +63,8 @@ import {
   createMetalTrade,
   executeMetalTradeEntry,
 } from "../metal-ratio/metal-trade-service.js";
-import { createArcusMarketDataClient } from "../exchanges/arcus/arcus-client.js";
 import { renderMetalRatioChart } from "../metal-ratio/metal-ratio-chart.js";
+import { loadYahooRatioBuckets } from "../metal-ratio/yahoo-metals-client.js";
 import {
   getUntrackedPosition,
   scanUntrackedPositions,
@@ -1723,9 +1725,11 @@ export class TelegramCommandPoller {
   private async buildFillSummary(token: string): Promise<string> {
     return buildTradeOpenedSummary(this.db, token);
   }
-  /** /ratio — renders the gold/silver ratio candle chart with the RSI
-   * panel from live Arcus candle data and sends it as a photo. Only
-   * available while GOLD/SILVER is the active pair. */
+  /** /ratio — renders the GOLDSILVER ratio candle chart + RSI panel from
+   * Yahoo futures data (GC=F/SI=F ≈ TVC:GOLDSILVER at ~99.6%) and sends it
+   * as a photo with one-click open buttons for both directions plus the
+   * strategy's suggested side (RSI vs 50 with the configured band).
+   * Only available while GOLD/SILVER is the active pair. */
   private async handleRatioChartCommand(): Promise<void> {
     if (this.config.btcSymbol !== GOLD_SILVER_SYMBOL) {
       await this.sendMessage(
@@ -1735,44 +1739,48 @@ export class TelegramCommandPoller {
       return;
     }
     try {
-      const client = createArcusMarketDataClient(this.config.arcus);
-      const live = (
-        await this.db
-          .select()
-          .from(ratioSnapshots)
-          .orderBy(desc(ratioSnapshots.id))
-          .limit(1)
-      )[0];
+      const timeframe = this.config.goldSilver.candleTimeframe;
+      const series = await loadYahooRatioBuckets({ timeframe });
+      const closes = series.buckets.map((bucket) => bucket.close);
+      const lastRsi = computeRsi(closes, this.config.goldSilver.rsiPeriod);
+      const side = lastRsi
+        ? rsiToSide(lastRsi, this.config.goldSilver.rsiConfirmBand)
+        : undefined;
+      const lastClose = series.buckets[series.buckets.length - 1].close;
+
       const chart = await renderMetalRatioChart({
-        client,
-        timeframe: this.config.goldSilver.candleTimeframe,
-        candleLimit: 60,
+        buckets: series.buckets,
+        timeframe,
         rsiPeriod: this.config.goldSilver.rsiPeriod,
-        live: live
-          ? {
-              rsi: live.rsi ? String(live.rsi) : undefined,
-              side: (live.side as MetalRatioSide | null) ?? undefined,
-              ratio: String(live.ratio),
-              goldPriceUsd: String(live.goldPriceUsd),
-              silverPriceUsd: String(live.silverPriceUsd),
-              calculatedAt: live.calculatedAt,
-            }
-          : undefined,
+        title: "GOLDSILVER (Yahoo GC=F/SI=F)",
+        live: lastRsi ? { rsi: lastRsi, side, ratio: lastClose } : undefined,
       });
-      const liveRsi = live?.rsi ? Number(live.rsi).toFixed(2) : "n/d";
-      const liveRatio = live ? Number(live.ratio).toFixed(4) : chart.lastClose;
-      const metalEquiv = (Number(liveRatio) * 10).toFixed(1);
+
+      const suggestion = side
+        ? `Strategy suggests: ${side === "short_gold_long_silver" ? "SHORT GOLD / LONG SILVER" : "LONG GOLD / SHORT SILVER"} (RSI ${Number(lastRsi).toFixed(1)} vs 50)`
+        : `No suggestion: RSI ${lastRsi ? Number(lastRsi).toFixed(1) : "n/d"} is inside the confirmation band around 50`;
       await this.sendPhoto(
         chart.png,
-        `GOLDSILVER ratio ${liveRatio} (≈${metalEquiv} metal-equiv) · ` +
-          `RSI(${this.config.goldSilver.rsiPeriod}) ${liveRsi} · ` +
-          `${this.config.goldSilver.candleTimeframe} candles\n` +
-          (live?.side
-            ? `Side: ${live.side === "short_gold_long_silver" ? "SHORT GOLD / LONG SILVER" : "LONG GOLD / SHORT SILVER"}`
-            : "Side: — (RSI inside the dead zone)") +
-          (live?.goldPriceUsd
-            ? ` · GLD $${Number(live.goldPriceUsd).toFixed(2)} · SLV $${Number(live.silverPriceUsd).toFixed(2)}`
-            : ""),
+        `GOLDSILVER ${Number(lastClose).toFixed(3)} · RSI(${this.config.goldSilver.rsiPeriod}) ${lastRsi ? Number(lastRsi).toFixed(2) : "n/d"} · ${timeframe} candles\n` +
+          `XAU ~$${series.lastGoldClose.toFixed(1)} · XAG ~$${series.lastSilverClose.toFixed(2)} (futures)\n` +
+          `${suggestion}\n` +
+          "Chart source: Yahoo GC=F/SI=F (TradingView-like). Execution stays on Arcus perps.",
+        {
+          inline_keyboard: [
+            [
+              {
+                text: "⭐ Open LONG GOLD / SHORT SILVER",
+                callback_data: "metaltrade:open:long_gold_short_silver",
+              },
+            ],
+            [
+              {
+                text: "⭐ Open SHORT GOLD / LONG SILVER",
+                callback_data: "metaltrade:open:short_gold_long_silver",
+              },
+            ],
+          ],
+        },
       );
     } catch (error) {
       await this.sendMessage(
@@ -1781,11 +1789,18 @@ export class TelegramCommandPoller {
     }
   }
 
-  private async sendPhoto(photo: Buffer, caption: string): Promise<void> {
+  private async sendPhoto(
+    photo: Buffer,
+    caption: string,
+    replyMarkup?: unknown,
+  ): Promise<void> {
     const form = new FormData();
     form.append("chat_id", String(normalizeTelegramChatId(this.config.telegram.chatId!)));
     form.append("caption", caption.slice(0, 1024));
     form.append("photo", new Blob([photo], { type: "image/png" }), "ratio.png");
+    if (replyMarkup) {
+      form.append("reply_markup", JSON.stringify(replyMarkup));
+    }
     const response = await this.fetchWithTimeout(
       `https://api.telegram.org/bot${this.config.telegram.botToken}/sendPhoto`,
       {

@@ -3,8 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { computeRsi, type MetalRatioSide } from "@btc-arbitrage/domain";
 import type { GoldSilverCandleTimeframe } from "@btc-arbitrage/config";
-import type { ArcusMarketDataClient } from "../exchanges/arcus/arcus-client.js";
-import { loadMetalRatioCandleSeries } from "./metal-ratio-warmup.js";
+import type { MetalRatioBucket } from "./metal-ratio-warmup.js";
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 // The renderer ships next to the compiled output (the bot build copies the
@@ -27,22 +26,18 @@ export interface MetalRatioChartResult {
   lastClose: string;
 }
 
-/** Builds the ratio OHLC candle series + per-bucket RSI and renders the
- * TradingView-style PNG via the bundled Python renderer (JSON in, PNG
- * out). Throws with an operator-friendly message when python3/Pillow is
- * unavailable. */
+/** Renders the TradingView-style PNG from pre-built ratio OHLC buckets.
+ * The data source is the caller's choice (Yahoo futures for /ratio; the
+ * Arcus engine keeps its own candle path). Throws with an
+ * operator-friendly message when python3/Pillow is unavailable. */
 export async function renderMetalRatioChart(input: {
-  client: ArcusMarketDataClient;
+  buckets: MetalRatioBucket[];
   timeframe: GoldSilverCandleTimeframe;
-  candleLimit: number;
   rsiPeriod: number;
+  title?: string;
   live?: MetalRatioChartLive;
 }): Promise<MetalRatioChartResult> {
-  const buckets = await loadMetalRatioCandleSeries({
-    client: input.client,
-    timeframe: input.timeframe,
-    candleLimit: Math.min(input.candleLimit, 90),
-  });
+  const buckets = input.buckets.slice(-200); // RSI warmup depth
   if (buckets.length < 2) {
     throw new Error("Not enough candle data to render the ratio chart");
   }
@@ -70,7 +65,7 @@ export async function renderMetalRatioChart(input: {
     })),
     rsi: rsiSeries,
     meta: {
-      symbol: "GOLDSILVER (GLD/SLV)",
+      symbol: input.title ?? "GOLDSILVER",
       timeframe: input.timeframe,
       rsiPeriod: input.rsiPeriod,
       liveRsi,
