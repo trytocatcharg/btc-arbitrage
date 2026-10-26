@@ -291,7 +291,8 @@ interface LegProgress {
   entryFeeUsd: number;
 }
 
-function limitPriceForSide(
+/** Exported for smoke-testing the post-only clamp boundaries. */
+export function limitPriceForSide(
   side: "short" | "long",
   bbo: { bidUsd: string; askUsd: string },
   improveTicks: number,
@@ -300,14 +301,23 @@ function limitPriceForSide(
   const bid = parseDecimal(bbo.bidUsd, "bid");
   const ask = parseDecimal(bbo.askUsd, "ask");
   const improve = improveTicks * tickUsd;
-  // Passive entry: short => sell limit resting at the bid, long => buy
-  // limit resting at the ask. Improvement is clamped INSIDE the spread —
-  // without the clamp, bid + improve on a one-tick book crosses the ask
-  // and Arcus rejects the ALO with POST_ONLY_WOULD_CROSS (trade #1314).
+  // Post-only legality (Arcus ALO): a SELL crosses iff price <= bid, a BUY
+  // crosses iff price >= ask. Improvement moves toward the touch but never
+  // past the legal side of the book:
+  //  sell: price in [bid + tick, ask] (join the ask queue when the
+  //        improvement would sit at/under the bid)
+  //  buy:  price in [bid, ask - tick] (join the bid queue likewise)
+  // On a LOCKED book (bid == ask) the sell rests at bid + tick (a new ask
+  // level, never crossing) and the buy rests at bid - tick. Trade #1317:
+  // the old clamp (ask - tick ceiling for sells) produced a sell BELOW the
+  // bid on locked books, so every attempt — including the join-best
+  // fallback — crossed.
   if (side === "short") {
-    return roundToTick(Math.min(bid + improve, ask - tickUsd), tickUsd);
+    const price = Math.min(bid + improve, ask);
+    return roundToTick(Math.max(price, bid + tickUsd), tickUsd);
   }
-  return roundToTick(Math.max(ask - improve, bid + tickUsd), tickUsd);
+  const price = Math.max(ask - improve, bid);
+  return roundToTick(Math.min(price, ask - tickUsd), tickUsd);
 }
 
 function touchPriceForClose(
