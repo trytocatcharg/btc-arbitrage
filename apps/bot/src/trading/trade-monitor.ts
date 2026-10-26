@@ -53,8 +53,9 @@ export async function monitorTrades(input: {
       const adapter = input.registry.get(row.trade_legs.exchangeId).execution;
       if (!adapter) continue;
 
+      const legSymbol = readLegMarket(row.trade_legs.raw) ?? row.trades.symbol;
       const position = await adapter.getPosition({
-        symbol: row.trades.symbol,
+        symbol: legSymbol,
         side: row.trade_legs.side,
       });
       const positionClosed = position === null || position.status === "closed";
@@ -88,7 +89,7 @@ export async function monitorTrades(input: {
         ) {
           try {
             resolved = await adapter.resolveLegClosure({
-              symbol: row.trades.symbol,
+              symbol: legSymbol,
               side: row.trade_legs.side,
               tpOrderId: protectionIds.tpOrderId,
               slOrderId: protectionIds.slOrderId,
@@ -311,6 +312,16 @@ export async function monitorTrades(input: {
       );
     }
   }
+}
+
+/** Defensive read of the per-leg market symbol persisted in the leg's raw
+ * JSON (metal-ratio trades: the trade symbol is the GOLDSILVER
+ * pseudo-pair, not resolvable by any exchange). Falls back to undefined so
+ * callers keep the trade-level symbol. */
+function readLegMarket(raw: unknown): string | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const market = (raw as Record<string, unknown>).market;
+  return typeof market === "string" && market.length > 0 ? market : undefined;
 }
 
 /** Defensive read of the protection order ids persisted in the leg's raw

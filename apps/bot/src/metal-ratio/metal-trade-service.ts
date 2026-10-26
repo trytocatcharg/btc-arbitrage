@@ -255,6 +255,10 @@ export async function createMetalTrade(
         status: "planned",
         quantityBase: formatDecimal(goldQty, 8),
         quantityUsd: formatDecimal(goldQty * goldPrice, 8),
+        // The leg's market lives in raw: the pseudo-symbol GOLDSILVER is
+        // not resolvable by any exchange, so the position monitor reads
+        // the per-leg market from here.
+        raw: { market: GOLD_MARKET },
       },
       {
         tradeId,
@@ -263,6 +267,7 @@ export async function createMetalTrade(
         status: "planned",
         quantityBase: formatDecimal(silverQty, 8),
         quantityUsd: formatDecimal(silverQty * silverPrice, 8),
+        raw: { market: SILVER_MARKET },
       },
     ]);
     return tradeId;
@@ -287,7 +292,13 @@ interface LegProgress {
   legId: number;
   side: "short" | "long";
   targetQty: number;
-  filledQty: number;
+  /** Cumulative GOLD base filled (drives the entry loop). */
+  goldFilledQty: number;
+  /** Cumulative SILVER base hedged (never equal to goldFilledQty —
+   * converted by USD notional per fill increment). */
+  silverFilledQty: number;
+  /** Volume-weighted average silver entry price. */
+  silverVwap: number;
   entryFeeUsd: number;
 }
 
@@ -335,6 +346,14 @@ function isPostOnlyRejection(message: string): boolean {
   return /POST_ONLY_WOULD_CROSS|post.only/i.test(message);
 }
 
+/** Defensive read of the disaster-stop order id persisted in the leg's
+ * raw JSON (same `slOrderId` key the BTC position monitor uses). */
+function readLegSlOrderId(raw: unknown): string | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const value = (raw as Record<string, unknown>).slOrderId;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
 /** Entry state machine: passive ALO limit on the GOLD leg, immediate
  * market hedge on the SILVER leg per filled increment, cancel-race on
  * timeout, emergency close on mid-way failure. Mirrors the BTC open-trade
@@ -369,6 +388,19 @@ export async function executeMetalTradeEntry(
     marketType: "perpetual",
     priceSource: "mark",
   });
+  const silverMeta = await ctx.execution.getMarketMetadata({
+    symbol: SILVER_MARKET,
+    marketType: "perpetual",
+    priceSource: "mark",
+  });
+  const silverStep = parseDecimal(
+    silverMeta.quantityStepBase || "0.01",
+    "silverStep",
+  );
+  const silverMin = parseDecimal(
+    silverMeta.minQuantityBase || "0",
+    "silverMin",
+  );
   const tick = parseDecimal(goldMeta.priceTickUsd || "0.01", "tick");
   const improveTicks = ctx.config.openTrade.entryImproveTicks;
   const pollMs = 250;
@@ -382,7 +414,9 @@ export async function executeMetalTradeEntry(
     legId: goldLegRow.id,
     side: goldLeg.side,
     targetQty: parseDecimal(String(goldLegRow.quantityBase), "goldQty"),
-    filledQty: 0,
+    goldFilledQty: 0,
+    silverFilledQty: 0,
+    silverVwap: 0,
     entryFeeUsd: 0,
   };
 
@@ -399,7 +433,7 @@ export async function executeMetalTradeEntry(
       side: goldLeg.side === "short" ? "sell" : "buy",
       type: "limit",
       quantityBase: formatDecimal(
-        progress.targetQty - progress.filledQty,
+        progress.targetQty - progress.goldFilledQty,
         8,
       ),
       priceUsd: formatDecimal(price, 4),
@@ -451,16 +485,17 @@ export async function executeMetalTradeEntry(
         .catch(() => null);
       if (order) {
         const filled = parseDecimal(order.filledQuantityBase, "filled");
-        const increment = filled - progress.filledQty;
+        const increment = filled - progress.goldFilledQty;
         if (increment > 1e-9 && order.status !== "cancelled") {
-          await hedgeIncrement(increment);
-          if (order.averageFillPriceUsd) {
-            goldFillPrice = parseDecimal(order.averageFillPriceUsd, "goldFill");
-          }
+          const fillPrice = order.averageFillPriceUsd
+            ? parseDecimal(order.averageFillPriceUsd, "goldFill")
+            : restingPrice;
+          await hedgeIncrement(increment, fillPrice);
+          goldFillPrice = fillPrice;
         }
         if (
           order.status === "filled" ||
-          progress.filledQty >= progress.targetQty - 1e-9
+          progress.goldFilledQty >= progress.targetQty - 1e-9
         ) {
           await finishEntry(goldFillPrice || restingPrice);
           return;
@@ -530,19 +565,17 @@ export async function executeMetalTradeEntry(
     }
     if (finalOrder) {
       const filled = parseDecimal(finalOrder.filledQuantityBase, "filled");
-      const increment = filled - progress.filledQty;
+      const increment = filled - progress.goldFilledQty;
       if (increment > 1e-9) {
-        await hedgeIncrement(increment);
-        if (finalOrder.averageFillPriceUsd) {
-          goldFillPrice = parseDecimal(
-            finalOrder.averageFillPriceUsd,
-            "goldFill",
-          );
-        }
+        const fillPrice = finalOrder.averageFillPriceUsd
+          ? parseDecimal(finalOrder.averageFillPriceUsd, "goldFill")
+          : restingPrice;
+        await hedgeIncrement(increment, fillPrice);
+        goldFillPrice = fillPrice;
       }
       if (
         finalOrder.status === "filled" ||
-        progress.filledQty >= progress.targetQty - 1e-9
+        progress.goldFilledQty >= progress.targetQty - 1e-9
       ) {
         await finishEntry(goldFillPrice || restingPrice);
         return;
@@ -555,13 +588,37 @@ export async function executeMetalTradeEntry(
     await abortEntry(message);
   }
 
-  async function hedgeIncrement(increment: number): Promise<void> {
+  async function hedgeIncrement(
+    incrementGoldQty: number,
+    goldPriceUsd: number,
+  ): Promise<void> {
+    // Convert the gold fill into SILVER units by USD notional (trade
+    // #1317: hedging the raw gold quantity 1:1 left the pair massively
+    // unbalanced — 0.1358 GLD ≠ 0.1358 SLV in dollars).
+    const silverBbo = await ctx.execution.getBestBidOffer({
+      symbol: SILVER_MARKET,
+      marketType: "perpetual",
+      priceSource: "mark",
+    });
+    const silverRef =
+      silverLeg.side === "long"
+        ? parseDecimal(silverBbo.askUsd, "silverAsk")
+        : parseDecimal(silverBbo.bidUsd, "silverBid");
+    const silverQty = roundDownToStep(
+      (incrementGoldQty * goldPriceUsd) / silverRef,
+      silverStep,
+    );
+    if (silverQty < Math.max(silverMin, 1e-9)) {
+      throw new Error(
+        `Hedge increment below SLV minimum (${silverQty} < ${silverMin})`,
+      );
+    }
     const hedge = await ctx.execution.submitExecutionOrder({
       clientOrderId: `mt${tradeId}s${Date.now().toString(36)}`,
       symbol: SILVER_MARKET,
       side: silverLeg.side === "short" ? "sell" : "buy",
       type: "market",
-      quantityBase: formatDecimal(increment, 8),
+      quantityBase: formatDecimal(silverQty, 8),
     });
     // Real per-fill fees come back on the polled order record.
     const confirmed = await ctx.execution
@@ -576,19 +633,104 @@ export async function executeMetalTradeEntry(
       ? parseDecimal(String(silverLegRow.entryFeeUsd), "fee0")
       : 0;
     silverLegRow.entryFeeUsd = formatDecimal(prevFee + fee, 8);
-    progress.filledQty += increment;
+    // Volume-weighted average silver entry price.
+    const prevQty = progress.silverFilledQty;
+    progress.silverVwap =
+      prevQty + silverQty > 0
+        ? (prevQty * progress.silverVwap + silverQty * fillPrice) /
+          (prevQty + silverQty)
+        : fillPrice;
+    progress.silverFilledQty += silverQty;
+    progress.goldFilledQty += incrementGoldQty;
     progress.entryFeeUsd += fee;
     await ctx.db
       .update(tradeLegs)
       .set({
         status: "open",
-        entryPriceUsd: formatDecimal(fillPrice, 8),
-        quantityBase: formatDecimal(progress.filledQty, 8),
+        entryPriceUsd: formatDecimal(progress.silverVwap, 8),
+        quantityBase: formatDecimal(progress.silverFilledQty, 8),
         entryFeeUsd: silverLegRow.entryFeeUsd,
-        filledNotionalUsd: formatDecimal(progress.filledQty * fillPrice, 8),
+        filledNotionalUsd: formatDecimal(
+          progress.silverFilledQty * progress.silverVwap,
+          8,
+        ),
         openedAt: new Date(),
       })
       .where(eq(tradeLegs.id, silverLegRow.id));
+  }
+
+  /** Exchange-resting disaster stops (stop-market reduce-only) on both
+   * legs, anchored to each leg's own fill at a price distance of
+   * GOLDSILVER_STOP_LOSS_MARGIN_PERCENT / leverage. These are bot-down
+   * insurance ONLY: the strategy SL/TP are computed on the pair's NET PnL
+   * and stay bot-driven (a leg-level stop at the pair's SL threshold would
+   * fire on normal divergence). The stop order id is persisted in the
+   * leg's raw JSON (same `slOrderId` contract the position monitor uses),
+   * so an exchange-side fire is detected, finalizes the leg, and flips
+   * the trade to unhedged with an urgent notice. A placement failure
+   * degrades to an urgent notice — the entry itself already succeeded. */
+  async function placeDisasterStops(goldEntryPrice: number): Promise<void> {
+    const fraction =
+      ctx.config.goldSilver.stopLossMarginPercent /
+      100 /
+      ctx.config.leverage;
+    const legPlans = [
+      {
+        row: goldLegRow,
+        side: goldLeg.side,
+        market: GOLD_MARKET,
+        qty: progress.goldFilledQty,
+        entry: goldEntryPrice,
+      },
+      {
+        row: silverLegRow,
+        side: silverLeg.side,
+        market: SILVER_MARKET,
+        qty: progress.silverFilledQty,
+        entry: progress.silverVwap,
+      },
+    ];
+    for (const plan of legPlans) {
+      if (plan.qty <= 1e-9 || !(plan.entry > 0)) continue;
+      const trigger =
+        plan.side === "short"
+          ? plan.entry * (1 + fraction)
+          : plan.entry * (1 - fraction);
+      try {
+        const order = await ctx.execution.submitExecutionOrder({
+          clientOrderId: `mt${tradeId}sl${plan.row.id}`,
+          symbol: plan.market,
+          side: plan.side === "short" ? "buy" : "sell",
+          type: "stop-market",
+          quantityBase: formatDecimal(plan.qty, 8),
+          triggerPriceUsd: formatDecimal(trigger, 4),
+          reduceOnly: true,
+        });
+        const existing =
+          plan.row.raw &&
+          typeof plan.row.raw === "object" &&
+          !Array.isArray(plan.row.raw)
+            ? (plan.row.raw as Record<string, unknown>)
+            : {};
+        await ctx.db
+          .update(tradeLegs)
+          .set({ raw: { ...existing, slOrderId: order.id } })
+          .where(eq(tradeLegs.id, plan.row.id));
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : String(error);
+        console.error("Metal trade disaster stop placement failed", {
+          tradeId,
+          legId: plan.row.id,
+          market: plan.market,
+          message,
+        });
+        await ctx.notifyUrgent(
+          `⚠️ Gold/silver trade #${tradeId}: disaster stop placement FAILED for ${plan.market} (${message}). ` +
+            "The leg has no exchange-resting protection; the bot-driven SL still applies while the bot is alive.",
+        );
+      }
+    }
   }
 
   async function finishEntry(goldEntryPrice: number): Promise<void> {
@@ -597,11 +739,15 @@ export async function executeMetalTradeEntry(
       .set({
         status: "open",
         entryPriceUsd: formatDecimal(goldEntryPrice, 8),
-        quantityBase: formatDecimal(progress.filledQty, 8),
-        filledNotionalUsd: formatDecimal(progress.filledQty * goldEntryPrice, 8),
+        quantityBase: formatDecimal(progress.goldFilledQty, 8),
+        filledNotionalUsd: formatDecimal(
+          progress.goldFilledQty * goldEntryPrice,
+          8,
+        ),
         openedAt: new Date(),
       })
       .where(eq(tradeLegs.id, goldLegRow.id));
+    await placeDisasterStops(goldEntryPrice);
     await transitionTrade(
       ctx,
       tradeId,
@@ -619,15 +765,16 @@ export async function executeMetalTradeEntry(
   }
 
   async function abortEntry(reason: string): Promise<void> {
-    // Emergency: market-close any covered quantity, then fail the trade.
-    if (progress.filledQty > 1e-9) {
+    // Emergency: market-close any covered SILVER quantity (the hedge
+    // leg), then fail the trade.
+    if (progress.silverFilledQty > 1e-9) {
       try {
         await ctx.execution.submitExecutionOrder({
           clientOrderId: `mt${tradeId}er${Date.now().toString(36)}`,
           symbol: SILVER_MARKET,
           side: silverLeg.side === "short" ? "sell" : "buy",
           type: "market",
-          quantityBase: formatDecimal(progress.filledQty, 8),
+          quantityBase: formatDecimal(progress.silverFilledQty, 8),
           reduceOnly: true,
         });
       } catch (error) {
@@ -656,8 +803,8 @@ export async function executeMetalTradeEntry(
     );
     await ctx.notifyUrgent(
       `🥇🥈 Gold/silver trade #${tradeId} FAILED at entry: ${reason}.` +
-        (progress.filledQty > 1e-9
-          ? ` Covered quantity (${formatDecimal(progress.filledQty, 8)} SLV) was market-closed.`
+        (progress.silverFilledQty > 1e-9
+          ? ` Covered quantity (${formatDecimal(progress.silverFilledQty, 8)} SLV) was market-closed.`
           : ""),
     );
   }
@@ -704,6 +851,25 @@ export async function closeMetalTrade(
       await ctx.db.select().from(trades).where(eq(trades.id, tradeId)).limit(1)
     )[0];
     if (!trade) return;
+    const legRowsForCancel = await ctx.db
+      .select()
+      .from(tradeLegs)
+      .where(eq(tradeLegs.tradeId, tradeId));
+    // Cancel the resting disaster stops BEFORE the paired close: they are
+    // reduce-only (inert on a flat position), but a leftover trigger on a
+    // closed trade would rest forever. Failures degrade to a warning —
+    // never block the close on a cancellation.
+    for (const leg of legRowsForCancel) {
+      const slOrderId = readLegSlOrderId(leg.raw);
+      if (!slOrderId) continue;
+      await ctx.execution.cancelExecutionOrder(slOrderId).catch((error: unknown) => {
+        console.warn("Metal trade disaster stop cancel failed", {
+          tradeId,
+          legId: leg.id,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
     const side: MetalRatioSide = tradeSideFromLegs(
       (
         await ctx.db
