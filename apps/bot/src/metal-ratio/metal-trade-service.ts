@@ -297,12 +297,17 @@ function limitPriceForSide(
   improveTicks: number,
   tickUsd: number,
 ): number {
+  const bid = parseDecimal(bbo.bidUsd, "bid");
+  const ask = parseDecimal(bbo.askUsd, "ask");
   const improve = improveTicks * tickUsd;
-  // Passive entry: short => sell limit resting at the bid (improving
-  // above it stays post-only-safe); long => buy limit resting at the ask.
-  return side === "short"
-    ? roundToTick(parseDecimal(bbo.bidUsd, "bid") + improve, tickUsd)
-    : roundToTick(parseDecimal(bbo.askUsd, "ask") - improve, tickUsd);
+  // Passive entry: short => sell limit resting at the bid, long => buy
+  // limit resting at the ask. Improvement is clamped INSIDE the spread —
+  // without the clamp, bid + improve on a one-tick book crosses the ask
+  // and Arcus rejects the ALO with POST_ONLY_WOULD_CROSS (trade #1314).
+  if (side === "short") {
+    return roundToTick(Math.min(bid + improve, ask - tickUsd), tickUsd);
+  }
+  return roundToTick(Math.max(ask - improve, bid + tickUsd), tickUsd);
 }
 
 function touchPriceForClose(
@@ -394,14 +399,37 @@ export async function executeMetalTradeEntry(
   };
 
   try {
-    const bbo = await ctx.execution.getBestBidOffer({
-      symbol: GOLD_MARKET,
-      marketType: "perpetual",
-      priceSource: "mark",
-    });
-    orderId = await placeLimit(
-      limitPriceForSide(goldLeg.side, bbo, improveTicks, tick),
-    );
+    // Initial placement: ALO rejects with POST_ONLY_WOULD_CROSS when the
+    // improved price crosses the book (thin GLD book). The clamp in
+    // limitPriceForSide makes a cross impossible at quote time, but the
+    // book can move between quote and placement, so each retry re-reads
+    // the BBO; after the retry budget, join the best price (improvement
+    // 0), which is guaranteed post-only.
+    for (let attempt = 0; ; attempt += 1) {
+      const quoteBbo = await ctx.execution.getBestBidOffer({
+        symbol: GOLD_MARKET,
+        marketType: "perpetual",
+        priceSource: "mark",
+      });
+      try {
+        orderId = await placeLimit(
+          limitPriceForSide(goldLeg.side, quoteBbo, improveTicks, tick),
+        );
+        break;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (isPostOnlyRejection(message) && attempt < 3) {
+          continue;
+        }
+        if (isPostOnlyRejection(message)) {
+          orderId = await placeLimit(
+            limitPriceForSide(goldLeg.side, quoteBbo, 0, tick),
+          );
+          break;
+        }
+        throw error;
+      }
+    }
     await ctx.db
       .update(tradeLegs)
       .set({ status: "submitted", entryOrderId: orderId })
