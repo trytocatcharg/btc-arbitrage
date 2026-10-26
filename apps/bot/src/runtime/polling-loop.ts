@@ -577,23 +577,29 @@ export async function runPollingLoop(input: {
   // errors).
   async function runMetalRatioPass(tick: number): Promise<void> {
     try {
+      // Cadence gate: the ratio tick runs at GOLDSILVER_PRICE_POLL_INTERVAL_MS
+      // (default 5 s), not at the 1 Hz BTC tick. The engine works on candle
+      // buckets, so 1 Hz polling only burns Arcus rate-limit budget. A 0
+      // value follows the BTC tick (legacy behavior).
+      const pollMs = input.config.goldSilver.pricePollIntervalMs;
+      if (
+        pollMs > 0 &&
+        metalRatio &&
+        metalRatio.lastTickAtMs > 0 &&
+        Date.now() - metalRatio.lastTickAtMs < pollMs
+      ) {
+        return;
+      }
       const ctx = await ensureMetalRatioContext();
       ctx.lastTickAtMs = Date.now();
       const calculatedAt = new Date();
-      // The ratio monitor always uses mark prices, independent of the
-      // configured BTC PRICE_SOURCE.
-      const [gold, silver] = await Promise.all([
-        ctx.client.getPriceSnapshot({
-          symbol: GOLD_MARKET,
-          marketType: "perpetual",
-          priceSource: "mark",
-        }),
-        ctx.client.getPriceSnapshot({
-          symbol: SILVER_MARKET,
-          marketType: "perpetual",
-          priceSource: "mark",
-        }),
-      ]);
+      // ONE /v1/prices call per tick: mark prices only. The Arcus BBO
+      // endpoint is rate-limited (429s after a few minutes at 1 Hz) and
+      // the ratio monitor does not need it; /v1/prices is documented as
+      // safe to poll frequently.
+      const marks = await ctx.client.getMarkPricesUsd([GOLD_MARKET, SILVER_MARKET]);
+      const gold = { priceUsd: marks[GOLD_MARKET] };
+      const silver = { priceUsd: marks[SILVER_MARKET] };
       const result = ctx.engine.onTick({
         goldPriceUsd: gold.priceUsd,
         silverPriceUsd: silver.priceUsd,

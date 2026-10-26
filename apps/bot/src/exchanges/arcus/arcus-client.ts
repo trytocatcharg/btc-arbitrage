@@ -88,6 +88,11 @@ export interface ArcusCandlesRequest {
  * the HTTP client is constructed without the API key. */
 export interface ArcusMarketDataClient {
   getPriceSnapshot(input: PriceRequest): Promise<PriceSnapshot>;
+  /** Mark prices for several markets from ONE `GET /v1/prices` call (the
+   * endpoint Arcus documents as safe to poll frequently). Fails closed per
+   * market: a missing entry or a "0" mark throws instead of silently
+   * degrading (same convention as the adapter's PRICE_SOURCE=mark). */
+  getMarkPricesUsd(markets: string[]): Promise<Record<string, string>>;
   /** Raw candles NEWEST-first, exactly as the API returns them; callers
    * sort/filter. Empty/invalid payloads resolve to an empty array. */
   getCandles(input: ArcusCandlesRequest): Promise<ArcusCandle[]>;
@@ -98,6 +103,19 @@ export function createArcusMarketDataClient(config: ArcusConfig): ArcusMarketDat
   const adapter = createArcusAdapter(config, http);
   return {
     getPriceSnapshot: (input) => adapter.getPriceSnapshot(input),
+    async getMarkPricesUsd(markets) {
+      const payload = await http.get('/v1/prices');
+      const marks: Record<string, string> = {};
+      for (const market of markets) {
+        const entry = findArcusPriceEntry(payload, market);
+        const mark = entry.markPrice;
+        if (!mark || Number(mark) === 0) {
+          throw new Error(`Arcus market ${market} has no mark price yet`);
+        }
+        marks[market] = mark;
+      }
+      return marks;
+    },
     async getCandles(input) {
       const payload = await http.get('/v1/candles', {
         market: input.market,

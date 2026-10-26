@@ -155,6 +155,10 @@ export interface BotConfig {
     candleTimeframe: GoldSilverCandleTimeframe;
     /** GOLDSILVER_CANDLE_LIMIT: candles fetched per build (clamped 1..200). */
     candleLimit: number;
+    /** GOLDSILVER_PRICE_POLL_INTERVAL_MS: cadence of the live mark-price
+     * tick (default 5000). The engine works on candle buckets, so 1 Hz
+     * polling only burns Arcus rate-limit budget without adding signal. */
+    pricePollIntervalMs: number;
     /** GOLDSILVER_ALERT_COOLDOWN_MS: global cooldown between ratio alerts. */
     alertCooldownMs: number;
     /** GOLDSILVER_STOP_LOSS_MARGIN_PERCENT: net-PnL stop (percent of TOTAL
@@ -394,6 +398,15 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     1,
     200,
   );
+  const goldSilverPricePollIntervalMs = parseNonNegativeInteger(
+    env.GOLDSILVER_PRICE_POLL_INTERVAL_MS ?? "5000",
+    "GOLDSILVER_PRICE_POLL_INTERVAL_MS",
+  );
+  if (goldSilverPricePollIntervalMs > 0 && goldSilverPricePollIntervalMs < 1000) {
+    throw new Error(
+      "GOLDSILVER_PRICE_POLL_INTERVAL_MS must be 0 (follow the BTC tick) or >= 1000",
+    );
+  }
   const goldSilverAlertCooldownMs = parseNonNegativeInteger(
     env.GOLDSILVER_ALERT_COOLDOWN_MS ?? "3600000",
     "GOLDSILVER_ALERT_COOLDOWN_MS",
@@ -601,6 +614,7 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       rsiConfirmBand: goldSilverRsiConfirmBand,
       candleTimeframe: goldSilverCandleTimeframe,
       candleLimit: goldSilverCandleLimit,
+      pricePollIntervalMs: goldSilverPricePollIntervalMs,
       alertCooldownMs: goldSilverAlertCooldownMs,
       stopLossMarginPercent: goldSilverStopLossMarginPercent,
       tpMinNetUsd: goldSilverTpMinNetUsd,
