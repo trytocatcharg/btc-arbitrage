@@ -4,7 +4,6 @@ import { signals, tradePreviews } from "@btc-arbitrage/db";
 import { eq } from "drizzle-orm";
 import {
   findTradingPair,
-  GOLD_SILVER_SYMBOL,
   parseDecimal,
   TRADING_PAIRS,
   computeRsi,
@@ -62,6 +61,7 @@ import { persistRuntimeOverride } from "../runtime/runtime-settings-store.js";
 import {
   createMetalTrade,
   executeMetalTradeEntry,
+  loadActiveMetalTrade,
 } from "../metal-ratio/metal-trade-service.js";
 import { renderMetalRatioChart } from "../metal-ratio/metal-ratio-chart.js";
 import { loadYahooRatioBuckets } from "../metal-ratio/yahoo-metals-client.js";
@@ -140,7 +140,7 @@ const AVAILABLE_COMMANDS = [
   },
   {
     command: "ratio",
-    description: "Gold/silver ratio chart + RSI (GOLD/SILVER pair)",
+    description: "Gold/silver ratio chart + RSI (on-demand metal trade)",
   },
 ] as const;
 
@@ -392,27 +392,23 @@ export class TelegramCommandPoller {
           );
           return;
         }
-        // The GOLD/SILVER pseudo-pair is monitor-only: no exchange
-        // execution exists for it, so there is nothing to preflight.
         const failures: string[] = [];
-        if (this.config.btcSymbol !== GOLD_SILVER_SYMBOL) {
-          for (const exchangeId of [
-            this.config.exchangeA,
-            this.config.exchangeB,
-          ]) {
-            const adapter = this.registry.get(exchangeId);
-            if (!adapter.capabilities.orderPlacement || !adapter.execution)
-              continue;
-            try {
-              await adapter.execution.validateExecutionPreflight({
-                symbol: this.config.btcSymbol,
-                leverage: value,
-              });
-            } catch (error) {
-              failures.push(
-                `${exchangeId}: ${error instanceof Error ? error.message : String(error)}`,
-              );
-            }
+        for (const exchangeId of [
+          this.config.exchangeA,
+          this.config.exchangeB,
+        ]) {
+          const adapter = this.registry.get(exchangeId);
+          if (!adapter.capabilities.orderPlacement || !adapter.execution)
+            continue;
+          try {
+            await adapter.execution.validateExecutionPreflight({
+              symbol: this.config.btcSymbol,
+              leverage: value,
+            });
+          } catch (error) {
+            failures.push(
+              `${exchangeId}: ${error instanceof Error ? error.message : String(error)}`,
+            );
           }
         }
         if (failures.length > 0) {
@@ -757,28 +753,24 @@ export class TelegramCommandPoller {
               // Prepare the exchanges BEFORE applying: RISEx sets the
               // account leverage per market, so the new symbol must be
               // preflighted while the bot still operates the previous
-              // pair. Any failure keeps the current pair untouched. The
-              // GOLD/SILVER pseudo-pair is monitor-only (v1): no execution
-              // exists for it, so there is nothing to preflight.
+              // pair. Any failure keeps the current pair untouched.
               const failures: string[] = [];
-              if (pair.symbol !== GOLD_SILVER_SYMBOL) {
-                for (const exchangeId of [
-                  this.config.exchangeA,
-                  this.config.exchangeB,
-                ]) {
-                  const adapter = this.registry.get(exchangeId);
-                  if (!adapter.capabilities.orderPlacement || !adapter.execution)
-                    continue;
-                  try {
-                    await adapter.execution.validateExecutionPreflight({
-                      symbol: pair.symbol,
-                      leverage: this.config.leverage,
-                    });
-                  } catch (error) {
-                    failures.push(
-                      `${exchangeId}: ${error instanceof Error ? error.message : String(error)}`,
-                    );
-                  }
+              for (const exchangeId of [
+                this.config.exchangeA,
+                this.config.exchangeB,
+              ]) {
+                const adapter = this.registry.get(exchangeId);
+                if (!adapter.capabilities.orderPlacement || !adapter.execution)
+                  continue;
+                try {
+                  await adapter.execution.validateExecutionPreflight({
+                    symbol: pair.symbol,
+                    leverage: this.config.leverage,
+                  });
+                } catch (error) {
+                  failures.push(
+                    `${exchangeId}: ${error instanceof Error ? error.message : String(error)}`,
+                  );
                 }
               }
               if (failures.length > 0) {
@@ -798,16 +790,10 @@ export class TelegramCommandPoller {
               } else {
                 const change = applyTradingPair(this.config, pair.symbol);
                 const persistNote = await this.persistAppliedChange(change);
-                const monitorNote =
-                  pair.symbol === GOLD_SILVER_SYMBOL
-                    ? "\n\nThe gold/silver ratio monitor runs from the next " +
-                      "tick (monitor-only v1 — no orders). Switch back to a " +
-                      "spread pair anytime from this menu."
-                    : `\n\nThe bot trades ${pair.label} from the next signal.`;
                 if (typeof messageId === "number") {
                   await this.editMessageText(
                     messageId,
-                    `✅ ${change.summary}${persistNote}${monitorNote}`,
+                    `✅ ${change.summary}${persistNote}\n\nThe bot trades ${pair.label} from the next signal.`,
                   ).catch((error: unknown) => {
                     console.warn("Telegram pair-apply edit failed", {
                       messageId,
@@ -1008,8 +994,8 @@ export class TelegramCommandPoller {
           }
         }
       } else if (data.startsWith("metaltrade:open:")) {
-        // One-click open of a gold/silver pair trade from the ratio-cross
-        // alert. Same contract as the BTC one-click: create + confirm are
+        // One-click open of a gold/silver pair trade from the /ratio
+        // chart. Same contract as the BTC one-click: create + confirm are
         // one action, entry runs on the serial execution queue.
         const side = data.slice("metaltrade:open:".length);
         const messageId = callback.message?.message_id;
@@ -1053,7 +1039,7 @@ export class TelegramCommandPoller {
           await reply(
             `⏳ Opening gold/silver trade ${tradeId}...\n` +
               "Passive limit on GLD + immediate market hedge on SLV. " +
-              `This can take up to ~${Math.round(this.config.openTrade.limitTimeoutMs / 1000)}s.`,
+              `This can take up to ~${Math.round(this.config.goldSilver.limitTimeoutMs / 1000)}s.`,
           );
           this.executionQueue.enqueue({
             description: `metal-open:${tradeId}`,
@@ -1065,26 +1051,6 @@ export class TelegramCommandPoller {
           );
         }
       } else if (data.startsWith("open:")) {
-        // The GOLD/SILVER pseudo-pair is monitor-only: it never creates
-        // signal rows, but a stale "Open Trade" button from a previous
-        // spread pair can still be tapped after the switch — refuse it.
-        if (this.config.btcSymbol === GOLD_SILVER_SYMBOL) {
-          const messageId = callback.message?.message_id;
-          if (typeof messageId === "number") {
-            await this.editMessageText(
-              messageId,
-              "⛔ GOLD/SILVER is monitor-only (v1): opening trades is not " +
-                "available for this pair. Switch to a spread pair first.",
-            ).catch((error: unknown) => {
-              console.warn("Telegram open-gold-silver edit failed", {
-                messageId,
-                message:
-                  error instanceof Error ? error.message : String(error),
-              });
-            });
-          }
-          return;
-        }
         const signalId = Number(data.slice(5));
         const signal = (
           await this.db.select().from(signals).where(eq(signals.id, signalId))
@@ -1729,16 +1695,12 @@ export class TelegramCommandPoller {
    * Yahoo futures data (GC=F/SI=F ≈ TVC:GOLDSILVER at ~99.6%) and sends it
    * as a photo with one-click open buttons for both directions plus the
    * strategy's suggested side (RSI vs 50 with the configured band).
-   * Only available while GOLD/SILVER is the active pair. */
+   * Available ANYTIME, regardless of the active spread pair
+   * (gold-silver-decouple). While a metal trade is active the chart still
+   * renders but the open buttons are hidden (one metal trade at a time). */
   private async handleRatioChartCommand(): Promise<void> {
-    if (this.config.btcSymbol !== GOLD_SILVER_SYMBOL) {
-      await this.sendMessage(
-        "⛔ /ratio is only available while GOLD/SILVER is the active pair.\n" +
-          "Switch it from the 🪙 Pairs panel (/config → Pairs).",
-      );
-      return;
-    }
     try {
+      const activeMetalTrade = await loadActiveMetalTrade({ db: this.db });
       const timeframe = this.config.goldSilver.candleTimeframe;
       const series = await loadYahooRatioBuckets({ timeframe });
       const closes = series.buckets.map((bucket) => bucket.close);
@@ -1759,35 +1721,41 @@ export class TelegramCommandPoller {
       const suggestion = side
         ? `Strategy suggests: ${side === "short_gold_long_silver" ? "SHORT GOLD / LONG SILVER" : "LONG GOLD / SHORT SILVER"} (RSI ${Number(lastRsi).toFixed(1)} vs 50)`
         : `No suggestion: RSI ${lastRsi ? Number(lastRsi).toFixed(1) : "n/d"} is inside the confirmation band around 50`;
+      const activeNote = activeMetalTrade
+        ? `⚠️ A gold/silver trade is already active (#${activeMetalTrade.id}, ${activeMetalTrade.status}). Close it before opening another.\n`
+        : "";
       await this.sendPhoto(
         chart.png,
         `GOLDSILVER ${Number(lastClose).toFixed(3)} · RSI(${this.config.goldSilver.rsiPeriod}) ${lastRsi ? Number(lastRsi).toFixed(2) : "n/d"} · ${timeframe} candles\n` +
           `XAU ~$${series.lastGoldClose.toFixed(1)} · XAG ~$${series.lastSilverClose.toFixed(2)} (futures)\n` +
           `${suggestion}\n` +
+          activeNote +
           "Chart source: Yahoo GC=F/SI=F (TradingView-like). Execution stays on Arcus perps.",
-        {
-          inline_keyboard: [
-            [
-              {
-                // The star marks ONLY the strategy-suggested side (RSI vs 50
-                // with the confirmation band); the other button stays
-                // available for a manual override.
-                text:
-                  (side === "long_gold_short_silver" ? "⭐ " : "") +
-                  "Open LONG GOLD / SHORT SILVER",
-                callback_data: "metaltrade:open:long_gold_short_silver",
-              },
-            ],
-            [
-              {
-                text:
-                  (side === "short_gold_long_silver" ? "⭐ " : "") +
-                  "Open SHORT GOLD / LONG SILVER",
-                callback_data: "metaltrade:open:short_gold_long_silver",
-              },
-            ],
-          ],
-        },
+        activeMetalTrade
+          ? undefined
+          : {
+              inline_keyboard: [
+                [
+                  {
+                    // The star marks ONLY the strategy-suggested side (RSI vs 50
+                    // with the confirmation band); the other button stays
+                    // available for a manual override.
+                    text:
+                      (side === "long_gold_short_silver" ? "⭐ " : "") +
+                      "Open LONG GOLD / SHORT SILVER",
+                    callback_data: "metaltrade:open:long_gold_short_silver",
+                  },
+                ],
+                [
+                  {
+                    text:
+                      (side === "short_gold_long_silver" ? "⭐ " : "") +
+                      "Open SHORT GOLD / LONG SILVER",
+                    callback_data: "metaltrade:open:short_gold_long_silver",
+                  },
+                ],
+              ],
+            },
       );
     } catch (error) {
       await this.sendMessage(
