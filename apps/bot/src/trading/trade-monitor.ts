@@ -6,9 +6,21 @@ import {
   type getDb,
 } from "@btc-arbitrage/db";
 import type { ExchangeAdapter } from "@btc-arbitrage/exchange-core";
+import type { BotConfig } from "@btc-arbitrage/config";
 import { formatDecimal, parseDecimal } from "@btc-arbitrage/domain";
+import { loadActiveMetalTrade } from "../metal-ratio/metal-trade-service.js";
 import { shouldNotifyLegClosure } from "./trade-guards.js";
 import { formatPnlColored } from "./trade-close.js";
+
+/** Arcus position-poll throttle state (gold-silver-decouple): while a G/S
+ * trade is active, the two metal legs would otherwise be polled at the
+ * full 1 Hz monitor cadence — the dominant Arcus request load and the
+ * 429 risk called out by the operator. Arcus legs are instead polled at
+ * GOLDSILVER_PRICE_POLL_INTERVAL_MS (aligned with the metal tick). Per-leg
+ * timestamp so each leg keeps its own cadence; the map only ever holds
+ * arcus metal legs and one metal trade can be active at a time, so growth
+ * is bounded by the number of metal trades ever opened. */
+const arcusPollThrottledAtMsByLegId = new Map<number, number>();
 
 // Bounded retry for post-hoc leg-closure resolution. A TP/SL fill can land
 // in the same second the flat position is first detected while the
@@ -22,7 +34,22 @@ export async function monitorTrades(input: {
   db: Awaited<ReturnType<typeof getDb>>;
   registry: { get(id: string): ExchangeAdapter };
   notify: (text: string) => Promise<void>;
+  /** gold-silver-decouple: when present and a G/S trade is active, Arcus
+   * leg position polls are throttled to
+   * config.goldSilver.pricePollIntervalMs (default 5 s) instead of the
+   * full monitor cadence, capping Arcus request volume (429 risk).
+   * Absent in legacy callers/tests: no throttling. */
+  config?: BotConfig;
 }): Promise<void> {
+  // One cheap probe per monitor pass; without an active metal trade the
+  // Arcus throttle does not apply at all (no G/S legs can exist).
+  const arcusPollMinIntervalMs = input.config
+    ? input.config.goldSilver.pricePollIntervalMs
+    : 0;
+  const throttleArcusPolls =
+    arcusPollMinIntervalMs > 0 &&
+    (await loadActiveMetalTrade({ db: input.db })) != null;
+
   const rows = await input.db
     .select()
     .from(tradeLegs)
@@ -50,6 +77,19 @@ export async function monitorTrades(input: {
 
   for (const row of rows) {
     try {
+      // Arcus throttle (gold-silver-decouple): skip this leg's position
+      // poll until its throttled interval has elapsed. Detection latency
+      // grows to ~the metal tick cadence — acceptable because the metal
+      // exits (SL/TP/time-stop) are evaluated from the mark-price tick,
+      // not from this poll; the poll only detects closures and notifies.
+      if (throttleArcusPolls && row.trade_legs.exchangeId === "arcus") {
+        const nowMs = Date.now();
+        const lastPollAtMs =
+          arcusPollThrottledAtMsByLegId.get(row.trade_legs.id) ?? 0;
+        if (nowMs - lastPollAtMs < arcusPollMinIntervalMs) continue;
+        arcusPollThrottledAtMsByLegId.set(row.trade_legs.id, nowMs);
+      }
+
       const adapter = input.registry.get(row.trade_legs.exchangeId).execution;
       if (!adapter) continue;
 

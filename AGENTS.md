@@ -264,6 +264,23 @@ Arcus-only pairs strategy on the GLD-USD / SLV-USD perp ratio (docs in `odd/task
   G/S trades (`trades.symbol = 'GOLDSILVER'` is excluded from the
   active-trade query) so both strategies run concurrently; the position
   reconciler's leg sums are likewise scoped to the scanned spread symbol.
+- **Coexistence with the BTC strategy (operator decision 2026-10-27: BTC
+  trades never use Arcus — spread legs live on risex/extended, metal legs
+  on Arcus)**: the venues are disjoint, so there is no collateral or
+  execution conflict and the entry guards are symmetric —
+  `DbPreviewStore.hasBlockingExecution()` EXCLUDES `GOLDSILVER` trades, so
+  a BTC preview/confirm is never blocked by an active metal trade (a
+  second BTC trade while another BTC trade is active is still refused).
+  Arcus request volume while a metal trade is active is capped: the
+  trade-monitor position poll of Arcus legs is throttled to
+  `GOLDSILVER_PRICE_POLL_INTERVAL_MS` (default 5 s, aligned with the
+  metal tick) instead of the full 1 Hz monitor cadence. A `/bot` pause
+  skips the BTC signal pass and the position monitor as before, but the
+  metal exit tick KEEPS RUNNING while paused — the metal SL/TP/time-stop
+  triggers are bot-evaluated (no resting exchange protection), so
+  pausing them would leave an open metal position unprotected; the pass
+  still no-ops when no metal trade is active, so a paused idle bot makes
+  no Arcus calls.
 - **Execution (manual only — operator decision 2026-10-23: no
   auto-confirm)**: one-click from the `/ratio` chart's open buttons
   (`metaltrade:open:` callback → serial execution queue); one metal trade

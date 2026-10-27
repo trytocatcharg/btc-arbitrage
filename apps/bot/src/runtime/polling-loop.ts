@@ -137,6 +137,7 @@ export async function runPollingLoop(input: {
           db: input.db,
           registry: input.registry,
           notify: (text) => input.notifier.notifyUrgent(text),
+          config: input.config,
         });
       } catch (error) {
         console.error(
@@ -394,10 +395,15 @@ export async function runPollingLoop(input: {
         console.log("Restart requested; signal pass skipped", { tick });
       } else if (input.control.isPaused()) {
         console.log("Monitoring tick paused", { tick });
+        // gold-silver-decouple: the metal exit tick SURVIVES the operator
+        // pause. The metal SL/TP/time-stop triggers are bot-evaluated (no
+        // resting exchange protection orders), so skipping them while
+        // paused would leave an open metal position unprotected. The pass
+        // no-ops unless a G/S trade is active, so an idle paused bot still
+        // makes no Arcus calls.
+        await runMetalRatioPass(tick);
       } else {
         await runSignalPass(tick);
-        // The metal tick/exit pass is independent of the spread pass: it
-        // no-ops unless a gold/silver trade is active (gold-silver-decouple).
         await runMetalRatioPass(tick);
       }
       console.log("Monitoring tick completed", {

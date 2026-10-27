@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, ne, sql } from "drizzle-orm";
 import {
   activeTradeStatuses,
   tradePreviews,
@@ -7,7 +7,7 @@ import {
   tradeStatusHistory,
 } from "@btc-arbitrage/db";
 import type { getDb } from "@btc-arbitrage/db";
-import { formatDecimal, parseDecimal } from "@btc-arbitrage/domain";
+import { formatDecimal, GOLD_SILVER_SYMBOL, parseDecimal } from "@btc-arbitrage/domain";
 import type {
   OpenTradePreview,
   OpenTradeState,
@@ -206,10 +206,20 @@ export class DbPreviewStore implements PreviewStore {
       .where(eq(tradePreviews.status, "awaiting_confirmation"))
       .limit(1);
     if (pendingPreview.length > 0) return true;
+    // gold-silver-decouple: active GOLD/SILVER trades do NOT block BTC
+    // entries — the strategies run on disjoint venues (BTC on the spread
+    // exchanges, metal on Arcus), so there is no collateral or execution
+    // conflict. A second BTC trade while another BTC trade is active is
+    // still blocked by this same query.
     const activeTrade = await this.db
       .select({ id: trades.id })
       .from(trades)
-      .where(inArray(trades.status, [...activeTradeStatuses]))
+      .where(
+        and(
+          inArray(trades.status, [...activeTradeStatuses]),
+          ne(trades.symbol, GOLD_SILVER_SYMBOL),
+        ),
+      )
       .limit(1);
     return activeTrade.length > 0;
   }

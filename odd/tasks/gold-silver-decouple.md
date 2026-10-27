@@ -64,3 +64,21 @@ load (fail fast) in addition to the persisted-override boot fallback.
   green except `trade-summary.test.ts` "summarizes multiple active trades with
   live quotes", which fails identically on `master` (pre-existing, not caused
   by this refactor; unit-test work is paused by operator instruction).
+
+## Follow-up 2026-10-27: symmetric coexistence + Arcus rate-limit caps
+
+Operator decisions: BTC trades never use Arcus (disjoint venues), `/bot`
+pause stays MANUAL, and during a pause only the metal exit tick must stay
+alive. Changes on top of the commits above (same branch):
+
+- `db-preview-store.ts`: `hasBlockingExecution()` excludes GOLDSILVER
+  trades → BTC preview/confirm no longer blocked by an active metal trade
+  (second BTC trade with an active BTC trade still refused).
+- `trade-monitor.ts`: while a G/S trade is active, Arcus leg position
+  polls are throttled to `GOLDSILVER_PRICE_POLL_INTERVAL_MS` (5 s) via a
+  per-leg timestamp map (429 cap; detection latency ~5 s is safe because
+  metal exits are evaluated from the mark-price tick, not this poll).
+- `polling-loop.ts`: `runMetalRatioPass` now also runs while the bot is
+  paused (operator /bot pause); it no-ops without an active metal trade,
+  so a paused idle bot still makes no Arcus calls.
+- `AGENTS.md`: "Coexistence with the BTC strategy" section.
