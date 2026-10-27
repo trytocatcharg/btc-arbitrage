@@ -4,6 +4,7 @@ import { signals, tradePreviews } from "@btc-arbitrage/db";
 import { eq } from "drizzle-orm";
 import {
   findTradingPair,
+  GOLD_SILVER_SYMBOL,
   parseDecimal,
   TRADING_PAIRS,
   computeRsi,
@@ -913,14 +914,34 @@ export class TelegramCommandPoller {
             loadActiveTrades(this.db),
             Promise.resolve(this.executionQueue.isExecuting()),
           ]);
-          if (active.length > 0 || queueBusy) {
-            const refusal =
-              active.length > 0
-                ? `⛔ Cannot ${actionLabel}: there are ${active.length} ` +
-                  `active trade(s) (${active
-                    .map((trade) => `id ${trade.id}, status ${trade.status}`)
-                    .join("; ")}).`
-                : `⛔ Cannot ${actionLabel}: a trade execution is in progress.`;
+          // gold-silver-decouple: active GOLD/SILVER trades do NOT block
+          // PAUSE — the metal exit tick (SL/TP/time-stop) keeps running
+          // while paused, so pausing never leaves a metal position
+          // unprotected. RESUME is always safe (it only restores normal
+          // monitoring, which is the state every execution runs in).
+          // RESTART stays fully guarded by ANY active trade: it kills the
+          // process, and pausing exit evaluation (even with the
+          // exchange-resting disaster stops) is not something to allow
+          // casually with a position open.
+          const spreadTrades = active.filter(
+            (trade) => trade.symbol !== GOLD_SILVER_SYMBOL,
+          );
+          const blockingTrades =
+            data === "bot:restart" ? active : spreadTrades;
+          const blockedByTrades =
+            data === "bot:restart"
+              ? active.length > 0
+              : data === "bot:pause"
+                ? spreadTrades.length > 0
+                : false;
+          const blockedByQueue = data !== "bot:resume" && queueBusy;
+          if (blockedByTrades || blockedByQueue) {
+            const refusal = blockedByTrades
+              ? `⛔ Cannot ${actionLabel}: there are ${blockingTrades.length} ` +
+                `active trade(s) (${blockingTrades
+                  .map((trade) => `id ${trade.id}, status ${trade.status}`)
+                  .join("; ")}).`
+              : `⛔ Cannot ${actionLabel}: a trade execution is in progress.`;
             if (typeof messageId === "number") {
               await this.editMessageText(messageId, refusal).catch(
                 (error: unknown) => {
@@ -937,7 +958,8 @@ export class TelegramCommandPoller {
             const { text, markup } = this.buildBotControlPanel();
             await this.sendMessage(
               "⏸ Bot paused. Price and signal monitoring is stopped; " +
-                "Telegram and the defensive monitor stay active.\n\n" +
+                "the gold/silver exit watch (SL/TP/time-stop) keeps " +
+                "running. Telegram stays active.\n\n" +
                 text,
               markup,
             );

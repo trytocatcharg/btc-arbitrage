@@ -66,6 +66,9 @@ export function createBotControl(): BotControl {
 export interface ActiveTradeRef {
   id: number;
   status: string;
+  /** gold-silver-decouple: lets control surfaces tell BTC spread trades
+   * apart from GOLD/SILVER metal trades (e.g. /bot pause allows metal). */
+  symbol: string;
 }
 
 /** Active trades, newest first; used by control surfaces to block pause/safe actions. */
@@ -73,7 +76,7 @@ export async function loadActiveTrades(
   db: Awaited<ReturnType<typeof getDb>>,
 ): Promise<ActiveTradeRef[]> {
   return db
-    .select({ id: trades.id, status: trades.status })
+    .select({ id: trades.id, status: trades.status, symbol: trades.symbol })
     .from(trades)
     .where(inArray(trades.status, [...activeTradeStatuses]))
     .orderBy(desc(trades.id));
