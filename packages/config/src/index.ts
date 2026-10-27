@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import {
   ExecutionMode,
+  GOLD_SILVER_SYMBOL,
   type ExchangeId,
   type MarketType,
   type PriceSource,
@@ -139,12 +140,27 @@ export interface BotConfig {
     retentionDays: number;
     batchSize: number;
   };
-  /** Gold/silver ratio monitor (v1: monitor-only, no execution). Watches the
-   * GLD-USD / SLV-USD perp ratio on Arcus and alerts on RSI crosses of 50. */
+  /** Gold/silver ratio strategy (Arcus-only GLD-USD / SLV-USD pair trade).
+   * Since gold-silver-decouple it is opened on demand from the Telegram
+   * /ratio command and coexists with the active spread pair; the
+   * tick/exit pass runs only while a G/S trade is active. There are no
+   * RSI alerts and no pair-selection switch. */
   goldSilver: {
-    /** Activation switch for the ratio monitor is the trading pair itself
-     * (btcSymbol === GOLD_SILVER_SYMBOL via the Telegram Pairs panel) —
-     * there is deliberately no separate env flag. */
+    /** GOLDSILVER_MARGIN_USD: margin per leg (was shared
+     * OPEN_TRADE_MARGIN_USD); notional derives as margin × leverage. */
+    marginUsd: string;
+    /** GOLDSILVER_LEVERAGE: leverage for the metal legs (was shared
+     * LEVERAGE). */
+    leverage: number;
+    /** GOLDSILVER_LIMIT_TIMEOUT_MS: passive GLD limit fill wait (was shared
+     * OPEN_TRADE_LIMIT_TIMEOUT_MS). */
+    limitTimeoutMs: number;
+    /** GOLDSILVER_LIMIT_REPRICE_INTERVAL_MS: cancel-and-replace cadence of
+     * the resting GLD limit (was shared OPEN_TRADE_REPRICE_INTERVAL_MS). */
+    limitRepriceIntervalMs: number;
+    /** GOLDSILVER_ENTRY_IMPROVE_TICKS: ticks to improve the passive GLD
+     * limit beyond best bid/ask (was shared OPEN_TRADE_ENTRY_IMPROVE_TICKS). */
+    entryImproveTicks: number;
     /** GOLDSILVER_RSI_PERIOD: Wilder RSI period (>= 2). */
     rsiPeriod: number;
     /** GOLDSILVER_RSI_CONFIRM_BAND: confirmation band around RSI 50, stored
@@ -156,15 +172,14 @@ export interface BotConfig {
     /** GOLDSILVER_CANDLE_LIMIT: candles fetched per build (clamped 1..200). */
     candleLimit: number;
     /** GOLDSILVER_PRICE_POLL_INTERVAL_MS: cadence of the live mark-price
-     * tick (default 5000). The engine works on candle buckets, so 1 Hz
-     * polling only burns Arcus rate-limit budget without adding signal. */
+     * tick while a G/S trade is active (default 5000). The engine works on
+     * candle buckets, so 1 Hz polling only burns Arcus rate-limit budget
+     * without adding signal. */
     pricePollIntervalMs: number;
-    /** GOLDSILVER_ALERT_COOLDOWN_MS: global cooldown between ratio alerts. */
-    alertCooldownMs: number;
     /** GOLDSILVER_STOP_LOSS_MARGIN_PERCENT: net-PnL stop (percent of TOTAL
      * margin, both legs) executed as immediate market close on both legs.
      * 50 = the position is market-closed when net PnL <= -50% of
-     * 2 x OPEN_TRADE_MARGIN_USD. */
+     * 2 x GOLDSILVER_MARGIN_USD. */
     stopLossMarginPercent: number;
     /** GOLDSILVER_TP_MIN_NET_USD: profit floor for the RSI-50 take-profit:
      * the cross only closes the trade when net PnL >= estimated exit
@@ -226,11 +241,29 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
         `${key} was removed by adjust-tpsl-volume-farming; see .env.example (spread exits deleted / replaced by OPEN_TRADE_MIN_PROFIT_USD)`,
       );
   }
+  // GOLDSILVER_ALERT_COOLDOWN_MS was removed by gold-silver-decouple: the
+  // metal strategy no longer emits RSI alerts (it runs on demand from
+  // /ratio and ticks only while a G/S trade is active), so there is no
+  // alert cadence to configure.
+  if (env.GOLDSILVER_ALERT_COOLDOWN_MS !== undefined)
+    throw new Error(
+      "GOLDSILVER_ALERT_COOLDOWN_MS was removed by gold-silver-decouple (RSI alerts deleted; the metal trade is opened on demand from /ratio).",
+    );
 
   const exchangeA = parseExchange(env.EXCHANGE_A ?? "risex", "EXCHANGE_A");
   const exchangeB = parseExchange(env.EXCHANGE_B ?? "extended", "EXCHANGE_B");
   if (exchangeA === exchangeB)
     throw new Error("EXCHANGE_A and EXCHANGE_B must be different");
+
+  // gold-silver-decouple: GOLDSILVER is no longer a selectable pair (the
+  // metal strategy runs on demand from /ratio alongside the spread pair),
+  // so it can never be the monitored symbol. Fail fast instead of letting
+  // every tick die on the exchanges' unknown-market errors.
+  if ((env.BTC_SYMBOL ?? "").trim().toUpperCase() === GOLD_SILVER_SYMBOL) {
+    throw new Error(
+      "BTC_SYMBOL=GOLDSILVER was removed by gold-silver-decouple: GOLD/SILVER is no longer a trading pair. Set a spread pair (e.g. BTCUSDT) and open metal trades from /ratio.",
+    );
+  }
 
   const priceSource = parsePriceSource(env.PRICE_SOURCE ?? "mark");
   const marketType = parseMarketType(env.MARKET_TYPE ?? "perpetual");
@@ -376,8 +409,31 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   );
   const notionalUsd = (Number(marginUsd) * leverage).toFixed(8);
 
-  // Gold/silver ratio monitor (v1 monitor-only; takeProfitNetUsd is stored
-  // now for the future execution phase).
+  // Gold/silver ratio strategy (on-demand from /ratio since
+  // gold-silver-decouple). Sizing and the entry loop now have their own
+  // env vars (defaults equal the previously shared OPEN_TRADE_* / LEVERAGE
+  // values); the monitor knobs below only apply while a G/S trade is
+  // active.
+  const goldSilverMarginUsd = parsePositiveDecimalString(
+    env.GOLDSILVER_MARGIN_USD ?? "20",
+    "GOLDSILVER_MARGIN_USD",
+  );
+  const goldSilverLeverage = parsePositiveInteger(
+    env.GOLDSILVER_LEVERAGE ?? "3",
+    "GOLDSILVER_LEVERAGE",
+  );
+  const goldSilverLimitTimeoutMs = parsePositiveInteger(
+    env.GOLDSILVER_LIMIT_TIMEOUT_MS ?? "30000",
+    "GOLDSILVER_LIMIT_TIMEOUT_MS",
+  );
+  const goldSilverLimitRepriceIntervalMs = parseNonNegativeInteger(
+    env.GOLDSILVER_LIMIT_REPRICE_INTERVAL_MS ?? "2000",
+    "GOLDSILVER_LIMIT_REPRICE_INTERVAL_MS",
+  );
+  const goldSilverEntryImproveTicks = parseNonNegativeInteger(
+    env.GOLDSILVER_ENTRY_IMPROVE_TICKS ?? "1",
+    "GOLDSILVER_ENTRY_IMPROVE_TICKS",
+  );
   const goldSilverRsiPeriod = parsePositiveInteger(
     env.GOLDSILVER_RSI_PERIOD ?? "14",
     "GOLDSILVER_RSI_PERIOD",
@@ -407,10 +463,6 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       "GOLDSILVER_PRICE_POLL_INTERVAL_MS must be 0 (follow the BTC tick) or >= 1000",
     );
   }
-  const goldSilverAlertCooldownMs = parseNonNegativeInteger(
-    env.GOLDSILVER_ALERT_COOLDOWN_MS ?? "3600000",
-    "GOLDSILVER_ALERT_COOLDOWN_MS",
-  );
   const goldSilverStopLossMarginPercent = parseClampedInteger(
     env.GOLDSILVER_STOP_LOSS_MARGIN_PERCENT ?? "50",
     "GOLDSILVER_STOP_LOSS_MARGIN_PERCENT",
@@ -610,12 +662,16 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       batchSize: dataRetentionBatchSize,
     },
     goldSilver: {
+      marginUsd: goldSilverMarginUsd,
+      leverage: goldSilverLeverage,
+      limitTimeoutMs: goldSilverLimitTimeoutMs,
+      limitRepriceIntervalMs: goldSilverLimitRepriceIntervalMs,
+      entryImproveTicks: goldSilverEntryImproveTicks,
       rsiPeriod: goldSilverRsiPeriod,
       rsiConfirmBand: goldSilverRsiConfirmBand,
       candleTimeframe: goldSilverCandleTimeframe,
       candleLimit: goldSilverCandleLimit,
       pricePollIntervalMs: goldSilverPricePollIntervalMs,
-      alertCooldownMs: goldSilverAlertCooldownMs,
       stopLossMarginPercent: goldSilverStopLossMarginPercent,
       tpMinNetUsd: goldSilverTpMinNetUsd,
       exitRepriceIntervalMs: goldSilverExitRepriceIntervalMs,

@@ -126,19 +126,17 @@ export interface TradingPair {
 
 export const DEFAULT_TRADING_PAIR_SYMBOL = "BTCUSDT";
 
-/** Pseudo-pair symbol for the gold/silver ratio monitor (RSI-50 pairs
- * strategy on Arcus GLD-USD / SLV-USD mark prices). Unlike the spread
- * pairs it is NOT resolved by the per-exchange spread adapters — the
- * polling loop routes it to the dedicated metal-ratio monitor instead.
- * Selecting it via the Telegram Pairs panel switches the whole strategy:
- * the BTC spread pass is skipped and only the ratio monitor runs. */
+/** Symbol stored on gold/silver ratio trades (`trades.symbol` = "GOLDSILVER",
+ * both legs on Arcus GLD-USD / SLV-USD). It is NOT a selectable trading
+ * pair: since gold-silver-decouple the metal strategy is opened on demand
+ * from the Telegram /ratio command and coexists with the active spread
+ * pair, and no spread-exchange adapter ever resolves this symbol. */
 export const GOLD_SILVER_SYMBOL = "GOLDSILVER";
 
 export const TRADING_PAIRS: readonly TradingPair[] = [
   { label: "BTC/USD", symbol: "BTCUSDT" },
   { label: "ETH/USD", symbol: "ETHUSDT" },
   { label: "NVDA/USD", symbol: "NVDAUSDT" },
-  { label: "GOLD/SILVER", symbol: GOLD_SILVER_SYMBOL },
 ];
 
 export function findTradingPair(
