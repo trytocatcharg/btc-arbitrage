@@ -240,52 +240,68 @@ Entry legs are routed with this priority (`docs/open-trade-routing.md` is the pe
 
 Maker = limit order, taker = market order. Short leg goes to the higher-bid venue; long leg to the other side.
 
-### Gold/silver ratio strategy (GOLD/SILVER pair)
+### Gold/silver ratio strategy (on-demand metal trade)
 
-Arcus-only pairs strategy on the GLD-USD / SLV-USD perp ratio (docs in `odd/tasks/gold-silver-ratio.md`).
+Arcus-only pairs strategy on the GLD-USD / SLV-USD perp ratio (docs in `odd/tasks/gold-silver-ratio.md`). Since `gold-silver-decouple` (2026-10-26) it is an ON-DEMAND trade coexisting with the active spread pair — not a pair-selection mode.
 
-- **Activation**: `GOLD/SILVER` is a pseudo-pair in the `TRADING_PAIRS` catalog
-  (domain), selected from the Telegram 🪙 Pairs panel. When
-  `config.btcSymbol === GOLDSILVER_SYMBOL` the polling loop runs ONLY the
-  metal-ratio pass (the BTC spread pass is skipped wholesale). No env flag —
-  the pair selection is the single switch. Arcus-only by operator decision:
-  Extended/RISEx never resolve GOLDSILVER, and every `btcSymbol` consumer
-  guards it (signal pass branch, position-reconciler scan skip, boot
-  execution preflight skip, `pair:apply:`/leverage preflight skips, stale
-  `open:` refusal).
-- **Monitor**: RSI(14) (Wilder) of the ratio, computed on candle closes of
-  `GOLDSILVER_CANDLE_TIMEFRAME` (default `1h`). Live ticks are bucketed by
-  timeframe — the forming bucket refreshes per tick and commits ONE close
-  when the bucket rolls (per-tick appends would degrade the RSI into
-  per-poll noise). Warmup at (re)activation fetches Arcus
-  `GET /v1/candles` (both markets, aligned by openTime). Alerts on RSI
-  crosses of 50 with confirmation band (`GOLDSILVER_RSI_CONFIRM_BAND`),
-  hysteresis, and `GOLDSILVER_ALERT_COOLDOWN_MS`. One `ratio_snapshots` row
-  per tick (migration 0006).
+- **Activation**: there is none. `GOLD/SILVER` was removed from the
+  `TRADING_PAIRS` catalog, so the 🪙 Pairs panel only selects the spread
+  pair and the BTC spread pass always runs. `GOLD_SILVER_SYMBOL`
+  ("GOLDSILVER") survives only as the `trades.symbol` of metal trades.
+  `BTC_SYMBOL=GOLDSILVER` fails config load, and a stale persisted
+  `tradingPair=GOLDSILVER` runtime override is ignored at boot with a
+  warning (env pair kept).
+- **Monitor (only while a G/S trade is active)**: RSI(14) (Wilder) of the
+  ratio, computed on candle closes of `GOLDSILVER_CANDLE_TIMEFRAME`
+  (default `1h`). Live ticks are bucketed by timeframe — the forming
+  bucket refreshes per tick and commits ONE close when the bucket rolls
+  (per-tick appends would degrade the RSI into per-poll noise). The metal
+  tick lazily warms up (Arcus `GET /v1/candles`, both markets, aligned by
+  openTime) on the first tick with an active metal trade and re-warms when
+  stale. There are NO RSI alerts (entry is operator-driven from `/ratio`),
+  and no `ratio_snapshots` rows while idle — one row per tick only while a
+  trade is active (migration 0006). BTC signal suppression IGNORES active
+  G/S trades (`trades.symbol = 'GOLDSILVER'` is excluded from the
+  active-trade query) so both strategies run concurrently; the position
+  reconciler's leg sums are likewise scoped to the scanned spread symbol.
 - **Execution (manual only — operator decision 2026-10-23: no
-  auto-confirm)**: one-click from the alert's `Open Trade` button
-  (`metaltrade:open:` callback → serial execution queue). Entry: passive
-  post-only ALO limit on GLD (reprice loop, cancel-race on timeout) +
-  immediate market IOC hedge on SLV per fill increment. Sizing reuses
-  `OPEN_TRADE_MARGIN_USD` (per leg) × `LEVERAGE`; dollar-neutral legs
-  (direction derived from legs: the gold leg's base qty is always the
-  smaller). Exits: **TP** = RSI crosses back to the opposite side AND net
-  PnL ≥ exit-fee breakeven + `GOLDSILVER_TP_MIN_NET_USD` (default $10) →
-  paired dual-limit close (reduce-only GTT at the touch, reprice every
+  auto-confirm)**: one-click from the `/ratio` chart's open buttons
+  (`metaltrade:open:` callback → serial execution queue); one metal trade
+  at a time (`createMetalTrade` enforces it; `/ratio` hides the buttons
+  and warns while one is active). Entry: passive post-only ALO limit on
+  GLD (reprice loop, cancel-race on timeout) + immediate market IOC hedge
+  on SLV per fill increment. Sizing: `GOLDSILVER_MARGIN_USD` (per leg,
+  default 20) × `GOLDSILVER_LEVERAGE` (default 3) — split from the shared
+  `OPEN_TRADE_MARGIN_USD`/`LEVERAGE`; the entry loop uses
+  `GOLDSILVER_LIMIT_TIMEOUT_MS` (30000),
+  `GOLDSILVER_LIMIT_REPRICE_INTERVAL_MS` (2000) and
+  `GOLDSILVER_ENTRY_IMPROVE_TICKS` (1). Dollar-neutral legs (direction
+  derived from legs: the gold leg's base qty is always the smaller).
+  Exits: **TP** = RSI crosses back to the opposite side AND net PnL ≥
+  exit-fee breakeven + `GOLDSILVER_TP_MIN_NET_USD` (default $10) → paired
+  dual-limit close (reduce-only GTT at the touch, reprice every
   `GOLDSILVER_EXIT_REPRICE_INTERVAL_MS`); **time-stop**
-  `GOLDSILVER_TIME_STOP_HOURS` (48h) at market when ≥ breakeven;
-  **SL** net ≤ -`GOLDSILVER_STOP_LOSS_MARGIN_PERCENT` (50) of TOTAL margin
-  → immediate market both legs. Paired-close fallback: first of 40 bps
+  `GOLDSILVER_TIME_STOP_HOURS` (48h) at market when ≥ breakeven; **SL**
+  net ≤ -`GOLDSILVER_STOP_LOSS_MARGIN_PERCENT` (50) of TOTAL margin →
+  immediate market both legs. Paired-close fallback: first of 40 bps
   slippage / 60 s / 8 reprices (`GOLDSILVER_EXIT_*`) → market the
   remainder. Reuses `trades`/`trade_legs` (symbol `GOLDSILVER`, both legs
-  `arcus`) — no schema change beyond migration 0006.
-- **`/ratio` command**: Telegram photo of a TradingView-style chart
-  (ratio candles + RSI panel) via the Python renderer
+  `arcus`) — no schema change beyond migration 0006. Exchange-resting
+  disaster stops (stop-market reduce-only) rest on both legs as bot-down
+  insurance.
+- **`/ratio` command**: available ANYTIME regardless of the active spread
+  pair. Telegram photo of a TradingView-style chart (ratio candles + RSI
+  panel) via the Python renderer
   `apps/bot/src/metal-ratio/metal-ratio-chart.py` (JSON stdin → PNG
-  stdout, palette ported from the operator's wolfe-wave project). The bot
-  build copies the `.py` into `dist/`; the runtime image needs `python3` +
-  `Pillow` (only `/ratio` uses it — a missing Python degrades to a
-  friendly error, never a crash).
+  stdout, palette ported from the operator's wolfe-wave project), plus the
+  two one-click open buttons; when a metal trade is already active the
+  chart renders with a warning caption (trade id + status) and NO
+  buttons. The bot build copies the `.py` into `dist/`; the runtime image
+  needs `python3` + `Pillow` (only `/ratio` uses it — a missing Python
+  degrades to a friendly error, never a crash). The `/trade` active-trade
+  summary hides the entry/live spread lines for GOLDSILVER trades and
+  labels legs by asset (`LONG GLD (arcus)` / `SHORT SLV (arcus)`, market
+  read from `leg.raw.market`).
 
 ## Working principles
 
