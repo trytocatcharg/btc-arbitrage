@@ -1,6 +1,6 @@
 import type { BotConfig } from "@btc-arbitrage/config";
 import type { getDb } from "@btc-arbitrage/db";
-import { signals, tradePreviews } from "@btc-arbitrage/db";
+import { signals, tradePreviews, trades } from "@btc-arbitrage/db";
 import { eq } from "drizzle-orm";
 import {
   findTradingPair,
@@ -15,6 +15,7 @@ import {
   buildLastTradesMessage,
   buildTradeSummaryMessage,
   hasActiveTrades,
+  loadClosableTrades,
   type ExchangeRegistryLike,
 } from "./trade-summary.js";
 import { buildLastSignalsMessage } from "./last-signals-summary.js";
@@ -60,10 +61,12 @@ import {
 } from "../runtime/runtime-control.js";
 import { persistRuntimeOverride } from "../runtime/runtime-settings-store.js";
 import {
+  closeMetalTrade,
   createMetalTrade,
   executeMetalTradeEntry,
   loadActiveMetalTrade,
 } from "../metal-ratio/metal-trade-service.js";
+import { manualMarketCloseTrade } from "../trading/manual-trade-close.js";
 import { renderMetalRatioChart } from "../metal-ratio/metal-ratio-chart.js";
 import { loadYahooRatioBuckets } from "../metal-ratio/yahoo-metals-client.js";
 import {
@@ -1257,17 +1260,168 @@ export class TelegramCommandPoller {
           },
         });
       } else if (data === "trade:active" || data === "trade:last10") {
-        await this.sendMessage(
-          data === "trade:active"
-            ? await buildTradeSummaryMessage({
+        if (data === "trade:active") {
+          const [summary, closable] = await Promise.all([
+            buildTradeSummaryMessage({
+              db: this.db,
+              registry: this.registry,
+              config: this.config,
+            }),
+            loadClosableTrades(this.db),
+          ]);
+          // Manual escape hatch (gold-silver-decouple): one "Close @
+          // market" button per open/unhedged trade, with a two-step
+          // confirm (tradeclose:ask → tradeclose:confirm/cancel).
+          await this.sendMessage(
+            summary,
+            closable.length > 0
+              ? {
+                  inline_keyboard: closable.map((trade) => [
+                    {
+                      text: `🔒 Close #${trade.id} (${trade.symbol}) @ market`,
+                      callback_data: `tradeclose:ask:${trade.id}`,
+                    },
+                  ]),
+                }
+              : undefined,
+          );
+        } else {
+          await this.sendMessage(
+            await buildLastTradesMessage(
+              {
                 db: this.db,
-                registry: this.registry,
-                config: this.config,
-              })
-            : await buildLastTradesMessage({
-                db: this.db,
-              }, this.config.telegram.operatorTimezone),
+              },
+              this.config.telegram.operatorTimezone,
+            ),
+          );
+        }
+      } else if (data.startsWith("tradeclose:")) {
+        // Manual market-close flow (gold-silver-decouple): two-step,
+        // operator-confirmed escape hatch for open/unhedged trades (BTC
+        // and metal alike). Chat/user authorization is already enforced
+        // above for every callback.
+        const parts = data.slice("tradeclose:".length).split(":");
+        const action = parts[0];
+        const tradeId = Number(parts[1]);
+        const messageId = callback.message?.message_id;
+        const reply = async (text: string, markup?: unknown) => {
+          if (typeof messageId === "number") {
+            await this.editMessageText(messageId, text, markup).catch(
+              (error: unknown) => {
+                console.warn("Telegram trade-close edit failed", {
+                  messageId,
+                  message:
+                    error instanceof Error ? error.message : String(error),
+                });
+              },
+            );
+          }
+        };
+        if (
+          (action !== "ask" && action !== "confirm" && action !== "cancel") ||
+          !Number.isInteger(tradeId)
+        ) {
+          throw new Error(`Malformed trade-close callback: ${data}`);
+        }
+        if (action === "cancel") {
+          await reply(`✅ Close of trade #${tradeId} cancelled.`);
+          return;
+        }
+        const trade = (
+          await this.db
+            .select()
+            .from(trades)
+            .where(eq(trades.id, tradeId))
+            .limit(1)
+        )[0];
+        const closable =
+          trade != null &&
+          (trade.status === "open" || trade.status === "unhedged");
+        if (!closable) {
+          await reply(
+            `⚠️ Trade #${tradeId} is '${trade?.status ?? "missing"}' — no ` +
+              "longer closeable at market (already closing/closed, or still " +
+              "in the entry phase).",
+          );
+          return;
+        }
+        if (action === "ask") {
+          await reply(
+            `⚠️ Close trade #${tradeId} (${trade.symbol}) at MARKET?\n` +
+              "Both open legs close immediately at market (possible " +
+              "slippage). Protection orders are cancelled first. This " +
+              "cannot be undone.",
+            {
+              inline_keyboard: [
+                [
+                  {
+                    text: `✅ Confirm close #${tradeId}`,
+                    callback_data: `tradeclose:confirm:${tradeId}`,
+                  },
+                  {
+                    text: "Cancel",
+                    callback_data: `tradeclose:cancel:${tradeId}`,
+                  },
+                ],
+              ],
+            },
+          );
+          return;
+        }
+        // confirm: the claim happens inside the queued job (race-safe),
+        // but we re-check here so a stale button gets an honest answer
+        // instead of a silent no-op.
+        await reply(
+          `⏳ Closing trade #${tradeId} (${trade.symbol}) at market… ` +
+            "This can take up to ~20 s.",
         );
+        const isMetal = trade.symbol === GOLD_SILVER_SYMBOL;
+        this.executionQueue.enqueue({
+          description: `manual-close:${tradeId}`,
+          run: async () => {
+            try {
+              if (isMetal) {
+                const arcusExecution = this.registry.get("arcus").execution;
+                if (!arcusExecution) {
+                  await this.sendMessage(
+                    "⛔ Manual close failed: Arcus execution is not available.",
+                  );
+                  return;
+                }
+                await closeMetalTrade(
+                  {
+                    db: this.db,
+                    config: this.config,
+                    execution: arcusExecution,
+                    notify: async (text: string) => {
+                      await this.sendMessage(text);
+                    },
+                    notifyUrgent: async (text: string) => {
+                      await this.sendMessage(text);
+                    },
+                  },
+                  tradeId,
+                  "manual operator close",
+                  "market",
+                );
+              } else {
+                await manualMarketCloseTrade({
+                  db: this.db,
+                  registry: this.registry,
+                  notifier: { notifyUrgent: (text) => this.sendMessage(text) },
+                  tradeId,
+                });
+              }
+            } catch (error) {
+              const message =
+                error instanceof Error ? error.message : String(error);
+              console.error("Manual trade close failed", { tradeId, message });
+              await this.sendMessage(
+                `🚨 Manual close of #${tradeId} failed: ${message}`,
+              );
+            }
+          },
+        });
       } else if (data.startsWith("untracked:")) {
         // Position reconciler close flow (position-reconciler, work unit
         // 2): two-step, operator-confirmed market close of an untracked

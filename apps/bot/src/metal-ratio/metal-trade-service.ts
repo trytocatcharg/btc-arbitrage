@@ -918,22 +918,34 @@ interface LegExit {
   qty: number;
 }
 
-/** Closes an open metal trade. mode "market" (SL / time-stop): immediate
- * market reduce-only on both legs. mode "limit" (TP): paired dual-limit
- * close — reduce-only limits resting at the touch; when one leg fills,
- * the other is repriced every exitRepriceIntervalMs; the first exhausted
+/** Closes an open metal trade. mode "market" (SL / time-stop / the
+ * operator's manual "Close @ market" escape hatch): immediate market
+ * reduce-only on both legs. mode "limit" (TP): paired dual-limit close
+ * — reduce-only limits resting at the touch; when one leg fills, the
+ * other is repriced every exitRepriceIntervalMs; the first exhausted
  * budget (slippage bps / max wait / max reprices) market-closes the
- * remainder. */
+ * remainder. The claim accepts "unhedged" too: one leg may already be
+ * closed, the close finishes the remaining open legs. */
 export async function closeMetalTrade(
   ctx: MetalTradeContext,
   tradeId: number,
   reason: string,
   mode: "limit" | "market",
 ): Promise<void> {
+  const current = (
+    await ctx.db
+      .select({ status: trades.status })
+      .from(trades)
+      .where(eq(trades.id, tradeId))
+      .limit(1)
+  )[0];
+  if (!current || (current.status !== "open" && current.status !== "unhedged")) {
+    return; // not closeable (already closing/closed, or still entering).
+  }
   const claimed = await transitionTrade(
     ctx,
     tradeId,
-    "open",
+    current.status,
     "closing",
     `close requested: ${reason} (${mode})`,
     { status: "closing" },

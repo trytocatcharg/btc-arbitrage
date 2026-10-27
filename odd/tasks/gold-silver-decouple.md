@@ -82,3 +82,22 @@ alive. Changes on top of the commits above (same branch):
   paused (operator /bot pause); it no-ops without an active metal trade,
   so a paused idle bot still makes no Arcus calls.
 - `AGENTS.md`: "Coexistence with the BTC strategy" section.
+
+## Follow-up 2026-10-27: manual market close (escape hatch)
+
+Operator request: a manual escape hatch — close any active trade at
+market from the /trade summary, with a two-step confirm.
+
+- `/trade` active summary: one `🔒 Close #<id> (<symbol>) @ market`
+  button per trade in `open`/`unhedged`; `tradeclose:ask` → edit with
+  Confirm/Cancel; `tradeclose:confirm` enqueues a serial-queue job;
+  `tradeclose:cancel` aborts. Chat/user authorization is the existing
+  callback guard.
+- BTC path: new `trading/manual-trade-close.ts` — race-safe claim
+  (conditional UPDATE into `closing`), then reuses `closeTradeBothLegs`
+  (same primitive as the stale-close recovery sweep) with
+  `close_reason = manual_close` (added to SpreadCloseReason).
+- Metal path: reuses `closeMetalTrade(mode: "market")`; its claim now
+  accepts `unhedged` in addition to `open`.
+- Entry phases (`executing_limit`/`hedging`/`protecting`) intentionally
+  have NO button (operator decision: only open/unhedged).

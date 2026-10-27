@@ -8,7 +8,10 @@ export type SpreadCloseReason =
   | "spread_tp"
   | "spread_sl"
   | "edge_below_cost"
-  | "close_recovery";
+  | "close_recovery"
+  /** Operator-initiated escape hatch from the /trade "Close @ market"
+   * button (gold-silver-decouple manual close). */
+  | "manual_close";
 
 export interface CloseLegInput {
   exchangeId: string;

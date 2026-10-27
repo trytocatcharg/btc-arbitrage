@@ -306,7 +306,7 @@ Arcus-only pairs strategy on the GLD-USD / SLV-USD perp ratio (docs in `odd/task
   `arcus`) — no schema change beyond migration 0006. Exchange-resting
   disaster stops (stop-market reduce-only) rest on both legs as bot-down
   insurance.
-- **`/ratio` command**: available ANYTIME regardless of the active spread
+- **`/trade` command**: available ANYTIME regardless of the active spread
   pair. Telegram photo of a TradingView-style chart (ratio candles + RSI
   panel) via the Python renderer
   `apps/bot/src/metal-ratio/metal-ratio-chart.py` (JSON stdin → PNG
@@ -319,6 +319,17 @@ Arcus-only pairs strategy on the GLD-USD / SLV-USD perp ratio (docs in `odd/task
   summary hides the entry/live spread lines for GOLDSILVER trades and
   labels legs by asset (`LONG GLD (arcus)` / `SHORT SLV (arcus)`, market
   read from `leg.raw.market`).
+- **Manual market close (escape hatch)**: the `/trade` active summary
+  carries one `🔒 Close #<id> (<symbol>) @ market` button per trade in
+  `open`/`unhedged` (BTC and metal alike), with a two-step confirm
+  (`tradeclose:ask` → `tradeclose:confirm/cancel`). Confirm enqueues a
+  serial-queue job that claims the trade race-safe into `closing` and
+  then closes: BTC trades reuse `closeTradeBothLegs` (TP/SL backstop
+  cancel, reduce-only market closes, flatness wait, leg/trade persist
+  with realized PnL, operator notice; `close_reason = manual_close`);
+  metal trades reuse `closeMetalTrade(mode: "market")`. Earlier entry
+  phases (`executing_limit`/`hedging`/`protecting`) have NO button — the
+  entry flow owns them and already has its own timeout/cancel.
 
 ## Working principles
 

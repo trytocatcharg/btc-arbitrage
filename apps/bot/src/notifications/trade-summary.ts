@@ -155,6 +155,25 @@ export async function hasActiveTrades(db: BotDatabase): Promise<boolean> {
   return rows.length > 0;
 }
 
+export interface ClosableTradeRef {
+  id: number;
+  symbol: string;
+}
+
+/** Trades the operator may close at market from the /trade summary
+ * (gold-silver-decouple manual escape hatch). Only 'open'/'unhedged':
+ * earlier phases are owned by the entry flow (which has its own
+ * timeout/cancel), and 'closing' is already claimed by a close owner. */
+export async function loadClosableTrades(
+  db: BotDatabase,
+): Promise<ClosableTradeRef[]> {
+  return db
+    .select({ id: trades.id, symbol: trades.symbol })
+    .from(trades)
+    .where(inArray(trades.status, ["open", "unhedged"]))
+    .orderBy(desc(trades.openedAt), desc(trades.createdAt));
+}
+
 export interface LastTradesDependencies {
   db: BotDatabase;
 }
