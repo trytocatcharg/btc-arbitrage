@@ -1,4 +1,5 @@
 import type { BotConfig } from "@btc-arbitrage/config";
+import { GOLD_SILVER_SYMBOL } from "@btc-arbitrage/domain";
 import { botRuntimeOverrides } from "@btc-arbitrage/db";
 import type { getDb } from "@btc-arbitrage/db";
 import { sql } from "drizzle-orm";
@@ -142,6 +143,17 @@ export async function applyPersistedRuntimeOverrides(
           changes.push(applyAutoConfirm(config, value as boolean));
           break;
         case "tradingPair":
+          // gold-silver-decouple: GOLDSILVER is no longer a selectable
+          // pair. A stale persisted override from before the refactor is
+          // ignored (the env pair stays) instead of reviving the removed
+          // monitor mode.
+          if ((value as string) === GOLD_SILVER_SYMBOL) {
+            console.warn(
+              "Ignoring persisted tradingPair=GOLDSILVER override: the gold/silver pair was removed by gold-silver-decouple (metal trades open on demand from /ratio). Keeping the env pair.",
+              { settingKey: row.settingKey, settingValue: row.settingValue },
+            );
+            break;
+          }
           changes.push(applyTradingPair(config, value as string));
           break;
       }

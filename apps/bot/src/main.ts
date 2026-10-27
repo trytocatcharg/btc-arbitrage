@@ -3,7 +3,6 @@ import {
   loadDotEnvFile,
   redactSecrets,
 } from "@btc-arbitrage/config";
-import { GOLD_SILVER_SYMBOL } from "@btc-arbitrage/domain";
 import { getDb } from "@btc-arbitrage/db";
 import type { ExecutionAdapter } from "@btc-arbitrage/exchange-core";
 import { sleep } from "@btc-arbitrage/shared";
@@ -183,49 +182,37 @@ async function main() {
   // except transient timeouts, retried with backoff (see
   // runStartupPreflightWithTransientRetry and
   // specs/exchange-execution.md).
-  // The GOLD/SILVER pseudo-pair is Arcus-only and monitor-only (v1): the
-  // spread exchanges have no GOLDSILVER market, so preflighting it there
-  // would fail the boot on every restart while the pair is persisted.
-  if (config.btcSymbol !== GOLD_SILVER_SYMBOL) {
-    for (const exchangeId of [config.exchangeA, config.exchangeB]) {
-      const adapter = registry.get(exchangeId);
-      // Each client mirrors its config.<exchange>.tradingEnabled into
-      // capabilities.orderPlacement at construction time, so the adapter is
-      // the single source of truth for "live trading enabled" — no
-      // exchange-id chain needed here.
-      if (!adapter.capabilities.orderPlacement) continue;
-      if (!adapter.execution) continue;
-      // Log before the await so a stalled boot shows exactly which exchange
-      // and which step (network calls carry a 10 s timeout) is in flight.
-      console.log("Running execution preflight at startup", {
-        exchange: exchangeId,
-        symbol: config.btcSymbol,
-        leverage: config.leverage,
-      });
-      try {
-        await runStartupPreflightWithTransientRetry(
-          exchangeId,
-          adapter.execution,
-          config.btcSymbol,
-          config.leverage,
-        );
-      } catch (error) {
-        console.error("Execution preflight failed at startup", {
-          exchange: exchangeId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        throw error;
-      }
-      console.log("Execution preflight completed at startup", {
-        exchange: exchangeId,
-      });
-    }
-  } else {
-    // Visible in the boot log so a skipped preflight is a deliberate,
-    // greppable line — not a silent hole.
-    console.log("Execution preflight skipped at startup", {
-      reason: "monitor-only pair",
+  for (const exchangeId of [config.exchangeA, config.exchangeB]) {
+    const adapter = registry.get(exchangeId);
+    // Each client mirrors its config.<exchange>.tradingEnabled into
+    // capabilities.orderPlacement at construction time, so the adapter is
+    // the single source of truth for "live trading enabled" — no
+    // exchange-id chain needed here.
+    if (!adapter.capabilities.orderPlacement) continue;
+    if (!adapter.execution) continue;
+    // Log before the await so a stalled boot shows exactly which exchange
+    // and which step (network calls carry a 10 s timeout) is in flight.
+    console.log("Running execution preflight at startup", {
+      exchange: exchangeId,
       symbol: config.btcSymbol,
+      leverage: config.leverage,
+    });
+    try {
+      await runStartupPreflightWithTransientRetry(
+        exchangeId,
+        adapter.execution,
+        config.btcSymbol,
+        config.leverage,
+      );
+    } catch (error) {
+      console.error("Execution preflight failed at startup", {
+        exchange: exchangeId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+    console.log("Execution preflight completed at startup", {
+      exchange: exchangeId,
     });
   }
 

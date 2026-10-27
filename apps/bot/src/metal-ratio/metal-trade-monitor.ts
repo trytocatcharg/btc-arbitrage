@@ -72,7 +72,7 @@ export async function evaluateMetalTradeExitTriggers(
   const breakeven = entryFees + exitEstimate;
   const net = grossPnl - breakeven;
 
-  const marginUsd = parseDecimal(ctx.config.openTrade.marginUsd, "marginUsd");
+  const marginUsd = parseDecimal(ctx.config.goldSilver.marginUsd, "marginUsd");
   const totalMargin = 2 * marginUsd;
   const slThreshold =
     -(ctx.config.goldSilver.stopLossMarginPercent / 100) * totalMargin;

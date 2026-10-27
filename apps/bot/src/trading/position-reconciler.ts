@@ -8,15 +8,6 @@ import {
 import type { BotConfig } from "@btc-arbitrage/config";
 import type { ExchangeAdapter } from "@btc-arbitrage/exchange-core";
 import { parseDecimal } from "@btc-arbitrage/domain";
-import { GOLD_SILVER_SYMBOL } from "@btc-arbitrage/domain";
-
-/**
- * The GOLD/SILVER pseudo-pair is Arcus-only and monitor-only (v1): it never
- * creates DB legs and no spread-exchange adapter resolves its symbol, so
- * the per-(exchange, side) position scan below has nothing legitimate to
- * read there. Skip the scan wholesale while it is active — reporting the
- * exchanges as unread would trip the entry block and the episode alert on
- * every pass for a market the spread venues simply do not list.
 
 /**
  * Position reconciler (position-reconciler, P0 — 2026-10-21 incident).
@@ -195,15 +186,13 @@ export async function scanUntrackedPositions(input: {
     ...new Set([input.config.exchangeA, input.config.exchangeB]),
   ];
 
-  // Arcus-only monitor pair: no DB legs can exist and the spread exchanges
-  // cannot hold a GOLDSILVER position (see module header).
-  if (input.config.btcSymbol === GOLD_SILVER_SYMBOL) {
-    return { findings: [], readFailedExchanges: [] };
-  }
-
-  // Sum ACTIVE leg quantities per (exchange, side). Terminal leg states are
-  // excluded even inside an active trade: a closed sibling of an unhedged
-  // trade holds no exchange position.
+  // Sum ACTIVE leg quantities per (exchange, side) — ONLY legs of trades
+  // on the scanned symbol: since gold-silver-decouple a metal (GOLDSILVER)
+  // trade can be active alongside the spread pair, and its Arcus GLD/SLV
+  // legs must never be counted against the spread pair's position (they
+  // would mask a genuinely untracked position when arcus is a monitored
+  // venue). Terminal leg states are excluded even inside an active trade:
+  // a closed sibling of an unhedged trade holds no exchange position.
   let legRows: Array<{
     exchangeId: string;
     side: "long" | "short";
@@ -221,6 +210,7 @@ export async function scanUntrackedPositions(input: {
       .where(
         and(
           inArray(trades.status, [...activeTradeStatuses]),
+          eq(trades.symbol, input.config.btcSymbol),
           // Terminal leg states never hold a position; exclude them so a
           // future non-terminal status stays tracked automatically
           // (whitelist would silently drop it — verifier finding).

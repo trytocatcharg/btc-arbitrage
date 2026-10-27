@@ -13,7 +13,7 @@ import {
   spreadSnapshots,
   trades,
 } from "@btc-arbitrage/db";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, ne } from "drizzle-orm";
 import { monitorTrades } from "../trading/trade-monitor.js";
 import { sampleUnhedgedLegs } from "../trading/unhedged-sampler.js";
 import { recoverStaleClosingTrades } from "../trading/close-recovery-monitor.js";
@@ -263,13 +263,12 @@ export async function runPollingLoop(input: {
     isShuttingDown,
   });
 
-  // Gold/silver ratio monitor (v1 monitor-only). Activated by selecting
-  // the GOLD/SILVER pseudo-pair via the Telegram Pairs panel
-  // (config.btcSymbol === GOLD_SILVER_SYMBOL). The pair can switch at
-  // runtime without a restart, so the context initializes lazily on the
-  // first active tick and re-warms its candle history when the ratio
-  // series has gone stale (e.g. the operator traded a spread pair for
-  // longer than the candle timeframe in between).
+  // Gold/silver ratio strategy (gold-silver-decouple): no longer a
+  // selectable pair. The context initializes lazily on the first tick
+  // with an ACTIVE metal trade (runMetalRatioPass gates on that) and
+  // re-warms its candle history when the ratio series has gone stale
+  // (e.g. the bot restarted mid-trade or the trade stayed open longer
+  // than the candle timeframe without a tick).
   interface MetalRatioContext {
     client: ArcusMarketDataClient;
     engine: MetalRatioEngine;
@@ -318,7 +317,6 @@ export async function runPollingLoop(input: {
           warmupCloses: closes.length,
           rsiPeriod: input.config.goldSilver.rsiPeriod,
           rsiConfirmBand: input.config.goldSilver.rsiConfirmBand,
-          alertCooldownMs: input.config.goldSilver.alertCooldownMs,
         });
       } catch (error) {
         // Cold start is acceptable degradation (RSI stays undefined until
@@ -398,6 +396,9 @@ export async function runPollingLoop(input: {
         console.log("Monitoring tick paused", { tick });
       } else {
         await runSignalPass(tick);
+        // The metal tick/exit pass is independent of the spread pass: it
+        // no-ops unless a gold/silver trade is active (gold-silver-decouple).
+        await runMetalRatioPass(tick);
       }
       console.log("Monitoring tick completed", {
         tick,
@@ -434,14 +435,6 @@ export async function runPollingLoop(input: {
   // Price snapshots + spread evaluation + signal emission + auto-confirm
   // enqueue, extracted from the tick so a paused bot skips it wholesale.
   async function runSignalPass(tick: number): Promise<void> {
-    // GOLD/SILVER pseudo-pair: the entire signal pass IS the metal-ratio
-    // monitor. The BTC spread work below does not apply, so it is skipped
-    // wholesale (the exchanges' spread prices are irrelevant for the
-    // ratio strategy).
-    if (input.config.btcSymbol === GOLD_SILVER_SYMBOL) {
-      await runMetalRatioPass(tick);
-      return;
-    }
     const [priceA, priceB] = await Promise.all([
       exchangeA.getPriceSnapshot({
         symbol: input.config.btcSymbol,
@@ -489,10 +482,18 @@ export async function runPollingLoop(input: {
       thresholdMatched: spread.thresholdMatched,
     });
     if (signal) {
+      // gold-silver-decouple: active GOLD/SILVER metal trades must NOT
+      // suppress spread signals — the two strategies coexist, so the
+      // suppression query excludes them.
       const active = await input.db
         .select({ id: trades.id })
         .from(trades)
-        .where(inArray(trades.status, [...activeTradeStatuses]))
+        .where(
+          and(
+            inArray(trades.status, [...activeTradeStatuses]),
+            ne(trades.symbol, GOLD_SILVER_SYMBOL),
+          ),
+        )
         .orderBy(desc(trades.id));
       // F4: the suppression branch must NOT skip the tick tail — every
       // path reaches the botRunOnce break check and the sleep below
@@ -570,13 +571,31 @@ export async function runPollingLoop(input: {
     }
   }
 
-  // Gold/silver ratio monitor tick (v1 monitor-only): runs in place of the
-  // BTC spread pass while the GOLD/SILVER pseudo-pair is active. Own
-  // try/catch so a metal-ratio failure never breaks the tick, and snapshot
-  // persistence is failure-isolated (persistRatioSnapshot swallows DB
-  // errors).
+  // Gold/silver metal-trade tick (gold-silver-decouple): runs alongside
+  // the BTC spread pass, but ONLY while a G/S trade is active — there is
+  // no idle monitor: no warmup, no ratio_snapshots rows, no RSI alerts
+  // (entry is operator-driven from /ratio). Per active tick: fetch GLD/SLV
+  // marks, feed the RSI engine, persist one ratio snapshot, and evaluate
+  // the exit triggers (SL / RSI-TP floor / time-stop). Own try/catch so a
+  // metal failure never breaks the tick; persistRatioSnapshot swallows DB
+  // errors.
   async function runMetalRatioPass(tick: number): Promise<void> {
     try {
+      // Active-trade gate: one cheap DB probe per tick replaces the old
+      // pair-selection switch. Mirrors loadActiveMetalTrade's filter
+      // (metal-trade-service.ts) but only needs existence.
+      const activeMetal = await input.db
+        .select({ id: trades.id })
+        .from(trades)
+        .where(
+          and(
+            eq(trades.symbol, GOLD_SILVER_SYMBOL),
+            inArray(trades.status, [...activeTradeStatuses]),
+          ),
+        )
+        .limit(1);
+      if (activeMetal.length === 0) return;
+
       // Cadence gate: the ratio tick runs at GOLDSILVER_PRICE_POLL_INTERVAL_MS
       // (default 5 s), not at the 1 Hz BTC tick. The engine works on candle
       // buckets, so 1 Hz polling only burns Arcus rate-limit budget. A 0
@@ -643,39 +662,6 @@ export async function runPollingLoop(input: {
           error instanceof Error
             ? { tick, message: error.message }
             : { tick, error },
-        );
-      }
-      if (
-        result.crossed &&
-        result.side !== undefined &&
-        result.rsi !== undefined &&
-        ctx.engine.consumeAlertEligibility(
-          input.config.goldSilver.alertCooldownMs,
-        )
-      ) {
-        await input.notifier.notifyMetalRatioSignal(
-          {
-            side: result.side,
-            rsi: result.rsi,
-            rsiPeriod: input.config.goldSilver.rsiPeriod,
-            ratio: result.ratio,
-            goldPriceUsd: gold.priceUsd,
-            silverPriceUsd: silver.priceUsd,
-            tpMinNetUsd: input.config.goldSilver.tpMinNetUsd,
-            stopLossMarginPercent:
-              input.config.goldSilver.stopLossMarginPercent,
-            calculatedAt,
-          },
-          {
-            inline_keyboard: [
-              [
-                {
-                  text: "Open Trade",
-                  callback_data: `metaltrade:open:${result.side}`,
-                },
-              ],
-            ],
-          },
         );
       }
     } catch (error) {

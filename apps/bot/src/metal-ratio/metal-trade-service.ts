@@ -45,7 +45,7 @@ export interface MetalTradeRow {
  * always the SMALLER of the two — the short leg being the smaller one
  * means short-gold/long-silver. */
 export async function loadActiveMetalTrade(
-  ctx: MetalTradeContext,
+  ctx: Pick<MetalTradeContext, "db">,
 ): Promise<MetalTradeRow | undefined> {
   const rows = await ctx.db
     .select({
@@ -157,16 +157,15 @@ async function transitionTrade(
   return changed;
 }
 
-/** Creates the trade + legs rows for a gold/silver pair trade. Guards:
- * pair must still be active, no other active metal trade, execution
- * available. Returns the trade id. */
+/** Creates the trade + legs rows for a gold/silver pair trade. Guards: no
+ * other active metal trade, execution available. Since
+ * gold-silver-decouple there is no active-pair requirement — the trade is
+ * opened on demand from /ratio alongside the spread strategy.
+ * Returns the trade id. */
 export async function createMetalTrade(
   ctx: MetalTradeContext,
   side: MetalRatioSide,
 ): Promise<number> {
-  if (ctx.config.btcSymbol !== GOLD_SILVER_SYMBOL) {
-    throw new Error("GOLD/SILVER is not the active pair");
-  }
   const existing = await loadActiveMetalTrade(ctx);
   if (existing) {
     throw new Error(
@@ -196,7 +195,7 @@ export async function createMetalTrade(
       priceSource: "mark",
     }),
   ]);
-  const leverage = ctx.config.leverage;
+  const leverage = ctx.config.goldSilver.leverage;
   await Promise.all([
     ctx.execution.validateExecutionPreflight({
       symbol: GOLD_MARKET,
@@ -208,7 +207,7 @@ export async function createMetalTrade(
     }),
   ]);
 
-  const marginUsd = parseDecimal(ctx.config.openTrade.marginUsd, "marginUsd");
+  const marginUsd = parseDecimal(ctx.config.goldSilver.marginUsd, "marginUsd");
   const notionalUsd = marginUsd * leverage;
   const goldPrice = parseDecimal(goldBbo.askUsd, "goldAsk");
   const silverPrice = parseDecimal(silverBbo.askUsd, "silverAsk");
@@ -402,11 +401,11 @@ export async function executeMetalTradeEntry(
     "silverMin",
   );
   const tick = parseDecimal(goldMeta.priceTickUsd || "0.01", "tick");
-  const improveTicks = ctx.config.openTrade.entryImproveTicks;
+  const improveTicks = ctx.config.goldSilver.entryImproveTicks;
   const pollMs = 250;
-  const deadline = Date.now() + ctx.config.openTrade.limitTimeoutMs;
+  const deadline = Date.now() + ctx.config.goldSilver.limitTimeoutMs;
   const repriceEvery = Math.max(
-    ctx.config.openTrade.limitRepriceIntervalMs,
+    ctx.config.goldSilver.limitRepriceIntervalMs,
     pollMs,
   );
 
@@ -483,7 +482,7 @@ export async function executeMetalTradeEntry(
       .notify(
         `⏳ Trade #${tradeId}: limit ${goldLeg.side === "short" ? "SELL" : "BUY"} resting on GLD at $${formatDecimal(restingPrice, 2)} ` +
           `(${formatDecimal(progress.targetQty, 6)} GLD). Hedging each fill on SLV at market. ` +
-          `Timeout in ${Math.round(ctx.config.openTrade.limitTimeoutMs / 1000)}s.`,
+          `Timeout in ${Math.round(ctx.config.goldSilver.limitTimeoutMs / 1000)}s.`,
       )
       // Guarded like every sibling notification in this flow: a Telegram
       // outage must never abort the fill-monitoring loop that owns the
@@ -709,7 +708,7 @@ export async function executeMetalTradeEntry(
     const fraction =
       ctx.config.goldSilver.stopLossMarginPercent /
       100 /
-      ctx.config.leverage;
+      ctx.config.goldSilver.leverage;
     const legPlans = [
       {
         row: goldLegRow,

@@ -41,8 +41,8 @@ export interface MetalRatioTickResult {
   crossed: boolean;
 }
 
-/** Stateful gold/silver ratio engine: holds the ratio close series, the
- * current confirmed side, and the last alert timestamp (cooldown).
+/** Stateful gold/silver ratio engine: holds the ratio close series and the
+ * current confirmed side.
  *
  * Close-series semantics: one close per COMPLETED candle bucket. `onTick`
  * updates the forming bucket's ratio and commits it to the series only
@@ -51,7 +51,6 @@ export interface MetalRatioTickResult {
 export class MetalRatioEngine {
   private closes: string[] = [];
   private currentSide: MetalRatioSide | undefined;
-  private lastAlertAtMs = 0;
   private currentBucketStartMs: number | undefined;
   private pendingBucketRatio: string | undefined;
 
@@ -109,17 +108,6 @@ export class MetalRatioEngine {
       this.currentSide = side;
     }
     return { ratio, rsi, side, crossed };
-  }
-
-  /** Cooldown gate for cross alerts. Returns true (and stamps the attempt)
-   * when no alert was sent within `cooldownMs`; callers invoke this only
-   * on cross ticks. */
-  consumeAlertEligibility(cooldownMs: number, nowMs = Date.now()): boolean {
-    if (cooldownMs > 0 && this.lastAlertAtMs > 0) {
-      if (nowMs - this.lastAlertAtMs < cooldownMs) return false;
-    }
-    this.lastAlertAtMs = nowMs;
-    return true;
   }
 
   /** Read-only view for logging/diagnostics. */
