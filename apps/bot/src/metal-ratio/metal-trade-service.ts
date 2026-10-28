@@ -1016,7 +1016,10 @@ export async function closeMetalTrade(
       for (const leg of openLegs) {
         const qty = parseDecimal(leg.quantityBase ?? "0", "legQty");
         if (qty <= 1e-9) continue;
-        const closeSide = leg.side === "short" ? "sell" : "buy";
+        // Close direction: short => buy back, long => sell (same mapping
+        // as the disaster stops, the emergency rollback, and the limit
+        // close below — NOT the entry direction).
+        const closeSide = leg.side === "short" ? "buy" : "sell";
         const order = await ctx.execution.submitExecutionOrder({
           clientOrderId: `mt${tradeId}c${leg.id}${Date.now().toString(36)}`,
           symbol: leg.market,
