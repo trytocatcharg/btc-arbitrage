@@ -57,7 +57,15 @@ export class QfexWsClient {
   private state: "closed" | "connecting" | "ready" = "closed";
   private connectPromise?: Promise<void>;
   private readonly pending: PendingCommand[] = [];
-  private readonly subscriptions = new Set<string>();
+  private readonly subscriptions = new Set<string>([
+    // Order command replies are PUBLISHED on these channels — without the
+    // subscriptions the gateway stays silent and every order command times
+    // out (live finding 2026-11-05: a margin-rejected add_order produced
+    // no frame at all until order_responses was subscribed). Auto-
+    // subscribed after auth and re-subscribed on reconnect.
+    "order_responses",
+    "stop_orders",
+  ]);
   private reconnectFailures = 0;
   private intentionalClose = false;
 
@@ -297,8 +305,9 @@ export class QfexWsClient {
   }
 
   private async resubscribe(): Promise<void> {
-    // The adapter subscribes to nothing today (commands only); the set is
-    // kept so a future subscription survives reconnects.
+    // Re-send every subscription after (re)connect; the set is seeded with
+    // order_responses + stop_orders at construction (order command replies
+    // are published there — see the field comment).
     for (const channel of this.subscriptions) {
       this.socket?.send(
         JSON.stringify({ type: "subscribe", params: { channels: [channel] } }),
@@ -345,6 +354,29 @@ export class QfexWsClient {
           matchesKey(entry.correlationKey?.orderId, stopOrderId),
         response,
       );
+      return;
+    }
+    // Read-only command responses have no correlation token; each frame
+    // key maps to exactly one command type, so a type-matched
+    // single-in-flight resolution is exact (concurrent same-type calls
+    // stay unmatched rather than cross-resolve).
+    const untypedResponseCommands: Record<string, string> = {
+      all_orders_response: "get_user_orders",
+      user_leverage_response: "get_user_leverage",
+      available_leverage_levels_response: "get_available_leverage_levels",
+      twap_response: "add_twap",
+    };
+    for (const [frameKey, commandType] of Object.entries(
+      untypedResponseCommands,
+    )) {
+      if (frame[frameKey] === undefined) continue;
+      const candidates = this.pending.filter(
+        (entry) => entry.type === commandType,
+      );
+      if (candidates.length === 1) {
+        this.dropPending(candidates[0]);
+        candidates[0].resolve(frame[frameKey]);
+      }
       return;
     }
     if (Array.isArray(frame.user_trades_response)) {

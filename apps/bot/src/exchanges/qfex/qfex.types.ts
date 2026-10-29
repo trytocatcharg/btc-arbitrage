@@ -79,6 +79,21 @@ export interface QfexPositionsResponse {
   balance: QfexBalance;
 }
 
+/** GET /user/subaccounts/balance item + envelope (live shape verified
+ * 2026-11-05). `available_balance` is the account's usable margin; the
+ * master account is the primary one. Works on fresh accounts, unlike
+ * /user/positions which 500s without position history. */
+export interface QfexAccountBalance {
+  account_id: string;
+  equity: number;
+  available_balance: number;
+  is_master: boolean;
+}
+
+export interface QfexSubaccountBalancesResponse {
+  accounts: QfexAccountBalance[];
+}
+
 /** GET /user/trade item. All quantities are JSON NUMBERS;
  * `order_timestamp` is unix seconds (fractional). `liquidation` is an
  * opaque string in the schema (no enum documented) — the adapter only

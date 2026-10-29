@@ -16,6 +16,7 @@ import type {
   QfexPosition,
   QfexPositionsResponse,
   QfexRefdataSymbol,
+  QfexSubaccountBalancesResponse,
   QfexTrade,
   QfexTradesResponse,
 } from "./qfex.types.js";
@@ -143,19 +144,34 @@ class QfexExecutionAdapter implements ExecutionAdapter {
 
   async getAvailableMarginUsd(): Promise<string> {
     this.requireCredentials();
-    const payload = expectShape<QfexPositionsResponse>(
+    // /user/subaccounts/balance is the margin source of choice: it works
+    // on fresh accounts. /user/positions returns HTTP 500 "position
+    // balance not found" until the account has held a position (live
+    // finding 2026-11-05), so it cannot serve as the balance read.
+    const payload = expectShape<QfexSubaccountBalancesResponse>(
       requiredRecord(
-        await this.http.get("/user/positions", { private: true }),
-        "QFEX positions response",
+        await this.http.get("/user/subaccounts/balance", { private: true }),
+        "QFEX subaccount balances response",
       ),
     );
-    const balance = payload.balance;
-    if (!balance || typeof balance.available_balance !== "number") {
+    const accounts = Array.isArray(payload.accounts) ? payload.accounts : [];
+    const account =
+      accounts.find((row) => row?.is_master === true) ??
+      accounts.find(
+        (row) =>
+          this.config.accountId !== undefined &&
+          row?.account_id === this.config.accountId,
+      ) ??
+      accounts[0];
+    if (!account || typeof account.available_balance !== "number") {
       throw new Error(
-        "QFEX positions response did not include balance.available_balance",
+        "QFEX subaccount balances response did not include available_balance",
       );
     }
-    return decimalFromNumber(balance.available_balance, "balance.available_balance");
+    return decimalFromNumber(
+      account.available_balance,
+      "account.available_balance",
+    );
   }
 
   async validateExecutionPreflight(input: {
@@ -306,12 +322,26 @@ class QfexExecutionAdapter implements ExecutionAdapter {
   }): Promise<ExchangePosition | null> {
     this.requireCredentials();
     const { qfexSymbol } = qfexSymbolFor(input.symbol);
-    const payload = expectShape<QfexPositionsResponse>(
-      requiredRecord(
-        await this.http.get("/user/positions", { private: true }),
-        "QFEX positions response",
-      ),
-    );
+    let payload: QfexPositionsResponse;
+    try {
+      payload = expectShape<QfexPositionsResponse>(
+        requiredRecord(
+          await this.http.get("/user/positions", { private: true }),
+          "QFEX positions response",
+        ),
+      );
+    } catch (error) {
+      // Fresh accounts with no position history get HTTP 500 "position
+      // balance not found" (live finding 2026-11-05) — that means NO
+      // positions, not an outage. Anything else still throws.
+      if (
+        error instanceof Error &&
+        error.message.includes("position balance not found")
+      ) {
+        return null;
+      }
+      throw error;
+    }
     const positions = Array.isArray(payload.positions) ? payload.positions : [];
     const position = positions.find(
       (row): row is QfexPosition =>
