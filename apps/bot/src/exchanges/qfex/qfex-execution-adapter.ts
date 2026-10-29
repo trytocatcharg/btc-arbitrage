@@ -850,12 +850,17 @@ function bestLevel(
   if (!Array.isArray(levels)) {
     throw new Error(`QFEX orderbook ${symbol} ${side} side is missing`);
   }
+  // Live orderbooks carry zero-size placeholder levels (observed 2026-11-05
+  // on AAPL-USD: ["347.98","0"]); a size-0 top level must not read as the
+  // BBO — skip it and take the first level with real quantity.
   for (const level of levels) {
     if (!Array.isArray(level) || level.length < 2) continue;
-    const [price] = level;
-    if (typeof price === "string" && /^-?\d+(\.\d+)?$/.test(price)) {
-      return price;
+    const [price, size] = level;
+    if (typeof price !== "string" || !/^-?\d+(\.\d+)?$/.test(price)) continue;
+    if (typeof size === "string" && /^-?\d+(\.\d+)?$/.test(size)) {
+      if (Number(size) <= 0) continue;
     }
+    return price;
   }
   throw new Error(`QFEX orderbook ${symbol} ${side} side is empty`);
 }
