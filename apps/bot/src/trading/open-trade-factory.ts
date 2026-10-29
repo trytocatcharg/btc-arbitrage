@@ -68,6 +68,13 @@ export function buildOpenTradeOptions(
         makerBps: config.openTrade.variationalMakerFeeBps,
         takerBps: config.openTrade.variationalTakerFeeBps,
       },
+      // QFEX routing fee inputs (docs/exchanges/qfex.md): env-configured
+      // defaults; the venue exposes per-account maker/taker fractions via
+      // GET /user/fees for live reconciliation.
+      qfex: {
+        makerBps: config.openTrade.qfexMakerFeeBps,
+        takerBps: config.openTrade.qfexTakerFeeBps,
+      },
     },
     notifyUrgent: notify.notifyUrgent,
     notifyLimitTimeout: notify.notifyLimitTimeout,

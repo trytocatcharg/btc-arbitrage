@@ -2,13 +2,15 @@ import type { BotConfig } from '@btc-arbitrage/config';
 import type { ExchangeAdapter } from '@btc-arbitrage/exchange-core';
 import { createArcusAdapter } from './arcus/arcus-client.js';
 import { createExtendedAdapter } from './extended/extended-client.js';
+import { createQfexAdapter } from './qfex/qfex-client.js';
 import { createRisexAdapter } from './risex/risex-client.js';
 
 export function createExchangeRegistry(config: BotConfig) {
   const adapters = new Map<string, ExchangeAdapter>([
     ['risex', createRisexAdapter(config.risex)],
     ['extended', createExtendedAdapter(config.extended)],
-    ['arcus', createArcusAdapter(config.arcus)]
+    ['arcus', createArcusAdapter(config.arcus)],
+    ['qfex', createQfexAdapter(config.qfex)]
   ]);
 
   return {

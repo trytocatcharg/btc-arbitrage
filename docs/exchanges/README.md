@@ -7,6 +7,7 @@ These specs are the local operating contract for each exchange integration. They
 | RISEx | [risex.md](./risex.md) | https://docs.risechain.com/docs/risex |
 | Extended | [extended.md](./extended.md) | https://api.docs.extended.exchange/#extended-api-documentation |
 | Arcus | [arcus.md](./arcus.md) | https://docs.arcus.xyz/ |
+| QFEX | [qfex.md](./qfex.md) | https://docs.qfex.com/api-reference/introduction |
 
 Before enabling live trading, update the relevant spec first, then update the adapter.
 

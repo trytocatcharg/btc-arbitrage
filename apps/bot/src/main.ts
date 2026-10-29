@@ -27,6 +27,7 @@ function isTransientPreflightError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return (
     error.name === "ExtendedRequestTimeoutError" ||
+    error.name === "QfexRequestTimeoutError" ||
     /timed? ?out|aborted due to timeout/i.test(error.message)
   );
 }
@@ -114,6 +115,18 @@ async function main() {
         hasArcusApiKey: Boolean(config.arcus.apiKey),
         hasArcusPrivateKey: Boolean(config.arcus.privateKey),
         hasArcusAccountAddress: Boolean(config.arcus.accountAddress),
+        botExecutionMode: config.botExecutionMode,
+      },
+    );
+  }
+  if (config.qfex.tradingEnabled) {
+    console.warn(
+      "QFEX live execution adapter is enabled; order entry runs over the trade WebSocket (wss://trade.qfex.com) with HMAC credentials — QFEX_API_KEY/QFEX_SECRET_KEY required",
+      {
+        qfexTradingEnabled: true,
+        hasQfexApiKey: Boolean(config.qfex.apiKey),
+        hasQfexSecretKey: Boolean(config.qfex.secretKey),
+        hasQfexAccountId: Boolean(config.qfex.accountId),
         botExecutionMode: config.botExecutionMode,
       },
     );

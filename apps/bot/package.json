@@ -23,9 +23,11 @@
     "@noble/hashes": "1.6.0",
     "@x10xchange/stark-crypto-wrapper-wasm": "0.1.6",
     "drizzle-orm": "0.38.4",
-    "starknet": "8.5.4"
+    "starknet": "8.5.4",
+    "ws": "8.18.3"
   },
   "devDependencies": {
+    "@types/ws": "8.18.1",
     "tsx": "4.19.2"
   }
 }

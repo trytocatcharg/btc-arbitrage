@@ -144,7 +144,7 @@ Copy `.env.example` to `.env` and fill in real values. Never commit `.env` or re
 | `BOT_RUN_ONCE` | `false` | Run a single tick and exit |
 | `BOT_EXECUTION_MODE` | `dry-run` | `dry-run` / `live` (cross-validated with `ENABLE_ORDER_PLACEMENT`) |
 | `ENABLE_ORDER_PLACEMENT` | `false` | Cross-validated with mode; see "Execution gates" below |
-| `EXTENDED_TRADING_ENABLED` / `ARCUS_TRADING_ENABLED` | `false` | Per-exchange live trading gates |
+| `EXTENDED_TRADING_ENABLED` / `ARCUS_TRADING_ENABLED` / `QFEX_TRADING_ENABLED` | `false` | Per-exchange live trading gates |
 | `EXTENDED_ORDER_EXPIRATION_HOURS` | `168` | GTT signature lifetime for Extended orders (resting limits AND TP/SL triggers); the old 1-hour default silently expired untouched protection orders. Max 2160 (90 days) |
 | `OPEN_TRADE_MARGIN_USD` | `20` | Margin per leg; the preview notional derives as margin × `LEVERAGE` (removed `OPEN_TRADE_NOTIONAL_USD` — defining it fails config load) |
 | `OPEN_TRADE_AUTO_CONFIRM` | `false` | **Auto-trading opt-in**: open a trade immediately when a signal is created, without Telegram confirmation. Loud startup warning when enabled; all entry guards still apply |
@@ -161,6 +161,9 @@ Copy `.env.example` to `.env` and fill in real values. Never commit `.env` or re
 | `OPEN_TRADE_SPREAD_TP_USD` / `OPEN_TRADE_SPREAD_SL_USD` / `OPEN_TRADE_EDGE_MIN_PROFIT_USD` | — | **Removed** (change `adjust-tpsl-volume-farming`): defining any of them fails config load; spread-USD exits deleted |
 | `RISEX_MAKER_FEE_BPS` / `RISEX_TAKER_FEE_BPS` | `1` / `3` | Routing fee inputs |
 | `EXTENDED_MAKER_FEE_BPS` / `EXTENDED_TAKER_FEE_BPS` | `0` / `2.5` | Routing fee inputs |
+| `QFEX_API_BASE_URL` / `QFEX_WS_BASE_URL` | `https://api.qfex.com` / `wss://trade.qfex.com` | QFEX REST base / trade WebSocket (order entry is WS-only; see `docs/exchanges/qfex.md`) |
+| `QFEX_API_KEY` / `QFEX_SECRET_KEY` / `QFEX_ACCOUNT_ID` | — / — / optional | QFEX HMAC credentials (public key + secret); `QFEX_ACCOUNT_ID` selects a subaccount, omit for primary. QFEX has no REST mark price — `PRICE_SOURCE=mark` fails for a QFEX leg (index/last only) |
+| `QFEX_MAKER_FEE_BPS` / `QFEX_TAKER_FEE_BPS` | `1` / `3` | QFEX routing fee inputs (placeholder defaults pending live verification) |
 | `TELEGRAM_ENABLED` / `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | `false` / — / — | Bot enablement; token+chat required when enabled |
 | `TELEGRAM_ALERT_COOLDOWN_MS` | `3600000` | Signal alert cooldown (1 h) |
 | `DATABASE_HOST_NAME` / `DATABASE_USER_NAME` / `DB_PORT` / `DATABASE_USER_PASSWORD` / `DATABASE_DB_NAME` | `127.0.0.1` / `user` / `3306` / `password` / `btc_arbitrage` | MariaDB connection |

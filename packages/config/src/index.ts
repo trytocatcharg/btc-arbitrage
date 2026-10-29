@@ -75,6 +75,8 @@ export interface BotConfig {
     extendedTakerFeeBps: string;
     variationalMakerFeeBps: string;
     variationalTakerFeeBps: string;
+    qfexMakerFeeBps: string;
+    qfexTakerFeeBps: string;
   };
   risex: {
     apiBaseUrl: string;
@@ -123,6 +125,18 @@ export interface BotConfig {
     tradingEnabled: boolean;
     userAgent: string;
     priceCacheTtlMs: number;
+  };
+  qfex: {
+    apiBaseUrl: string;
+    wsBaseUrl: string;
+    apiKey?: string;
+    secretKey?: string;
+    /** QFEX_ACCOUNT_ID: optional subaccount UUID
+     * (x-qfex-requested-account-id header / WS auth account_id); when
+     * omitted the primary account is used. */
+    accountId?: string;
+    tradingEnabled: boolean;
+    userAgent: string;
   };
   telegram: {
     enabled: boolean;
@@ -332,6 +346,15 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   const variationalTradingEnabled = parseBoolean(
     env.VARIATIONAL_TRADING_ENABLED ?? "false",
   );
+  const qfexTradingEnabled = parseBoolean(
+    env.QFEX_TRADING_ENABLED ?? "false",
+  );
+  if (qfexTradingEnabled) {
+    if (!env.QFEX_API_KEY?.trim())
+      throw new Error("QFEX_API_KEY is required when QFEX_TRADING_ENABLED=true");
+    if (!env.QFEX_SECRET_KEY?.trim())
+      throw new Error("QFEX_SECRET_KEY is required when QFEX_TRADING_ENABLED=true");
+  }
   if (executionMode === ExecutionMode.Live && !enableOrderPlacement) {
     throw new Error(
       "ENABLE_ORDER_PLACEMENT must be true when BOT_EXECUTION_MODE=live",
@@ -582,6 +605,14 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
         env.VARIATIONAL_TAKER_FEE_BPS ?? "0",
         "VARIATIONAL_TAKER_FEE_BPS",
       ),
+      qfexMakerFeeBps: parseNonNegativeDecimalString(
+        env.QFEX_MAKER_FEE_BPS ?? "1",
+        "QFEX_MAKER_FEE_BPS",
+      ),
+      qfexTakerFeeBps: parseNonNegativeDecimalString(
+        env.QFEX_TAKER_FEE_BPS ?? "3",
+        "QFEX_TAKER_FEE_BPS",
+      ),
     },
     risex: {
       apiBaseUrl: trimTrailingSlash(
@@ -648,6 +679,21 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
         env.VARIATIONAL_PRICE_CACHE_TTL_MS ?? "5000",
         "VARIATIONAL_PRICE_CACHE_TTL_MS",
       ),
+    },
+    qfex: {
+      apiBaseUrl: trimTrailingSlash(
+        env.QFEX_API_BASE_URL ?? "https://api.qfex.com",
+      ),
+      wsBaseUrl: trimTrailingSlash(
+        env.QFEX_WS_BASE_URL ?? "wss://trade.qfex.com",
+      ),
+      apiKey: emptyToUndefined(env.QFEX_API_KEY),
+      secretKey: emptyToUndefined(env.QFEX_SECRET_KEY),
+      accountId: emptyToUndefined(env.QFEX_ACCOUNT_ID),
+      tradingEnabled: qfexTradingEnabled,
+      userAgent: env.QFEX_USER_AGENT?.trim()
+        ? env.QFEX_USER_AGENT.trim()
+        : "btc-arbitrage-bot/0.1",
     },
     telegram: {
       enabled: telegramEnabled,
@@ -762,11 +808,12 @@ function parseExchange(value: string, field: string): ExchangeId {
     value === "risex" ||
     value === "extended" ||
     value === "arcus" ||
-    value === "variational"
+    value === "variational" ||
+    value === "qfex"
   )
     return value;
   throw new Error(
-    `${field} must be one of: risex, extended, arcus, variational`,
+    `${field} must be one of: risex, extended, arcus, variational, qfex`,
   );
 }
 
