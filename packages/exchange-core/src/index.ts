@@ -110,7 +110,14 @@ export interface ExecutionAdapter {
   }): Promise<void>;
   submitExecutionOrder(input: ExecutionOrderRequest): Promise<ExecutionOrder>;
   getExecutionOrder(orderId: string): Promise<ExecutionOrder>;
-  cancelExecutionOrder(orderId: string): Promise<void>;
+  /** Cancel by order id. `symbol` is the order's market hint, REQUIRED by
+   * adapters that cannot resolve the market from the orderId alone
+   * (Arcus names the marketId inside the signed cancel payload — BTC was
+   * hardcoded there before the metal trades, so GLD/SLV cancels never
+   * reached their market). Adapters that resolve the market from the
+   * order itself (RISEx) or address orders globally (Extended, QFEX)
+   * may ignore it. Callers that know the order's market SHOULD pass it. */
+  cancelExecutionOrder(orderId: string, symbol?: string): Promise<void>;
   getPosition(input: {
     symbol: string;
     side: "long" | "short";

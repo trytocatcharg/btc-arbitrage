@@ -368,12 +368,18 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
     return mapped;
   }
 
-  async cancelExecutionOrder(orderId: string): Promise<void> {
+  async cancelExecutionOrder(orderId: string, symbol?: string): Promise<void> {
     this.requireTradingEnabled();
     this.requireCredentials();
-    // The cancel payload must name the market; the contract only carries
-    // the order id, and the bot is BTC-only (DEFAULT_ARCUS_MARKET_NAME).
-    const market = await this.getMarket(DEFAULT_ARCUS_SYMBOL);
+    // The cancel payload must name the market, and Arcus cannot resolve
+    // the market from the orderId alone — the caller names the order's
+    // symbol (contract-level market hint). The BTC default is only the
+    // legacy fallback for call sites that predate the hint; gold/silver
+    // callers MUST pass their market or the cancel is signed against the
+    // wrong marketId and never reaches the order's book (the #1323/#1324
+    // leak: GLD/SLV cancels silently no-op'd while the wrong-market
+    // payload was accepted).
+    const market = await this.getMarket(symbol ?? DEFAULT_ARCUS_SYMBOL);
     const timestampNs = BigInt(Date.now()) * NS_PER_MS;
     const payload = buildCancelOrderPayload({
       address: this.config.accountAddress!,

@@ -345,6 +345,15 @@ function isPostOnlyRejection(message: string): boolean {
   return /POST_ONLY_WOULD_CROSS|post.only/i.test(message);
 }
 
+/** Defensive read of the leg's market from the leg's raw JSON (the
+ * metal flow stores the per-leg market there — the pseudo-symbol
+ * GOLDSILVER is not resolvable by any exchange). */
+function readLegMarket(raw: unknown): string | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const value = (raw as Record<string, unknown>).market;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
 /** Defensive read of the disaster-stop order id persisted in the leg's
  * raw JSON (same `slOrderId` key the BTC position monitor uses). */
 function readLegSlOrderId(raw: unknown): string | undefined {
@@ -423,6 +432,8 @@ export async function executeMetalTradeEntry(
   let lastRepriceAt = 0;
   let lastRepriceNotifyAt = 0;
   let postOnlyRetries = 0;
+  let cancelFailures = 0;
+  let cancelFailureAlerted = false;
   let restingPrice = 0;
   let goldFillPrice = 0;
 
@@ -440,6 +451,40 @@ export async function executeMetalTradeEntry(
     });
     restingPrice = price;
     return order.id;
+  };
+
+  /** Cancel-with-confirmation. Returns the order's terminal record once
+   * the exchange confirms it left the book (cancelled/rejected/filled),
+   * or null when it is still live after bounded cancel+read retries.
+   * Never throws. A cancel whose failure is swallowed must NEVER be
+   * followed by a replacement order: two live limits each fill, and the
+   * fill on the untracked one never hedges — that is exactly how the
+   * #1323/#1324 entry ended with a doubled GLD leg (4.337 vs the
+   * intended ~2.17) and a single SLV hedge. The caller decides: settle a
+   * raced fill, place the replacement, or leave the order resting and
+   * alert. */
+  const cancelWithConfirm = async (
+    id: string,
+    market: string,
+  ): Promise<ExecutionOrder | null> => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        // The market hint routes the signed cancel payload to the
+        // order's book — Arcus requires it (see the adapter contract).
+        await ctx.execution.cancelExecutionOrder(id, market);
+      } catch {
+        // Fall through to the read: a fill racing the cancel rejects it,
+        // and only the re-read distinguishes "filled" from "still live".
+      }
+      await sleep(500);
+      const order = await ctx.execution
+        .getExecutionOrder(id)
+        .catch(() => null);
+      if (order && ["filled", "cancelled", "rejected"].includes(order.status)) {
+        return order;
+      }
+    }
+    return null;
   };
 
   try {
@@ -532,35 +577,89 @@ export async function executeMetalTradeEntry(
             tick,
           );
           if (nextPrice !== restingPrice) {
-            await ctx.execution.cancelExecutionOrder(orderId).catch(() => undefined);
-            try {
-              orderId = await placeLimit(nextPrice);
-              postOnlyRetries = 0;
-              // Reprice feedback, throttled: one notice per 30 s so a slow
-              // book does not spam the chat (the order state is the
-              // source of truth; the ticker is informational).
-              if (Date.now() - lastRepriceNotifyAt >= 30_000) {
-                lastRepriceNotifyAt = Date.now();
-                await ctx
-                  .notify(
-                    `🔁 Trade #${tradeId}: GLD limit not filled — repriced to $${formatDecimal(nextPrice, 2)} (resting).`,
-                  )
-                  .catch(() => undefined);
+            // Cancel-first WITH confirmation. Only a confirmed-terminal
+            // old order may be replaced: a failed or raced cancel
+            // followed by a fresh placement leaves two live limits, and
+            // the untracked one's fill never hedges (the #1323/#1324
+            // doubled-GLD-leak).
+            const terminal = await cancelWithConfirm(orderId, GOLD_MARKET);
+            if (terminal) {
+              cancelFailures = 0;
+              // Settle a fill that raced the cancel BEFORE replacing:
+              // the hedge and the replacement's remainder qty must see
+              // the real covered quantity (same contract as the loop top
+              // and the timeout readback).
+              const filled = parseDecimal(terminal.filledQuantityBase, "filled");
+              const increment = filled - progress.goldFilledQty;
+              // Hedge ANY positive increment regardless of the terminal
+              // status that carried it: an exchange can report
+              // filledQuantityBase > 0 on a 'cancelled' order (partial
+              // fill before the cancel landed), and dropping it orphans
+              // covered gold without a hedge — the same leak this change
+              // exists to fix (review finding R3-cancelled-partial-fill-
+              // drop). Only a zero fill has nothing to settle.
+              if (increment > 1e-9) {
+                const fillPrice = terminal.averageFillPriceUsd
+                  ? parseDecimal(terminal.averageFillPriceUsd, "goldFill")
+                  : restingPrice;
+                await hedgeIncrement(increment, fillPrice);
+                goldFillPrice = fillPrice;
               }
-            } catch (error) {
               if (
-                isPostOnlyRejection(
-                  error instanceof Error ? error.message : String(error),
-                ) &&
-                postOnlyRetries < 3
+                terminal.status === "filled" ||
+                progress.goldFilledQty >= progress.targetQty - 1e-9
               ) {
-                postOnlyRetries += 1;
-                // Join the best instead of improving: guaranteed post-only.
-                orderId = await placeLimit(
-                  limitPriceForSide(goldLeg.side, freshBbo, 0, tick),
+                await finishEntry(goldFillPrice || restingPrice);
+                return;
+              }
+            } else {
+              // Still live after bounded cancels: DO NOT place a
+              // replacement (that is the duplicate-order leak). Leave it
+              // resting; the next reprice round retries the cancel.
+              // Persistent failure is surfaced loud — it means cancels
+              // are not reaching the exchange (e.g. the adapter signing
+              // the wrong market), which also poisons the timeout and
+              // abort paths.
+              cancelFailures += 1;
+              if (cancelFailures >= 3 && !cancelFailureAlerted) {
+                cancelFailureAlerted = true;
+                await ctx.notifyUrgent(
+                  `🚨 Trade #${tradeId}: GLD limit ${orderId} could not be cancelled after ${cancelFailures} attempts ` +
+                    `(resting at $${formatDecimal(restingPrice, 2)}). Repricing is SKIPPED to avoid a duplicate live limit. ` +
+                    "Cancels are not reaching Arcus — check the adapter/market routing and cancel this order manually if needed.",
                 );
-              } else {
-                throw error;
+              }
+            }
+            if (terminal) {
+              try {
+                orderId = await placeLimit(nextPrice);
+                postOnlyRetries = 0;
+                // Reprice feedback, throttled: one notice per 30 s so a slow
+                // book does not spam the chat (the order state is the
+                // source of truth; the ticker is informational).
+                if (Date.now() - lastRepriceNotifyAt >= 30_000) {
+                  lastRepriceNotifyAt = Date.now();
+                  await ctx
+                    .notify(
+                      `🔁 Trade #${tradeId}: GLD limit not filled — repriced to $${formatDecimal(nextPrice, 2)} (resting).`,
+                    )
+                    .catch(() => undefined);
+                }
+              } catch (error) {
+                if (
+                  isPostOnlyRejection(
+                    error instanceof Error ? error.message : String(error),
+                  ) &&
+                  postOnlyRetries < 3
+                ) {
+                  postOnlyRetries += 1;
+                  // Join the best instead of improving: guaranteed post-only.
+                  orderId = await placeLimit(
+                    limitPriceForSide(goldLeg.side, freshBbo, 0, tick),
+                  );
+                } else {
+                  throw error;
+                }
               }
             }
           }
@@ -570,7 +669,7 @@ export async function executeMetalTradeEntry(
     }
 
     // Timeout: cancel and race a possible late fill (max-filled wins).
-    await ctx.execution.cancelExecutionOrder(orderId).catch(() => undefined);
+    await ctx.execution.cancelExecutionOrder(orderId, GOLD_MARKET).catch(() => undefined);
     let finalOrder: ExecutionOrder | null = null;
     for (let attempt = 0; attempt < 4; attempt += 1) {
       await sleep(500);
@@ -837,12 +936,19 @@ export async function executeMetalTradeEntry(
     // old fire-and-forget close left live positions on Arcus after the
     // trade was marked failed (Arcus order placement is async — a 202 ACK
     // is not a fill), and the gold leg was never closed at all.
-    // Cancel the resting gold limit first, then close each covered leg
-    // and VERIFY the close order reached a terminal state.
-    if (orderId) {
-      await ctx.execution.cancelExecutionOrder(orderId).catch(() => undefined);
-    }
+    // Cancel the resting gold limit first and VERIFY it left the book:
+    // an un-cancelled resting limit fills later into a position the DB
+    // no longer tracks (the #1323/#1324 leak). When the cancel cannot be
+    // confirmed, say so explicitly — the operator must clean it up.
     const failures: string[] = [];
+    if (orderId) {
+      const terminal = await cancelWithConfirm(orderId, GOLD_MARKET);
+      if (!terminal) {
+        failures.push(
+          `${GOLD_MARKET}: entry limit ${orderId} still LIVE at $${formatDecimal(restingPrice, 2)} — cancel manually on Arcus`,
+        );
+      }
+    }
     const closeJobs = [
       {
         market: SILVER_MARKET,
@@ -976,13 +1082,17 @@ export async function closeMetalTrade(
     for (const leg of legRowsForCancel) {
       const slOrderId = readLegSlOrderId(leg.raw);
       if (!slOrderId) continue;
-      await ctx.execution.cancelExecutionOrder(slOrderId).catch((error: unknown) => {
-        console.warn("Metal trade disaster stop cancel failed", {
-          tradeId,
-          legId: leg.id,
-          message: error instanceof Error ? error.message : String(error),
+      // The market hint routes the Arcus signed cancel to the order's
+      // book; without it the cancel names the BTC market and no-ops.
+      await ctx.execution
+        .cancelExecutionOrder(slOrderId, readLegMarket(leg.raw))
+        .catch((error: unknown) => {
+          console.warn("Metal trade disaster stop cancel failed", {
+            tradeId,
+            legId: leg.id,
+            message: error instanceof Error ? error.message : String(error),
+          });
         });
-      });
     }
     const side: MetalRatioSide = tradeSideFromLegs(
       (
@@ -1209,7 +1319,7 @@ export async function closeMetalTrade(
           });
           const price = touchPriceForClose(leg.side, bbo, tick);
           await ctx.execution
-            .cancelExecutionOrder(orderId)
+            .cancelExecutionOrder(orderId, leg.market)
             .catch(() => undefined);
           const replacement = await ctx.execution.submitExecutionOrder({
             clientOrderId: `mt${tradeId}r${leg.id}${Date.now().toString(36)}`,

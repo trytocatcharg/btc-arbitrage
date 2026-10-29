@@ -72,6 +72,8 @@ These facts are the contract for `arcus-execution-adapter.ts` and `arcus-signing
 
 Scheme 1 payload fields: `ad` (address), `ai` (accountIndex), `c` (clientId, optional), `ct` (client timestamp ns = `X-Timestamp`), `g` (goodTilTime in **ns**), `m` (marketId), `op`, `p` (price in integer ticks = price ÷ `tickSize`, exact division), `q` (quantity in integer quantums = size ÷ `stepSize`, exact), `r` (reduce-only 0/1), `s` (side 0=buy/1=sell), `t` (TIF 0=GTT/1=FOK/2=IOC/3=ALO), `v`=1. Cancel payload: `ad`,`ai`,`c` or `id`,`ct`,`m`,`op`:2,`v` (exactly one of `id`/`c`).
 
+> **Cancel market routing**: the cancel names `m` (marketId) explicitly and Arcus does not resolve the market from the order id — a cancel whose `m` does not match the order's market never reaches it. Callers therefore pass the order's symbol as the contract's market hint (`cancelExecutionOrder(orderId, symbol)`); the adapter's BTC-only default exists solely for legacy BTC call sites. Gold/silver callers must pass their leg market, or the cancel silently no-ops against the wrong market (the #1323/#1324 leak).
+
 > **BigInt requirement**: `ct`/`g` nanosecond values exceed `Number.MAX_SAFE_INTEGER`. The canonical serializer must emit big integers as raw JSON literals (custom serializer, never `JSON.stringify` on numbers).
 
 ### Order request (REST body, `POST /v1/placeOrder?address=`)
