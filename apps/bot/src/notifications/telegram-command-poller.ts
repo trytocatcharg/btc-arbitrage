@@ -70,6 +70,12 @@ import { manualMarketCloseTrade } from "../trading/manual-trade-close.js";
 import { renderMetalRatioChart } from "../metal-ratio/metal-ratio-chart.js";
 import { loadYahooRatioBuckets } from "../metal-ratio/yahoo-metals-client.js";
 import {
+  fetchOrbitArbitrageTop,
+  formatArbitrageRowMessage,
+  formatOrbitArbitrageHeader,
+  loadOrbitScreenerConfig,
+} from "../screener/orbit-arbitrage-client.js";
+import {
   getUntrackedPosition,
   scanUntrackedPositions,
 } from "../trading/position-reconciler.js";
@@ -122,6 +128,10 @@ export interface TelegramApiResponse {
 }
 
 const AVAILABLE_COMMANDS = [
+  {
+    command: "arb",
+    description: "Top 5 ORBIT arbitrage spreads (tradfi, our 4 venues)",
+  },
   {
     command: "bot",
     description: "Pause or restart the bot",
@@ -363,6 +373,43 @@ export class TelegramCommandPoller {
             this.config.telegram.operatorTimezone,
           ),
         );
+        return;
+      }
+
+      if (isTelegramCommand(text, "arb")) {
+        // Read-only on-demand scrape of the ORBIT perp screener's
+        // arbitrage table (top spreads across our 4 venues, tradfi
+        // assets only). Nothing is cached or persisted; each call
+        // fetches the page fresh. Failure surfaces as the standard
+        // command-failed toast.
+        //
+        // Layout: one header message, then ONE message per result row —
+        // each carrying its own "Open Trade" button (an inline keyboard
+        // always hangs from the whole message, so a button directly
+        // under a row requires the row to be its own message).
+        const screenerConfig = loadOrbitScreenerConfig();
+        const result = await fetchOrbitArbitrageTop(
+          this.fetchImpl,
+          screenerConfig,
+        );
+        await this.sendMessage(
+          formatOrbitArbitrageHeader(result, screenerConfig),
+        );
+        for (const [index, row] of result.rows.entries()) {
+          await this.sendMessage(
+            formatArbitrageRowMessage(row, index),
+            {
+              inline_keyboard: [
+                [
+                  {
+                    text: `Open Trade ${row.symbol}`,
+                    callback_data: `arbopen:${row.symbol}`,
+                  },
+                ],
+              ],
+            },
+          );
+        }
         return;
       }
     } catch (error) {
@@ -1075,6 +1122,16 @@ export class TelegramCommandPoller {
             `❌ ${error instanceof Error ? error.message : String(error)}`,
           );
         }
+      } else if (data.startsWith("arbopen:")) {
+        // Placeholder for the /arb row "Open Trade" buttons: the trade
+        // flow itself is intentionally NOT implemented yet. The tap only
+        // acknowledges with a fresh message so the button never feels
+        // dead; the row message it belongs to is left untouched.
+        const symbol = data.slice("arbopen:".length);
+        await this.sendMessage(
+          `⏳ Open Trade for ${symbol} (from /arb) is coming soon — ` +
+            "the flow is not implemented yet.",
+        );
       } else if (data.startsWith("open:")) {
         const signalId = Number(data.slice(5));
         const signal = (
