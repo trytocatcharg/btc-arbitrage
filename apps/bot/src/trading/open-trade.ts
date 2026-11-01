@@ -42,7 +42,9 @@ export type ConfirmOutcome =
   | { outcome: "cancelled" };
 export interface OpenTradePreview {
   token: string;
-  signalId: number;
+  /** Owning signals row; null for /arb screener previews, which are
+   * screener-driven and have no signal (migration 0007). */
+  signalId: number | null;
   expiresAt: Date;
   symbol: string;
   marketType: MarketType;
@@ -328,7 +330,7 @@ export class OpenTradeService {
   }
 
   async createPreview(input: {
-    signalId: number;
+    signalId: number | null;
     symbol: string;
     marketType: MarketType;
     exchanges: [ExchangeId, ExchangeId];

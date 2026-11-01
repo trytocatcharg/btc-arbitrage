@@ -50,6 +50,13 @@
       "when": 1792677119013,
       "tag": "0006_gold_silver_ratio",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "5",
+      "when": 1793364522656,
+      "tag": "0007_arb_preview_nullable_signal",
+      "breakpoints": true
     }
   ]
 }

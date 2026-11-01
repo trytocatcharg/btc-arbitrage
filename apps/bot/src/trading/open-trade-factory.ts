@@ -21,10 +21,16 @@ export interface OpenTradeNotify {
  * shared by the Telegram command poller (operator clicks) and the
  * auto-confirm path (signal-triggered opens). The notify callbacks differ
  * per call site (Telegram buttons vs plain urgent messages); everything
- * else must stay identical so both paths behave the same. */
+ * else must stay identical so both paths behave the same.
+ *
+ * `overrides` is the seam for flows that reuse the same entry machine with
+ * different sizing (the /arb screener flow, createArbOpenTradeService):
+ * override keys land LAST and replace the BTC-wired values. Existing BTC
+ * call sites pass no overrides and are unaffected. */
 export function buildOpenTradeOptions(
   config: BotConfig,
   notify: OpenTradeNotify,
+  overrides?: Partial<OpenTradeOptions>,
 ): OpenTradeOptions {
   return {
     notionalUsd: config.openTrade.notionalUsd,
@@ -79,6 +85,7 @@ export function buildOpenTradeOptions(
     notifyUrgent: notify.notifyUrgent,
     notifyLimitTimeout: notify.notifyLimitTimeout,
     autoConfirm: config.openTrade.autoConfirm,
+    ...overrides,
   };
 }
 
@@ -92,6 +99,35 @@ export function createOpenTradeService(input: {
     input.registry,
     new DbPreviewStore(input.db),
     buildOpenTradeOptions(input.config, input.notify),
+  );
+}
+
+/** /arb screener flow (ORBIT arbitrage rows): the SAME entry machine as
+ * the BTC signal flow (passive post-only maker limit + immediate market
+ * hedge + per-leg TP/SL), sized from config.arbTrade instead of the BTC
+ * openTrade section so /config runtime adjustments never resize screener
+ * trades. minSpreadUsd is overridden to "0": the BTC threshold ($40) is a
+ * signal property that would abort every /arb entry; 0 disables the
+ * threshold abort while still aborting on a NEGATIVE directional spread
+ * (verified in OpenTradeService.runEntry). autoConfirm stays false so
+ * entry-abort notices always reach the operator in the two-step UX. */
+export function createArbOpenTradeService(input: {
+  config: BotConfig;
+  registry: { get(id: string): ExchangeAdapter };
+  db: Awaited<ReturnType<typeof getDb>>;
+  notify: OpenTradeNotify;
+}): OpenTradeService {
+  return new OpenTradeService(
+    input.registry,
+    new DbPreviewStore(input.db),
+    buildOpenTradeOptions(input.config, input.notify, {
+      notionalUsd: input.config.arbTrade.notionalUsd,
+      leverage: input.config.arbTrade.leverage,
+      takeProfitPercent: input.config.arbTrade.takeProfitPercent,
+      stopLossPercent: input.config.arbTrade.stopLossPercent,
+      minSpreadUsd: "0",
+      autoConfirm: false,
+    }),
   );
 }
 

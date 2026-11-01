@@ -218,6 +218,23 @@ export interface BotConfig {
      * running until the TP floor or the SL. */
     timeStopHours: number;
   };
+  /** /arb screener trades (ORBIT arbitrage rows, telegram-command-poller
+   * arbopen/arbconfirm flow). Sizing is deliberately decoupled from the
+   * openTrade section: /config runtime adjustments resize the BTC signal
+   * flow only, never screener trades. */
+  arbTrade: {
+    /** ARB_TRADE_MARGIN_USD: margin per leg; notionalUsd derives as
+     * margin × leverage (same rule as openTrade). */
+    marginUsd: string;
+    notionalUsd: string;
+    /** ARB_TRADE_LEVERAGE. */
+    leverage: number;
+    /** ARB_TRADE_TAKE_PROFIT_PERCENT / ARB_TRADE_STOP_LOSS_PERCENT:
+     * margin-based like openTrade (the price-side trigger distance is the
+     * percent ÷ leverage). */
+    takeProfitPercent: string;
+    stopLossPercent: string;
+  };
   logLevel: string;
 }
 
@@ -517,6 +534,30 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     "GOLDSILVER_TIME_STOP_HOURS",
   );
 
+  // /arb screener trades (ORBIT arbitrage rows): separate sizing from the
+  // BTC openTrade section so /config runtime adjustments never resize
+  // screener trades. notionalUsd derives as margin × leverage, same rule
+  // as openTrade.
+  const arbTradeMarginUsd = parsePositiveDecimalString(
+    env.ARB_TRADE_MARGIN_USD ?? "20",
+    "ARB_TRADE_MARGIN_USD",
+  );
+  const arbTradeLeverage = parsePositiveInteger(
+    env.ARB_TRADE_LEVERAGE ?? "3",
+    "ARB_TRADE_LEVERAGE",
+  );
+  const arbTradeTakeProfitPercent = parsePositiveDecimalString(
+    env.ARB_TRADE_TAKE_PROFIT_PERCENT ?? "3",
+    "ARB_TRADE_TAKE_PROFIT_PERCENT",
+  );
+  const arbTradeStopLossPercent = parsePositiveDecimalString(
+    env.ARB_TRADE_STOP_LOSS_PERCENT ?? "2.5",
+    "ARB_TRADE_STOP_LOSS_PERCENT",
+  );
+  if (Number(arbTradeStopLossPercent) >= 100) {
+    throw new Error("ARB_TRADE_STOP_LOSS_PERCENT must be less than 100");
+  }
+
   return {
     database,
     exchangeA,
@@ -725,6 +766,13 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       exitMaxWaitMs: goldSilverExitMaxWaitMs,
       exitMaxReprices: goldSilverExitMaxReprices,
       timeStopHours: goldSilverTimeStopHours,
+    },
+    arbTrade: {
+      marginUsd: arbTradeMarginUsd,
+      notionalUsd: (Number(arbTradeMarginUsd) * arbTradeLeverage).toFixed(8),
+      leverage: arbTradeLeverage,
+      takeProfitPercent: arbTradeTakeProfitPercent,
+      stopLossPercent: arbTradeStopLossPercent,
     },
     logLevel: env.LOG_LEVEL ?? "info",
   };

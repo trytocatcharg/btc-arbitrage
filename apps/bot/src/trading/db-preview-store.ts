@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, inArray, ne, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
 import {
   activeTradeStatuses,
   tradePreviews,
@@ -89,12 +89,19 @@ export class DbPreviewStore implements PreviewStore {
       const inserted = await tx.insert(trades).values(row);
       let tradeId = extractInsertId(inserted) ?? 0;
       if (!tradeId) {
+        // Fallback re-lookup. With signalId NULL (/arb screener previews)
+        // eq(signalId, null) could never match, so the predicate switches
+        // to IS NULL; a miss still fails loudly below.
+        const signalPredicate =
+          row.signalId == null
+            ? isNull(trades.signalId)
+            : eq(trades.signalId, row.signalId);
         const fallback = await tx
           .select({ id: trades.id })
           .from(trades)
           .where(
             and(
-              eq(trades.signalId, row.signalId),
+              signalPredicate,
               eq(trades.symbol, row.symbol),
               eq(trades.marketType, row.marketType),
               eq(trades.priceSource, row.priceSource),

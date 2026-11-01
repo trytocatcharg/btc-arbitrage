@@ -17,6 +17,8 @@
  * Read-only: never sends credentials, never mutates anything.
  */
 
+import type { ExchangeId } from "@btc-arbitrage/domain";
+
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
 export interface OrbitScreenerConfig {
@@ -311,4 +313,77 @@ function formatPrice(price: number): string {
   if (price >= 100) return price.toFixed(2);
   if (price >= 1) return price.toFixed(3);
   return price.toFixed(5);
+}
+
+/* ------------------------------------------------------------------
+ * /arb "Open Trade" prepare+confirm helpers (pure).
+ * --------------------------------------------------------------- */
+
+/** Telegram's Bot API caps callback_data at 64 bytes; the arbopen payload
+ * is asserted against that budget at build time so an over-long screener
+ * symbol fails loudly here instead of being rejected by Telegram. */
+const TELEGRAM_CALLBACK_DATA_MAX_BYTES = 64;
+
+/** Venue ids the bot's exchange registry can actually build (registry.ts).
+ * `variational` exists in the domain ExchangeId union but has no registry
+ * adapter, so it is rejected here rather than at execution time. */
+const ARB_VENUES: readonly ExchangeId[] = [
+  "arcus",
+  "extended",
+  "qfex",
+  "risex",
+];
+
+export interface ArbOpenRequest {
+  symbol: string;
+  longExchange: ExchangeId;
+  shortExchange: ExchangeId;
+}
+
+/** Builds the "Open Trade" callback payload for one /arb row, encoding
+ * the venue pair so the prepare step does not have to re-derive it from a
+ * fresh screener fetch: `arbopen:<SYMBOL>:<LONG>:<SHORT>`. Throws when the
+ * encoded payload would exceed Telegram's 64-byte callback_data limit. */
+export function buildArbOpenCallbackData(row: ArbitrageTopRow): string {
+  const data = `arbopen:${row.symbol}:${row.longExchange}:${row.shortExchange}`;
+  if (Buffer.byteLength(data, "utf8") > TELEGRAM_CALLBACK_DATA_MAX_BYTES) {
+    throw new Error(
+      `arbopen callback payload exceeds ${TELEGRAM_CALLBACK_DATA_MAX_BYTES} bytes: ${data}`,
+    );
+  }
+  return data;
+}
+
+/** Parses an `arbopen:<SYMBOL>:<LONG>:<SHORT>` callback payload back into
+ * its parts. Returns null on anything malformed — the poller ignores it,
+ * so a tampered or truncated callback never reaches the execution path.
+ * Venue ids are validated against the registry-supported set. */
+export function parseArbOpenCallback(data: string): ArbOpenRequest | null {
+  if (!data.startsWith("arbopen:")) return null;
+  const parts = data.slice("arbopen:".length).split(":");
+  if (parts.length !== 3) return null;
+  const [rawSymbol, longExchange, shortExchange] = parts;
+  const symbol = canonicalizeArbSymbol(rawSymbol ?? "");
+  if (!symbol) return null;
+  if (!isArbVenue(longExchange) || !isArbVenue(shortExchange)) return null;
+  if (longExchange === shortExchange) return null;
+  return { symbol, longExchange, shortExchange };
+}
+
+/** Canonical form of a screener symbol for the execution path: uppercase
+ * alphanumerics, 1..32 chars (matches trades.symbol varchar(32)). Symbol
+ * canonicalization is provably uniform across venues — every execution
+ * adapter resolves this bare base symbol through its OWN normalization
+ * path (base-asset fallback in findMarket for risex/extended,
+ * arcusMarketName + findArcusMarket for arcus, qfexSymbolFor for qfex),
+ * each failing closed when the market does not exist — so no
+ * venue-specific mapping belongs here. */
+export function canonicalizeArbSymbol(raw: string): string | null {
+  const normalized = raw.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+  if (normalized.length < 1 || normalized.length > 32) return null;
+  return normalized;
+}
+
+function isArbVenue(value: string | undefined): value is ExchangeId {
+  return ARB_VENUES.includes(value as ExchangeId);
 }

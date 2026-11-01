@@ -1,6 +1,6 @@
 import type { BotConfig } from "@btc-arbitrage/config";
 import type { getDb } from "@btc-arbitrage/db";
-import { signals, tradePreviews, trades } from "@btc-arbitrage/db";
+import { signals, tradeLegs, tradePreviews, trades } from "@btc-arbitrage/db";
 import { eq } from "drizzle-orm";
 import {
   findTradingPair,
@@ -41,7 +41,11 @@ import {
   type FetchLike,
 } from "./telegram-notifier.js";
 import type { ExecutionQueue } from "../trading/execution-queue.js";
-import { createOpenTradeService } from "../trading/open-trade-factory.js";
+import {
+  createArbOpenTradeService,
+  createOpenTradeService,
+} from "../trading/open-trade-factory.js";
+import { DbPreviewStore } from "../trading/db-preview-store.js";
 import {
   applyAutoConfirm,
   applyCooldownMinutes,
@@ -70,10 +74,12 @@ import { manualMarketCloseTrade } from "../trading/manual-trade-close.js";
 import { renderMetalRatioChart } from "../metal-ratio/metal-ratio-chart.js";
 import { loadYahooRatioBuckets } from "../metal-ratio/yahoo-metals-client.js";
 import {
+  buildArbOpenCallbackData,
   fetchOrbitArbitrageTop,
   formatArbitrageRowMessage,
   formatOrbitArbitrageHeader,
   loadOrbitScreenerConfig,
+  parseArbOpenCallback,
 } from "../screener/orbit-arbitrage-client.js";
 import {
   getUntrackedPosition,
@@ -403,7 +409,11 @@ export class TelegramCommandPoller {
                 [
                   {
                     text: `Open Trade ${row.symbol}`,
-                    callback_data: `arbopen:${row.symbol}`,
+                    // The venue pair rides the callback (arbopen:<SYM>:
+                    // <LONG>:<SHORT>) so prepare never re-derives it from
+                    // a stale screener fetch; buildArbOpenCallbackData
+                    // asserts Telegram's 64-byte callback_data budget.
+                    callback_data: buildArbOpenCallbackData(row),
                   },
                 ],
               ],
@@ -1123,15 +1133,16 @@ export class TelegramCommandPoller {
           );
         }
       } else if (data.startsWith("arbopen:")) {
-        // Placeholder for the /arb row "Open Trade" buttons: the trade
-        // flow itself is intentionally NOT implemented yet. The tap only
-        // acknowledges with a fresh message so the button never feels
-        // dead; the row message it belongs to is left untouched.
-        const symbol = data.slice("arbopen:".length);
-        await this.sendMessage(
-          `⏳ Open Trade for ${symbol} (from /arb) is coming soon — ` +
-            "the flow is not implemented yet.",
-        );
+        // /arb two-step flow, step 1 (prepare): guards + preflight +
+        // preview creation. Places NO orders — orders only happen in the
+        // arbconfirm step below.
+        await this.handleArbOpenPrepare(data);
+      } else if (data.startsWith("arbconfirm:")) {
+        // /arb two-step flow, step 2 (confirm): PLACES REAL ORDERS via the
+        // ARB-sized OpenTradeService on the serial execution queue.
+        await this.handleArbConfirm(data, callback);
+      } else if (data.startsWith("arbcancel:")) {
+        await this.handleArbCancel(data, callback);
       } else if (data.startsWith("open:")) {
         const signalId = Number(data.slice(5));
         const signal = (
@@ -1795,6 +1806,336 @@ export class TelegramCommandPoller {
     });
   }
 
+  /** ARB-sized OpenTradeService for the /arb screener flow (operator
+   * decision: the SAME entry machine as the BTC flow, sized from
+   * config.arbTrade, minSpreadUsd disabled). One instance is cached and
+   * reused by BOTH the prepare and the confirm steps. notifyLimitTimeout
+   * deliberately sends NO "Retry limit order" button: the retrade: branch
+   * runs the BTC-sized service, which would apply BTC sizing and the BTC
+   * spread watch to a screener trade — the operator re-prepares from a
+   * fresh /arb row instead. */
+  private arbService: OpenTradeService | undefined;
+  private arbOpenTradeService(): OpenTradeService {
+    this.arbService ??= createArbOpenTradeService({
+      config: this.config,
+      registry: this.registry,
+      db: this.db,
+      notify: {
+        notifyUrgent: (text) => this.sendMessage(text),
+        notifyLimitTimeout: async ({ message }) => {
+          await this.sendMessage(message);
+        },
+      },
+    });
+    return this.arbService;
+  }
+
+  /** /arb prepare step (arbopen:<SYM>:<LONG>:<SHORT>). Guard order:
+   * parse → metal-collision guard (Arcus leg + active metal trade) →
+   * venue order-placement capability → per-leg execution preflight →
+   * preview creation via the ARB service. Every refusal is a fresh
+   * operator-readable message; a malformed payload is ignored silently. */
+  private async handleArbOpenPrepare(data: string): Promise<void> {
+    const request = parseArbOpenCallback(data);
+    if (!request) return;
+    // Metal collision guard (operator decision): an Arcus leg conflicts
+    // with an active gold/silver trade, which is Arcus-only. Checked again
+    // at confirm time (race window).
+    if (
+      request.longExchange === "arcus" ||
+      request.shortExchange === "arcus"
+    ) {
+      const activeMetal = await loadActiveMetalTrade({ db: this.db });
+      if (activeMetal) {
+        await this.sendMessage(
+          `⛔ Cannot prepare ${request.symbol}: a gold/silver trade is active ` +
+            `(#${activeMetal.id}, ${activeMetal.status}) and this row uses Arcus. ` +
+            "Close the metal trade first.",
+        );
+        return;
+      }
+    }
+    const legAdapters = [];
+    for (const exchangeId of [request.longExchange, request.shortExchange]) {
+      const adapter = this.registry.get(exchangeId);
+      if (!adapter.capabilities.orderPlacement || !adapter.execution) {
+        await this.sendMessage(
+          `⛔ Cannot prepare ${request.symbol}: ${exchangeId} cannot place ` +
+            "orders (trading disabled or no execution adapter).",
+        );
+        return;
+      }
+      legAdapters.push({ exchangeId, execution: adapter.execution });
+    }
+    // Boot-time execution setup (main.ts) only covers the spread symbol,
+    // so the /arb symbol is preflighted per leg here, mirroring
+    // createMetalTrade (leverage write on RISEx/Arcus, signing init on
+    // Extended). Failures refuse the prepare with the exchange's reason.
+    const preflightFailures: string[] = [];
+    for (const leg of legAdapters) {
+      try {
+        await leg.execution.validateExecutionPreflight({
+          symbol: request.symbol,
+          leverage: this.config.arbTrade.leverage,
+        });
+      } catch (error) {
+        preflightFailures.push(
+          `${leg.exchangeId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    if (preflightFailures.length > 0) {
+      await this.sendMessage(
+        `❌ Cannot prepare ${request.symbol}; exchange preflight failed:\n` +
+          preflightFailures.join("\n"),
+      );
+      return;
+    }
+    try {
+      const preview = await this.arbOpenTradeService().createPreview({
+        signalId: null,
+        symbol: request.symbol,
+        marketType: this.config.marketType,
+        exchanges: [request.longExchange, request.shortExchange],
+      });
+      await this.sendMessage(formatArbPreviewMessage(preview, this.config), {
+        inline_keyboard: [
+          [
+            {
+              text: "✅ Confirm",
+              callback_data: `arbconfirm:${preview.token}`,
+            },
+            {
+              text: "❌ Cancel",
+              callback_data: `arbcancel:${preview.token}`,
+            },
+          ],
+        ],
+      });
+    } catch (error) {
+      // Blocking-execution and BBO/metadata failures surface here; keep
+      // them operator-readable (the full detail is in the console log).
+      console.error("Arb prepare failed", {
+        symbol: request.symbol,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      await this.sendMessage(
+        `❌ Could not prepare ${request.symbol}: ` +
+          (error instanceof Error ? error.message : String(error)),
+      );
+    }
+  }
+
+  /** /arb confirm step (arbconfirm:<token>): PLACES REAL ORDERS. Re-checks
+   * the metal-collision guard against the STORED preview payload (the
+   * venue pair fixed at prepare time), edits the preview message to
+   * "Opening…", then runs confirm on the serial execution queue exactly
+   * like the open: branch. */
+  private async handleArbConfirm(
+    data: string,
+    callback: NonNullable<TelegramUpdate["callback_query"]>,
+  ): Promise<void> {
+    const token = data.slice("arbconfirm:".length);
+    const messageId = callback.message?.message_id;
+    const row = (
+      await this.db
+        .select()
+        .from(tradePreviews)
+        .where(eq(tradePreviews.token, token))
+    )[0];
+    if (!row || row.status !== "awaiting_confirmation")
+      throw new Error("Preview was already consumed, cancelled or expired");
+    // SAFETY: the payload JSON column was written by createPreview() from
+    // a verified OpenTradePreview object; its shape is invariant.
+    const preview = row.payload as unknown as OpenTradePreview;
+    // Metal-collision re-check (race window between prepare and confirm):
+    // the stored payload carries the venue pair.
+    if (
+      preview.longExchange === "arcus" ||
+      preview.shortExchange === "arcus"
+    ) {
+      const activeMetal = await loadActiveMetalTrade({ db: this.db });
+      if (activeMetal) {
+        // Cancel the preview so it does not linger in
+        // awaiting_confirmation (that status blocks every other trade via
+        // hasBlockingExecution until the TTL expires).
+        await new DbPreviewStore(this.db).transition(token, "cancelled", {
+          error: "blocked_by_metal_trade",
+        });
+        if (typeof messageId === "number") {
+          await this.editMessageText(
+            messageId,
+            `⛔ Confirm refused: a gold/silver trade is active ` +
+              `(#${activeMetal.id}, ${activeMetal.status}) and this trade ` +
+              "uses Arcus. Preview cancelled.",
+          ).catch((error: unknown) => {
+            console.warn("Telegram arb metal-refusal edit failed", {
+              messageId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
+        return;
+      }
+    }
+    const service = this.arbOpenTradeService();
+    if (typeof messageId === "number") {
+      await this.editMessageText(
+        messageId,
+        `⏳ Opening trade ${token.slice(0, 8)}...\n` +
+          "Executing limit entry + hedge + TP/SL. " +
+          `This can take up to ~${Math.round(this.config.openTrade.limitTimeoutMs / 1000)}s.`,
+      ).catch((error: unknown) => {
+        console.warn("Telegram arb opening edit failed", {
+          messageId,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
+    // Decoupled from the polling tick onto the shared serial execution
+    // queue, exactly like the open: branch.
+    this.executionQueue.enqueue({
+      description: `arb-open:${token.slice(0, 8)}`,
+      run: async () => {
+        try {
+          const confirmOutcome = await service.confirm(token);
+          await this.reportArbTradeOutcome(
+            token,
+            messageId,
+            confirmOutcome,
+            preview.symbol,
+          );
+        } catch (confirmError) {
+          const confirmMessage =
+            confirmError instanceof Error
+              ? confirmError.message
+              : "Trade execution failed";
+          console.error("Arb open trade job failed", {
+            token: token.slice(0, 8),
+            message: confirmMessage,
+          });
+          if (typeof messageId === "number") {
+            await this.editMessageText(
+              messageId,
+              `❌ Trade failed: ${confirmMessage}`,
+            ).catch((error: unknown) => {
+              console.warn("Telegram arb failure edit failed", {
+                messageId,
+                message:
+                  error instanceof Error ? error.message : String(error),
+              });
+            });
+          }
+        }
+      },
+    });
+  }
+
+  /** /arb cancel step (arbcancel:<token>): transitions the preview to
+   * cancelled — only while it is still awaiting_confirmation, so a tap on
+   * a stale Cancel button can never regress an executing trade. */
+  private async handleArbCancel(
+    data: string,
+    callback: NonNullable<TelegramUpdate["callback_query"]>,
+  ): Promise<void> {
+    const token = data.slice("arbcancel:".length);
+    const messageId = callback.message?.message_id;
+    const row = (
+      await this.db
+        .select({ status: tradePreviews.status })
+        .from(tradePreviews)
+        .where(eq(tradePreviews.token, token))
+    )[0];
+    if (!row || row.status !== "awaiting_confirmation") {
+      if (typeof messageId === "number") {
+        await this.editMessageText(
+          messageId,
+          "↪️ That preview is no longer pending (already used or expired).",
+        ).catch((error: unknown) => {
+          console.warn("Telegram arb stale-cancel edit failed", {
+            messageId,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }
+      return;
+    }
+    await new DbPreviewStore(this.db).transition(token, "cancelled");
+    if (typeof messageId === "number") {
+      await this.editMessageText(
+        messageId,
+        `❎ /arb preview ${token.slice(0, 8)} cancelled.`,
+      ).catch((error: unknown) => {
+        console.warn("Telegram arb cancel edit failed", {
+          messageId,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
+  }
+
+  /** reportTradeOutcome for /arb trades: identical branches, except the
+   * "opened" fill summary is built here with the trade's real symbol —
+   * buildTradeOpenedSummary hardcodes a "BTC" quantity label, which would
+   * mislabel a screener asset. */
+  private async reportArbTradeOutcome(
+    token: string,
+    messageId: number | undefined,
+    confirmOutcome: ConfirmOutcome | undefined,
+    symbol: string,
+  ): Promise<void> {
+    if (confirmOutcome?.outcome === "opened") {
+      const fillSummary = await this.buildArbFillSummary(token, symbol);
+      if (typeof messageId === "number") {
+        await this.deleteMessage(messageId).catch((error: unknown) => {
+          console.warn("Telegram arb confirm message delete failed", {
+            messageId,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }
+      await this.sendMessage(fillSummary);
+      return;
+    }
+    await this.reportTradeOutcome(token, messageId, confirmOutcome);
+  }
+
+  private async buildArbFillSummary(
+    token: string,
+    symbol: string,
+  ): Promise<string> {
+    const previewRow = (
+      await this.db
+        .select({ tradeId: tradePreviews.tradeId })
+        .from(tradePreviews)
+        .where(eq(tradePreviews.token, token))
+    )[0];
+    if (!previewRow?.tradeId) return "✅ Trade execution completed.";
+    const legs = await this.db
+      .select()
+      .from(tradeLegs)
+      .where(eq(tradeLegs.tradeId, previewRow.tradeId));
+    const longLeg = legs.find((leg) => leg.side === "long");
+    const shortLeg = legs.find((leg) => leg.side === "short");
+    const lines = [`✅ Trade opened (${token.slice(0, 8)})`];
+    if (longLeg)
+      lines.push(
+        `Long: ${longLeg.exchangeId} @ $${longLeg.entryPriceUsd ?? "?"} ${longLeg.status}`,
+      );
+    if (shortLeg)
+      lines.push(
+        `Short: ${shortLeg.exchangeId} @ $${shortLeg.entryPriceUsd ?? "?"} ${shortLeg.status}`,
+      );
+    if (legs[0]) lines.push(`Quantity: ${legs[0].quantityBase} ${symbol}`);
+    const farmedVolumeUsd = legs.reduce(
+      (sum, leg) => sum + parseDecimal(leg.filledNotionalUsd ?? "0"),
+      0,
+    );
+    lines.push(`Farmed volume: $${farmedVolumeUsd.toFixed(2)}`);
+    lines.push("TP/SL placed on both legs (percentages on margin).");
+    return lines.join("\n");
+  }
+
   private async answerCallback(id: string, text?: string): Promise<void> {
     await this.fetchWithTimeout(
       `https://api.telegram.org/bot${this.config.telegram.botToken}/answerCallbackQuery`,
@@ -2369,6 +2710,33 @@ function formatUsd(value: string): string {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return value;
   return parsed.toFixed(2);
+}
+
+/** Preview summary for the /arb two-step flow. The est. notional derives
+ * from the preview's own quantity × long-side price (never from config
+ * alone); sizing figures come from the ARB section, decoupled from the
+ * BTC openTrade runtime settings. No secrets, no credentials — operator
+ * figures only. */
+function formatArbPreviewMessage(
+  preview: OpenTradePreview,
+  config: BotConfig,
+): string {
+  const estNotionalUsd =
+    Number(preview.quantityBase) * Number(preview.longPriceUsd);
+  const expirySeconds = Math.max(
+    0,
+    Math.round((preview.expiresAt.getTime() - Date.now()) / 1000),
+  );
+  return [
+    `🛰 /arb preview — ${preview.symbol}`,
+    `Long: ${preview.longExchange} @ $${preview.longPriceUsd}`,
+    `Short: ${preview.shortExchange} @ $${preview.shortPriceUsd}`,
+    `Quantity: ${preview.quantityBase} ${preview.symbol} (est. notional $${estNotionalUsd.toFixed(2)})`,
+    `Entry: limit (maker) on ${preview.limitExchange} + market (taker) on ${preview.marketExchange}`,
+    `TP/SL (on margin): +${config.arbTrade.takeProfitPercent}% / -${config.arbTrade.stopLossPercent}% @ ${config.arbTrade.leverage}x`,
+    `Margin per leg: $${config.arbTrade.marginUsd}`,
+    `Preview expires in ~${expirySeconds}s. Confirm places REAL orders.`,
+  ].join("\n");
 }
 
 /**

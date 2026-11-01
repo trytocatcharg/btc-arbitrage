@@ -226,9 +226,9 @@ export const tradePreviews = mysqlTable(
   "trade_previews",
   {
     id: int("id").autoincrement().primaryKey(),
-    signalId: int("signal_id")
-      .notNull()
-      .references(() => signals.id),
+    // Nullable since migration 0007: /arb screener previews are
+    // screener-driven and carry no signals row.
+    signalId: int("signal_id").references(() => signals.id),
     tradeId: int("trade_id").references(() => trades.id),
     token: varchar("token", { length: 96 }).notNull(),
     status: varchar("status", { length: 32 }).notNull(),
