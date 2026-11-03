@@ -40,6 +40,11 @@ export async function monitorTrades(input: {
    * full monitor cadence, capping Arcus request volume (429 risk).
    * Absent in legacy callers/tests: no throttling. */
   config?: BotConfig;
+  /** Optional trade-symbol scope: the paused main loop runs a
+   * metal-only pass so a hand-closed Arcus position is still detected
+   * while paused (metal trades have no resting exchange protection).
+   * Absent: monitor every open/unhedged leg as before. */
+  onlySymbol?: string;
 }): Promise<void> {
   // One cheap probe per monitor pass; without an active metal trade the
   // Arcus throttle does not apply at all (no G/S legs can exist).
@@ -56,6 +61,7 @@ export async function monitorTrades(input: {
     .innerJoin(trades, eq(tradeLegs.tradeId, trades.id))
     .where(
       and(
+        ...(input.onlySymbol != null ? [eq(trades.symbol, input.onlySymbol)] : []),
         // F1 (trade-execution-queue Step 2, safety re-review 2026-10-07,
         // completed same day): monitor 'open' AND 'unhedged' trades. The
         // hedging-phase risk F1 guards against is real — the hedge leg row

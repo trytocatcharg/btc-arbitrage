@@ -1,0 +1,11 @@
+-- Hand-written like 0004/0006/0007: drizzle-kit generate cannot be trusted
+-- here (snapshot drift in migrations/meta makes it re-emit statements for
+-- existing tables). Only the trades.raw addition belongs in this migration.
+--
+-- Operator-armed metal take-profit: the /trade "Arm close at +$X net"
+-- button persists its threshold on the trade row (raw.closeAtNetUsd), read
+-- by the metal exit monitor every tick. JSON (like trade_legs.raw) keeps it
+-- schema-free: new per-trade operator flags must not need a column each.
+-- ADD COLUMN is idempotent-guarded by the migrator's __drizzle_migrations
+-- journal (the statement itself would fail on a duplicate, which is fine).
+ALTER TABLE `trades` ADD COLUMN `raw` json NULL;

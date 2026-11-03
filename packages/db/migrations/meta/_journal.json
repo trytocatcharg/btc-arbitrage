@@ -57,6 +57,13 @@
       "when": 1793364522656,
       "tag": "0007_arb_preview_nullable_signal",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "5",
+      "when": 1794364800000,
+      "tag": "0008_trade_raw",
+      "breakpoints": true
     }
   ]
 }

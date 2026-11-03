@@ -10,6 +10,7 @@ import {
   applyMarginUsd,
   applyMetalLeverage,
   applyMetalMarginUsd,
+  applyMetalTpMinNetUsd,
   applyMinSpreadUsd,
   applyTradingPair,
 } from "./runtime-settings.js";
@@ -41,6 +42,8 @@ function readSettingValue(config: BotConfig, key: RuntimeSettingKey): string {
       return config.goldSilver.marginUsd;
     case "metalLeverage":
       return String(config.goldSilver.leverage);
+    case "metalTpMinNetUsd":
+      return config.goldSilver.tpMinNetUsd;
   }
 }
 
@@ -80,7 +83,8 @@ function parseStoredValue(
     case "marginUsd":
     case "leverage":
     case "metalMarginUsd":
-    case "metalLeverage": {
+    case "metalLeverage":
+    case "metalTpMinNetUsd": {
       const value = Number(raw);
       return Number.isFinite(value) ? value : null;
     }
@@ -118,6 +122,7 @@ export async function applyPersistedRuntimeOverrides(
       "tradingPair",
       "metalMarginUsd",
       "metalLeverage",
+      "metalTpMinNetUsd",
     ];
     if (!knownKeys.includes(key)) {
       console.warn("Skipping unknown persisted runtime override", {
@@ -171,6 +176,9 @@ export async function applyPersistedRuntimeOverrides(
           break;
         case "metalLeverage":
           changes.push(applyMetalLeverage(config, value as number));
+          break;
+        case "metalTpMinNetUsd":
+          changes.push(applyMetalTpMinNetUsd(config, value as number));
           break;
       }
     } catch (error) {

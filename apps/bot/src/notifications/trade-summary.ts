@@ -158,6 +158,9 @@ export async function hasActiveTrades(db: BotDatabase): Promise<boolean> {
 export interface ClosableTradeRef {
   id: number;
   symbol: string;
+  /** trades.raw (migration 0008): the armed-close threshold renders on
+   * the metal arm/disarm button. */
+  raw: unknown;
 }
 
 /** Trades the operator may close at market from the /trade summary
@@ -168,7 +171,7 @@ export async function loadClosableTrades(
   db: BotDatabase,
 ): Promise<ClosableTradeRef[]> {
   return db
-    .select({ id: trades.id, symbol: trades.symbol })
+    .select({ id: trades.id, symbol: trades.symbol, raw: trades.raw })
     .from(trades)
     .where(inArray(trades.status, ["open", "unhedged"]))
     .orderBy(desc(trades.openedAt), desc(trades.createdAt));

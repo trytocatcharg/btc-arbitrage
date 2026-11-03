@@ -18,7 +18,8 @@ export type RuntimeSettingKey =
   | "autoConfirm"
   | "tradingPair"
   | "metalMarginUsd"
-  | "metalLeverage";
+  | "metalLeverage"
+  | "metalTpMinNetUsd";
 
 export interface RuntimeSettingChange {
   key: RuntimeSettingKey;
@@ -35,6 +36,7 @@ export interface RuntimeSettingsBaseline {
   tradingPair: string;
   metalMarginUsd: string;
   metalLeverage: number;
+  metalTpMinNetUsd: string;
 }
 
 const MAX_COOLDOWN_MINUTES = 10_080; // 7 days
@@ -53,6 +55,7 @@ export function snapshotRuntimeSettings(
     tradingPair: config.btcSymbol,
     metalMarginUsd: config.goldSilver.marginUsd,
     metalLeverage: config.goldSilver.leverage,
+    metalTpMinNetUsd: config.goldSilver.tpMinNetUsd,
   };
 }
 
@@ -179,6 +182,23 @@ export function applyMetalLeverage(
   };
 }
 
+export function applyMetalTpMinNetUsd(
+  config: BotConfig,
+  valueUsd: number,
+): RuntimeSettingChange {
+  if (!Number.isFinite(valueUsd) || valueUsd <= 0 || valueUsd > MAX_USD_VALUE) {
+    throw new Error("TP floor must be between 0 and 10000 USD.");
+  }
+  config.goldSilver.tpMinNetUsd = valueUsd.toFixed(2);
+  // Feeds BOTH profit paths evaluated every tick: the limit TP
+  // (net ≥ breakeven + floor) and the /trade armed market close
+  // (threshold snapshotted from this value at arm time).
+  return {
+    key: "metalTpMinNetUsd",
+    summary: `Metal TP floor: +$${valueUsd.toFixed(2)} net over breakeven`,
+  };
+}
+
 export function applyAutoConfirm(
   config: BotConfig,
   enabled: boolean,
@@ -248,5 +268,7 @@ export function isRuntimeSettingOverridden(
       return config.goldSilver.marginUsd !== baseline.metalMarginUsd;
     case "metalLeverage":
       return config.goldSilver.leverage !== baseline.metalLeverage;
+    case "metalTpMinNetUsd":
+      return config.goldSilver.tpMinNetUsd !== baseline.metalTpMinNetUsd;
   }
 }

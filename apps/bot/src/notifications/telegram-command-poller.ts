@@ -53,6 +53,7 @@ import {
   applyMarginUsd,
   applyMetalLeverage,
   applyMetalMarginUsd,
+  applyMetalTpMinNetUsd,
   applyMinSpreadUsd,
   applyTradingPair,
   isRuntimeSettingOverridden,
@@ -71,6 +72,8 @@ import {
   createMetalTrade,
   executeMetalTradeEntry,
   loadActiveMetalTrade,
+  readArmedCloseAtNetUsd,
+  setArmedCloseAtNetUsd,
 } from "../metal-ratio/metal-trade-service.js";
 import { manualMarketCloseTrade } from "../trading/manual-trade-close.js";
 import { renderMetalRatioChart } from "../metal-ratio/metal-ratio-chart.js";
@@ -178,6 +181,7 @@ export class TelegramCommandPoller {
     | "leverage"
     | "metalMargin"
     | "metalLeverage"
+    | "metalTpFloor"
     | null = null;
 
   constructor(
@@ -510,6 +514,9 @@ export class TelegramCommandPoller {
           case "metalLeverage":
             change = applyMetalLeverage(this.config, value);
             break;
+          case "metalTpFloor":
+            change = applyMetalTpMinNetUsd(this.config, value);
+            break;
         }
       } catch (validationError) {
         // Invalid value: keep the prompt open so the operator can retry.
@@ -727,6 +734,24 @@ export class TelegramCommandPoller {
             SETTING_CANCEL_MARKUP,
           ).catch((error: unknown) => {
             console.warn("Telegram metal-leverage-prompt edit failed", {
+              messageId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
+      } else if (data === "set:metaltpfloor") {
+        this.pendingSettingPrompt = "metalTpFloor";
+        const messageId = callback.message?.message_id;
+        if (typeof messageId === "number") {
+          await this.editMessageText(
+            messageId,
+            "Send me the new METAL TRADE TP floor in USD (e.g. 10). " +
+              "The trade takes profit when net PnL reaches breakeven + this " +
+              "floor (limit TP), and the /trade armed market close snapshots " +
+              "this value at arm time.",
+            SETTING_CANCEL_MARKUP,
+          ).catch((error: unknown) => {
+            console.warn("Telegram metal-tp-floor-prompt edit failed", {
               messageId,
               message: error instanceof Error ? error.message : String(error),
             });
@@ -1393,17 +1418,37 @@ export class TelegramCommandPoller {
           ]);
           // Manual escape hatch (gold-silver-decouple): one "Close @
           // market" button per open/unhedged trade, with a two-step
-          // confirm (tradeclose:ask → tradeclose:confirm/cancel).
+          // confirm (tradeclose:ask → tradeclose:confirm/cancel). Metal
+          // trades get a second button on the same row: arm a MARKET
+          // close once net PnL (both legs) covers the TP floor, or
+          // disarm when already armed.
           await this.sendMessage(
             summary,
             closable.length > 0
               ? {
-                  inline_keyboard: closable.map((trade) => [
-                    {
-                      text: `🔒 Close #${trade.id} (${trade.symbol}) @ market`,
-                      callback_data: `tradeclose:ask:${trade.id}`,
-                    },
-                  ]),
+                  inline_keyboard: closable.map((trade) => {
+                    const row = [
+                      {
+                        text: `🔒 Close #${trade.id} (${trade.symbol}) @ market`,
+                        callback_data: `tradeclose:ask:${trade.id}`,
+                      },
+                    ];
+                    if (trade.symbol === GOLD_SILVER_SYMBOL) {
+                      const armedAt = readArmedCloseAtNetUsd(trade.raw);
+                      row.push(
+                        armedAt !== null
+                          ? {
+                              text: `🎯 Closing at +$${armedAt.toFixed(2)} profit — tap to cancel`,
+                              callback_data: `tradeclose:disarm:${trade.id}`,
+                            }
+                          : {
+                              text: `🎯 Close when profit +$${formatUsd(this.config.goldSilver.tpMinNetUsd)}`,
+                              callback_data: `tradeclose:armask:${trade.id}`,
+                            },
+                      );
+                    }
+                    return row;
+                  }),
                 }
               : undefined,
           );
@@ -1440,7 +1485,9 @@ export class TelegramCommandPoller {
           }
         };
         if (
-          (action !== "ask" && action !== "confirm" && action !== "cancel") ||
+          !["ask", "confirm", "cancel", "armask", "armconfirm", "disarm"].includes(
+            action ?? "",
+          ) ||
           !Number.isInteger(tradeId)
         ) {
           throw new Error(`Malformed trade-close callback: ${data}`);
@@ -1464,6 +1511,64 @@ export class TelegramCommandPoller {
             `⚠️ Trade #${tradeId} is '${trade?.status ?? "missing"}' — no ` +
               "longer closeable at market (already closing/closed, or still " +
               "in the entry phase).",
+          );
+          return;
+        }
+        if (
+          action === "armask" ||
+          action === "armconfirm" ||
+          action === "disarm"
+        ) {
+          // Armed net take-profit: metal trades only. The threshold is
+          // snapshotted from the (runtime-adjustable) TP floor at arm
+          // time so a later /config change does not retroactively move
+          // an armed trade's exit.
+          if (trade.symbol !== GOLD_SILVER_SYMBOL) {
+            await reply(
+              "⚠️ Arming a net take-profit is only available on gold/silver " +
+                "metal trades.",
+            );
+            return;
+          }
+          if (action === "armask") {
+            const floor = formatUsd(this.config.goldSilver.tpMinNetUsd);
+            await reply(
+              `🎯 Auto-close trade #${tradeId} at MARKET?\n` +
+                `Both legs close at MARKET as soon as the trade's profit ` +
+                `(both legs, after estimated exit fees) reaches +$${floor}. ` +
+                "The SL keeps protecting the trade until then; tap the " +
+                "🎯 button again to cancel the auto-close.",
+              {
+                inline_keyboard: [
+                  [
+                    {
+                      text: `✅ Close when profit +$${floor}`,
+                      callback_data: `tradeclose:armconfirm:${tradeId}`,
+                    },
+                    {
+                      text: "Cancel",
+                      callback_data: `tradeclose:cancel:${tradeId}`,
+                    },
+                  ],
+                ],
+              },
+            );
+            return;
+          }
+          if (action === "disarm") {
+            await setArmedCloseAtNetUsd({ db: this.db }, tradeId, null);
+            await reply(
+              `✅ Auto-close cancelled on trade #${tradeId}. ` +
+                "SL/TP floor/time-stop keep running.",
+            );
+            return;
+          }
+          // armconfirm
+          const floorUsd = Number(this.config.goldSilver.tpMinNetUsd);
+          await setArmedCloseAtNetUsd({ db: this.db }, tradeId, floorUsd);
+          await reply(
+            `🎯 Auto-close set: trade #${tradeId} will close at MARKET ` +
+              `when profit reaches +$${floorUsd.toFixed(2)} (both legs).`,
           );
           return;
         }
@@ -2480,6 +2585,7 @@ const RUNTIME_SETTING_BUTTONS = [
     { text: "💰 Margin 🥇", callback_data: "set:metalmargin" },
     { text: "⚡️ Leverage 🥇", callback_data: "set:metalleverage" },
   ],
+  [{ text: "🎯 TP floor 🥇", callback_data: "set:metaltpfloor" }],
   [
     { text: "🪙 Pairs", callback_data: "set:pair" },
     { text: "🤖 Auto trade", callback_data: "set:autoconfirm" },
@@ -2723,6 +2829,9 @@ export function formatActiveConfigSummary(
   const metalLeverageOverridden =
     baseline != null &&
     isRuntimeSettingOverridden("metalLeverage", baseline, config);
+  const metalTpFloorOverridden =
+    baseline != null &&
+    isRuntimeSettingOverridden("metalTpMinNetUsd", baseline, config);
   const metalNotional = (
     Number(config.goldSilver.marginUsd) * config.goldSilver.leverage
   ).toFixed(2);
@@ -2748,7 +2857,7 @@ export function formatActiveConfigSummary(
     `  Margin: $${formatUsd(config.goldSilver.marginUsd)} per leg (notional $${metalNotional} at ${config.goldSilver.leverage}x)${metalMarginOverridden ? " *" : ""}`,
     `  Leverage: ${config.goldSilver.leverage}x${metalLeverageOverridden ? " *" : ""}`,
     `  RSI(${config.goldSilver.rsiPeriod}) band ±${config.goldSilver.rsiConfirmBand} · ${config.goldSilver.candleTimeframe} candles`,
-    `  TP floor: breakeven + $${formatUsd(config.goldSilver.tpMinNetUsd)} net (evaluated every tick)`,
+    `  TP floor: breakeven + $${formatUsd(config.goldSilver.tpMinNetUsd)} net (evaluated every tick)${metalTpFloorOverridden ? " *" : ""}`,
     `  SL: -${config.goldSilver.stopLossMarginPercent}% of total margin · Time-stop: ${config.goldSilver.timeStopHours}h`,
   ];
   if (
@@ -2759,7 +2868,8 @@ export function formatActiveConfigSummary(
     autoConfirmOverridden ||
     tradingPairOverridden ||
     metalMarginOverridden ||
-    metalLeverageOverridden
+    metalLeverageOverridden ||
+    metalTpFloorOverridden
   ) {
     lines.push("", "(* adjusted at runtime — does not persist across restarts)");
   }

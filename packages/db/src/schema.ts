@@ -202,6 +202,10 @@ export const trades = mysqlTable(
       .default("0"),
     openedAt: timestamp("opened_at"),
     closedAt: timestamp("closed_at"),
+    // Operator-armed flags (migration 0008): metal take-profit armed from
+    // /trade lives here as raw.closeAtNetUsd. JSON keeps per-trade flags
+    // schema-free; trade_legs.raw carries the per-leg shape instead.
+    raw: json("raw"),
     createdAt: timestamp("created_at").notNull(),
     updatedAt: timestamp("updated_at").notNull(),
   },

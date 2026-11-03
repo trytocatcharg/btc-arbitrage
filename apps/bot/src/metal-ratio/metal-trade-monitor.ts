@@ -6,6 +6,8 @@ import {
   closeMetalTrade,
   loadActiveMetalTrade,
   metalLegMarkets,
+  readArmedCloseAtNetUsd,
+  setArmedCloseAtNetUsd,
   type MetalTradeContext,
 } from "./metal-trade-service.js";
 
@@ -86,6 +88,25 @@ export async function evaluateMetalTradeExitTriggers(
     ctx.enqueue({
       description: `metal-close:sl-${trade.id}`,
       run: () => closeMetalTrade(ctx, trade.id, "stop_loss", "market"),
+    });
+    return;
+  }
+
+  // 2) Armed operator take-profit: a MARKET close on both legs once net
+  // covers the threshold the operator armed from /trade (raw.closeAtNetUsd).
+  // An explicit operator intent outranks the passive TP floor below, and
+  // disarms itself on claim so a re-check never re-fires on the closed row.
+  const armedAt = readArmedCloseAtNetUsd(trade.raw);
+  if (armedAt !== null && net >= armedAt) {
+    console.warn("Metal trade armed TP trigger", {
+      tradeId: trade.id,
+      net,
+      armedAt,
+    });
+    await setArmedCloseAtNetUsd(ctx, trade.id, null);
+    ctx.enqueue({
+      description: `metal-close:armed-${trade.id}`,
+      run: () => closeMetalTrade(ctx, trade.id, "tp_armed", "market"),
     });
     return;
   }

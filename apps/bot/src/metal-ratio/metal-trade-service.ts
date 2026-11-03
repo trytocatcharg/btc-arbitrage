@@ -37,6 +37,9 @@ export interface MetalTradeRow {
   status: (typeof activeTradeStatuses)[number];
   side: MetalRatioSide;
   openedAt: Date | null;
+  /** trades.raw (migration 0008): operator-armed flags, currently
+   * closeAtNetUsd for the /trade "Arm close at +$X net" button. */
+  raw: unknown;
 }
 
 /** One query for the active gold/silver trade (if any). Direction
@@ -52,6 +55,7 @@ export async function loadActiveMetalTrade(
       id: trades.id,
       status: trades.status,
       openedAt: trades.openedAt,
+      raw: trades.raw,
       legSide: tradeLegs.side,
       legQty: tradeLegs.quantityBase,
     })
@@ -73,7 +77,56 @@ export async function loadActiveMetalTrade(
   const longQty = Number(rows.find((row) => row.legSide === "long")?.legQty ?? 0);
   const side: MetalRatioSide =
     shortQty < longQty ? "short_gold_long_silver" : "long_gold_short_silver";
-  return { id: first.id, status: first.status, side, openedAt: first.openedAt };
+  return {
+    id: first.id,
+    status: first.status,
+    side,
+    openedAt: first.openedAt,
+    raw: first.raw,
+  };
+}
+
+/** Operator-armed market take-profit (migration 0008): raw.closeAtNetUsd
+ * on the trade row. The /trade "Arm close at +$X net" button sets it; the
+ * exit monitor market-closes both legs once net PnL covers it. Returns the
+ * threshold in USD, or null when not armed / malformed. */
+export function readArmedCloseAtNetUsd(raw: unknown): number | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const value = (raw as Record<string, unknown>).closeAtNetUsd;
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+/** Arms (or, with null, disarms) the market take-profit on an open metal
+ * trade by merging raw.closeAtNetUsd. JSON-merge in JS keeps any other
+ * flags the row carries. */
+export async function setArmedCloseAtNetUsd(
+  ctx: Pick<MetalTradeContext, "db">,
+  tradeId: number,
+  thresholdUsd: number | null,
+): Promise<void> {
+  const row = (
+    await ctx.db
+      .select({ raw: trades.raw })
+      .from(trades)
+      .where(eq(trades.id, tradeId))
+      .limit(1)
+  )[0];
+  if (!row) throw new Error(`Trade #${tradeId} not found`);
+  const raw =
+    typeof row.raw === "object" && row.raw !== null
+      ? { ...(row.raw as Record<string, unknown>) }
+      : {};
+  if (thresholdUsd === null) {
+    delete raw.closeAtNetUsd;
+  } else {
+    raw.closeAtNetUsd = thresholdUsd.toFixed(2);
+  }
+  await ctx.db
+    .update(trades)
+    .set({ raw, updatedAt: new Date() })
+    .where(eq(trades.id, tradeId));
 }
 
 export function metalLegMarkets(side: MetalRatioSide): {

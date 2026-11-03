@@ -402,6 +402,27 @@ export async function runPollingLoop(input: {
         // no-ops unless a G/S trade is active, so an idle paused bot still
         // makes no Arcus calls.
         await runMetalRatioPass(tick);
+        // Manual-close detection survives the pause too, metal-scoped:
+        // a hand-closed Arcus position must flip the trade to closed/
+        // unhedged even while paused (the interval monitor pass is skipped
+        // wholesale above). The Arcus throttle inside monitorTrades caps
+        // position polls at the metal tick cadence.
+        try {
+          await monitorTrades({
+            db: input.db,
+            registry: input.registry,
+            notify: (text) => input.notifier.notifyUrgent(text),
+            config: input.config,
+            onlySymbol: GOLD_SILVER_SYMBOL,
+          });
+        } catch (error) {
+          console.error(
+            "Paused metal position monitor failed",
+            error instanceof Error
+              ? { tick, message: error.message }
+              : { tick, error },
+          );
+        }
       } else {
         await runSignalPass(tick);
         await runMetalRatioPass(tick);
