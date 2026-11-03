@@ -43,6 +43,11 @@ export interface ArbitrageTopRow {
   shortPrice: number;
 }
 
+/** Spread (as a fraction, 1 = 100%) from which the /arb "Open Trade"
+ * button earns a ⭐ — the operator's "spread is big enough to bother"
+ * line. Mark price is mid-book, so the executable spread runs smaller. */
+export const ARB_STAR_SPREAD_THRESHOLD = 0.005;
+
 interface OrbitCell {
   markPrice?: number;
   exchangeTicker?: string;
@@ -287,6 +292,7 @@ export function formatOrbitArbitrageHeader(
   lines.push(
     "",
     "Mark price is mid-book — the executable spread is usually smaller.",
+    `⭐ = spread ≥ ${ARB_STAR_SPREAD_THRESHOLD * 100}% — big enough to trade.`,
   );
   return lines.join("\n");
 }

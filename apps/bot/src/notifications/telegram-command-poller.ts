@@ -74,6 +74,7 @@ import { manualMarketCloseTrade } from "../trading/manual-trade-close.js";
 import { renderMetalRatioChart } from "../metal-ratio/metal-ratio-chart.js";
 import { loadYahooRatioBuckets } from "../metal-ratio/yahoo-metals-client.js";
 import {
+  ARB_STAR_SPREAD_THRESHOLD,
   buildArbOpenCallbackData,
   fetchOrbitArbitrageTop,
   formatArbitrageRowMessage,
@@ -402,23 +403,26 @@ export class TelegramCommandPoller {
           formatOrbitArbitrageHeader(result, screenerConfig),
         );
         for (const [index, row] of result.rows.entries()) {
-          await this.sendMessage(
-            formatArbitrageRowMessage(row, index),
-            {
-              inline_keyboard: [
-                [
-                  {
-                    text: `Open Trade ${row.symbol}`,
-                    // The venue pair rides the callback (arbopen:<SYM>:
-                    // <LONG>:<SHORT>) so prepare never re-derives it from
-                    // a stale screener fetch; buildArbOpenCallbackData
-                    // asserts Telegram's 64-byte callback_data budget.
-                    callback_data: buildArbOpenCallbackData(row),
-                  },
-                ],
+          // ⭐ on rows whose mark-price spread clears the operator's
+          // "big enough to trade" line (see ARB_STAR_SPREAD_THRESHOLD).
+          const buttonText =
+            row.spreadPct >= ARB_STAR_SPREAD_THRESHOLD
+              ? `⭐ Open Trade ${row.symbol}`
+              : `Open Trade ${row.symbol}`;
+          await this.sendMessage(formatArbitrageRowMessage(row, index), {
+            inline_keyboard: [
+              [
+                {
+                  text: buttonText,
+                  // The venue pair rides the callback (arbopen:<SYM>:
+                  // <LONG>:<SHORT>) so prepare never re-derives it from
+                  // a stale screener fetch; buildArbOpenCallbackData
+                  // asserts Telegram's 64-byte callback_data budget.
+                  callback_data: buildArbOpenCallbackData(row),
+                },
               ],
-            },
-          );
+            ],
+          });
         }
         return;
       }
