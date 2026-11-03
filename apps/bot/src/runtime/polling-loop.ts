@@ -655,8 +655,6 @@ export async function runPollingLoop(input: {
               enqueue: (job) => input.executionQueue.enqueue(job),
             },
             {
-              crossed: result.crossed,
-              side: result.side,
               goldPriceUsd: gold.priceUsd,
               silverPriceUsd: silver.priceUsd,
             },

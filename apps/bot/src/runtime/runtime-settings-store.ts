@@ -8,6 +8,8 @@ import {
   applyCooldownMinutes,
   applyLeverage,
   applyMarginUsd,
+  applyMetalLeverage,
+  applyMetalMarginUsd,
   applyMinSpreadUsd,
   applyTradingPair,
 } from "./runtime-settings.js";
@@ -35,6 +37,10 @@ function readSettingValue(config: BotConfig, key: RuntimeSettingKey): string {
       return config.openTrade.autoConfirm ? "true" : "false";
     case "tradingPair":
       return config.btcSymbol;
+    case "metalMarginUsd":
+      return config.goldSilver.marginUsd;
+    case "metalLeverage":
+      return String(config.goldSilver.leverage);
   }
 }
 
@@ -72,7 +78,9 @@ function parseStoredValue(
     case "cooldownMinutes":
     case "minSpreadUsd":
     case "marginUsd":
-    case "leverage": {
+    case "leverage":
+    case "metalMarginUsd":
+    case "metalLeverage": {
       const value = Number(raw);
       return Number.isFinite(value) ? value : null;
     }
@@ -108,6 +116,8 @@ export async function applyPersistedRuntimeOverrides(
       "leverage",
       "autoConfirm",
       "tradingPair",
+      "metalMarginUsd",
+      "metalLeverage",
     ];
     if (!knownKeys.includes(key)) {
       console.warn("Skipping unknown persisted runtime override", {
@@ -155,6 +165,12 @@ export async function applyPersistedRuntimeOverrides(
             break;
           }
           changes.push(applyTradingPair(config, value as string));
+          break;
+        case "metalMarginUsd":
+          changes.push(applyMetalMarginUsd(config, value as number));
+          break;
+        case "metalLeverage":
+          changes.push(applyMetalLeverage(config, value as number));
           break;
       }
     } catch (error) {

@@ -15,7 +15,7 @@ Current capabilities:
 - Telegram commands `/config`, `/trade`, `/volume`, `/lastsignal` and `/bot` (pause/resume/restart control panel, guarded by no active trades and no in-flight execution), plus an `Open Trade` inline button on each signal with `Confirm`/`Cancel` preview flow.
 - `/lastsignal` shows the last 10 spread ticks from `spread_snapshots` regardless of threshold, marking which crossed it and which generated a signal.
 - `/arb` scrapes the ORBIT perp screener (read-only) and lists the top cross-venue spreads, one message per row with an `Open Trade <SYM>` button. The button opens a two-step prepare+confirm flow (`arbopen:<SYM>:<LONG>:<SHORT>` → preview message with Confirm/Cancel → `arbconfirm:`/`arbcancel:`) that REUSES the full open-trade entry machine (passive post-only maker limit + immediate market hedge + per-leg TP/SL) through a second, ARB-sized `OpenTradeService` (`createArbOpenTradeService`): sizing comes from the `arbTrade` config section — `ARB_TRADE_MARGIN_USD` (20), `ARB_TRADE_LEVERAGE` (3), `ARB_TRADE_TAKE_PROFIT_PERCENT` (3), `ARB_TRADE_STOP_LOSS_PERCENT` (2.5), margin-based TP/SL like openTrade — decoupled from the BTC `openTrade` runtime settings, with `minSpreadUsd` overridden to `"0"` (the BTC threshold would abort every /arb entry; 0 still aborts on a negative directional spread). Arb previews carry `signal_id NULL` (migration 0007). Guards: metal-collision (an Arcus leg + an active gold/silver trade refuses at prepare AND at confirm), per-venue `capabilities.orderPlacement` + execution availability, per-leg `validateExecutionPreflight` at prepare (boot-time setup only covers the spread symbol), `hasBlockingExecution` serialization, and confirm only consumes a still-`awaiting_confirmation` preview. Known gap (accepted): the position reconciler is scoped to `config.btcSymbol` + exchangeA/B, so it does NOT see /arb positions — do not "fix" it without an operator decision.
-- Runtime settings adjusted at runtime via Telegram (`/config` buttons: cooldown, min spread, margin, auto-confirm) are persisted to `bot_runtime_overrides` (migration 0004) on apply and restored at boot.
+- Runtime settings adjusted at runtime via Telegram (`/config` buttons: cooldown, min spread, margin, leverage, metal margin 🥇, metal leverage 🥇, auto-confirm) are persisted to `bot_runtime_overrides` (migration 0004) on apply and restored at boot.
 - Open trade execution (bot-only, Telegram-confirmed): passive maker-limit entry with retry, immediate market hedge per fill increment, then automatic TP/SL reduce-only orders on both legs.
 - Trade monitoring detects leg closure via position polling and notifies `closed` or `unhedged` states, and samples the surviving leg's mark price + gross unrealized PnL during unhedged windows into `unhedged_leg_samples`.
 - Persists one `spread_snapshots` row per tick (every tick, threshold or not; failure-isolated so it never blocks signal emission) plus signals, trades, trade legs, trade previews, status history, Telegram command logs, operations, and events in MariaDB. `price_snapshots` exists in the schema but is written nowhere (retention prunes both tables daily).
@@ -298,10 +298,12 @@ Arcus-only pairs strategy on the GLD-USD / SLV-USD perp ratio (docs in `odd/task
   `GOLDSILVER_LIMIT_REPRICE_INTERVAL_MS` (2000) and
   `GOLDSILVER_ENTRY_IMPROVE_TICKS` (1). Dollar-neutral legs (direction
   derived from legs: the gold leg's base qty is always the smaller).
-  Exits: **TP** = RSI crosses back to the opposite side AND net PnL ≥
-  exit-fee breakeven + `GOLDSILVER_TP_MIN_NET_USD` (default $10) → paired
+  Exits: **TP** = net PnL ≥ exit-fee breakeven +
+  `GOLDSILVER_TP_MIN_NET_USD` → paired
   dual-limit close (reduce-only GTT at the touch, reprice every
-  `GOLDSILVER_EXIT_REPRICE_INTERVAL_MS`); **time-stop**
+  `GOLDSILVER_EXIT_REPRICE_INTERVAL_MS`). The profit floor is defined
+  ONLY by that env variable (no RSI or other signal condition, no fixed
+  value in code or docs); **time-stop**
   `GOLDSILVER_TIME_STOP_HOURS` (48h) at market when ≥ breakeven; **SL**
   net ≤ -`GOLDSILVER_STOP_LOSS_MARGIN_PERCENT` (50) of TOTAL margin →
   immediate market both legs. Paired-close fallback: first of 40 bps

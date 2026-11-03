@@ -15,9 +15,6 @@ export interface MetalMonitorContext extends MetalTradeContext {
 }
 
 export interface MetalTriggerTick {
-  /** True on the tick where the ratio RSI crossed into a new side. */
-  crossed: boolean;
-  side: MetalRatioSide | undefined;
   goldPriceUsd: string;
   silverPriceUsd: string;
 }
@@ -93,19 +90,15 @@ export async function evaluateMetalTradeExitTriggers(
     return;
   }
 
-  // 2) Take-profit: RSI crossed back to the OPPOSITE side (the entry
-  // reason is exhausted) and the profit floor over breakeven is met.
-  if (
-    tick.crossed &&
-    tick.side !== undefined &&
-    tick.side !== trade.side &&
-    net >= tpFloor
-  ) {
+  // 2) Take-profit: the profit floor over breakeven is met. The floor
+  // is defined ONLY by GOLDSILVER_TP_MIN_NET_USD (env) — there is no
+  // RSI or any other signal condition on the TP path: whenever the
+  // ratio move covers fees plus the floor, the trade takes profit.
+  if (net >= tpFloor) {
     console.warn("Metal trade TP trigger", {
       tradeId: trade.id,
       net,
       tpFloor,
-      side: tick.side,
     });
     ctx.enqueue({
       description: `metal-close:tp-${trade.id}`,

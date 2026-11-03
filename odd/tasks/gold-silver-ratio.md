@@ -92,6 +92,16 @@ ratio snapshots. No execution in v1 (execution design is agreed but deferred).
   operator deploy with DB + Arcus credentials)
 
 ## Deferred (post-execution)
+- **TP floor calibration (pending, flagged 2026-11-12)**: since the RSI
+  cross condition was removed from the TP trigger, the floor is purely
+  monetary (`net ≥ breakeven + GOLDSILVER_TP_MIN_NET_USD`, evaluated every
+  tick). With default sizing ($20 margin × 3x = $60 notional per leg,
+  ~$0.60 PnL per 1% ratio move), a $10 floor requires ~17% ratio move in
+  the window — effectively unreachable, so trades degenerate to SL /
+  time-stop. TODO: calibrate `GOLDSILVER_TP_MIN_NET_USD` from historical
+  ratio volatility (how many % does GSR move within 48h, at what
+  percentile), not by eye. Candidate levers: lower floor ($1–2), raise
+  sizing/leverage.
 - **Auto-confirm/auto-trade: REJECTED by operator (2026-10-23)** — entry stays
   manual (alert button only). Do not re-propose unless asked.
 - TP/SL protective resting orders per leg (operator: "mas adelante").

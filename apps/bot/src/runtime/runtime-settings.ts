@@ -16,7 +16,9 @@ export type RuntimeSettingKey =
   | "marginUsd"
   | "leverage"
   | "autoConfirm"
-  | "tradingPair";
+  | "tradingPair"
+  | "metalMarginUsd"
+  | "metalLeverage";
 
 export interface RuntimeSettingChange {
   key: RuntimeSettingKey;
@@ -31,6 +33,8 @@ export interface RuntimeSettingsBaseline {
   leverage: number;
   autoConfirm: boolean;
   tradingPair: string;
+  metalMarginUsd: string;
+  metalLeverage: number;
 }
 
 const MAX_COOLDOWN_MINUTES = 10_080; // 7 days
@@ -47,6 +51,8 @@ export function snapshotRuntimeSettings(
     leverage: config.leverage,
     autoConfirm: config.openTrade.autoConfirm,
     tradingPair: config.btcSymbol,
+    metalMarginUsd: config.goldSilver.marginUsd,
+    metalLeverage: config.goldSilver.leverage,
   };
 }
 
@@ -128,6 +134,51 @@ export function applyLeverage(
   };
 }
 
+export function applyMetalMarginUsd(
+  config: BotConfig,
+  valueUsd: number,
+): RuntimeSettingChange {
+  if (!Number.isFinite(valueUsd) || valueUsd <= 0 || valueUsd > MAX_USD_VALUE) {
+    throw new Error("Margin must be between 0 and 10000 USD.");
+  }
+  config.goldSilver.marginUsd = valueUsd.toFixed(2);
+  // Unlike the BTC openTrade section, the metal trade derives its notional
+  // at ENTRY time (createMetalTrade: margin x leverage, then Arcus
+  // preflight), so there is no notionalUsd field to recompute here — the
+  // override applies to the next /ratio open.
+  return {
+    key: "metalMarginUsd",
+    summary:
+      `Metal trade margin: $${valueUsd.toFixed(2)} per leg ` +
+      `(notional $${(valueUsd * config.goldSilver.leverage).toFixed(2)} ` +
+      `at ${config.goldSilver.leverage}x)`,
+  };
+}
+
+export function applyMetalLeverage(
+  config: BotConfig,
+  leverage: number,
+): RuntimeSettingChange {
+  if (
+    !Number.isInteger(leverage) ||
+    leverage < 1 ||
+    leverage > MAX_LEVERAGE
+  ) {
+    throw new Error(`Leverage must be an integer between 1 and ${MAX_LEVERAGE}.`);
+  }
+  config.goldSilver.leverage = leverage;
+  // No exchange write here: createMetalTrade runs validateExecutionPreflight
+  // against Arcus with this leverage at the next entry, so an unsupported
+  // value fails closed there instead of mutating the account now.
+  return {
+    key: "metalLeverage",
+    summary:
+      `Metal trade leverage: ${leverage}x ` +
+      `(notional $${(Number(config.goldSilver.marginUsd) * leverage).toFixed(2)} per leg ` +
+      `with margin $${Number(config.goldSilver.marginUsd).toFixed(2)})`,
+  };
+}
+
 export function applyAutoConfirm(
   config: BotConfig,
   enabled: boolean,
@@ -193,5 +244,9 @@ export function isRuntimeSettingOverridden(
       return config.openTrade.autoConfirm !== baseline.autoConfirm;
     case "tradingPair":
       return config.btcSymbol !== baseline.tradingPair;
+    case "metalMarginUsd":
+      return config.goldSilver.marginUsd !== baseline.metalMarginUsd;
+    case "metalLeverage":
+      return config.goldSilver.leverage !== baseline.metalLeverage;
   }
 }

@@ -51,6 +51,8 @@ import {
   applyCooldownMinutes,
   applyLeverage,
   applyMarginUsd,
+  applyMetalLeverage,
+  applyMetalMarginUsd,
   applyMinSpreadUsd,
   applyTradingPair,
   isRuntimeSettingOverridden,
@@ -174,6 +176,8 @@ export class TelegramCommandPoller {
     | "spread"
     | "margin"
     | "leverage"
+    | "metalMargin"
+    | "metalLeverage"
     | null = null;
 
   constructor(
@@ -487,14 +491,26 @@ export class TelegramCommandPoller {
       }
       let change: RuntimeSettingChange;
       try {
-        change =
-          kind === "cooldown"
-            ? applyCooldownMinutes(this.config, value)
-            : kind === "spread"
-              ? applyMinSpreadUsd(this.config, value)
-              : kind === "margin"
-                ? applyMarginUsd(this.config, value)
-                : applyLeverage(this.config, value);
+        switch (kind) {
+          case "cooldown":
+            change = applyCooldownMinutes(this.config, value);
+            break;
+          case "spread":
+            change = applyMinSpreadUsd(this.config, value);
+            break;
+          case "margin":
+            change = applyMarginUsd(this.config, value);
+            break;
+          case "leverage":
+            change = applyLeverage(this.config, value);
+            break;
+          case "metalMargin":
+            change = applyMetalMarginUsd(this.config, value);
+            break;
+          case "metalLeverage":
+            change = applyMetalLeverage(this.config, value);
+            break;
+        }
       } catch (validationError) {
         // Invalid value: keep the prompt open so the operator can retry.
         const message =
@@ -677,6 +693,40 @@ export class TelegramCommandPoller {
             SETTING_CANCEL_MARKUP,
           ).catch((error: unknown) => {
             console.warn("Telegram leverage-prompt edit failed", {
+              messageId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
+      } else if (data === "set:metalmargin") {
+        this.pendingSettingPrompt = "metalMargin";
+        const messageId = callback.message?.message_id;
+        if (typeof messageId === "number") {
+          await this.editMessageText(
+            messageId,
+            `Send me the new METAL TRADE margin per leg in USD (e.g. 20). ` +
+              `The notional derives as margin × leverage ` +
+              `(${this.config.goldSilver.leverage}x) at the next /ratio open.`,
+            SETTING_CANCEL_MARKUP,
+          ).catch((error: unknown) => {
+            console.warn("Telegram metal-margin-prompt edit failed", {
+              messageId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
+      } else if (data === "set:metalleverage") {
+        this.pendingSettingPrompt = "metalLeverage";
+        const messageId = callback.message?.message_id;
+        if (typeof messageId === "number") {
+          await this.editMessageText(
+            messageId,
+            "Send me the new METAL TRADE leverage (integer between 1 and 50). " +
+              "Arcus validates it at the next /ratio open; the current metal " +
+              `margin is $${Number(this.config.goldSilver.marginUsd).toFixed(2)} per leg.`,
+            SETTING_CANCEL_MARKUP,
+          ).catch((error: unknown) => {
+            console.warn("Telegram metal-leverage-prompt edit failed", {
               messageId,
               message: error instanceof Error ? error.message : String(error),
             });
@@ -2412,9 +2462,10 @@ const VOLUME_VIEW_BUTTONS = [
 ] as const;
 
 // Two buttons per row, in operator-priority order: the everyday alert
-// settings first, the sizing settings second (margin + leverage derive the
-// per-leg notional together), and the strategy-level row last — Pairs and
-// the dangerous auto-trading toggle, which must never render glued to the
+// settings first, the sizing settings second (BTC margin + leverage derive
+// the per-leg notional together, metal margin + leverage right under for
+// the gold/silver trade), and the strategy-level row last — Pairs and the
+// dangerous auto-trading toggle, which must never render glued to the
 // everyday settings.
 const RUNTIME_SETTING_BUTTONS = [
   [
@@ -2424,6 +2475,10 @@ const RUNTIME_SETTING_BUTTONS = [
   [
     { text: "💰 Margin", callback_data: "set:margin" },
     { text: "⚡️ Leverage", callback_data: "set:leverage" },
+  ],
+  [
+    { text: "💰 Margin 🥇", callback_data: "set:metalmargin" },
+    { text: "⚡️ Leverage 🥇", callback_data: "set:metalleverage" },
   ],
   [
     { text: "🪙 Pairs", callback_data: "set:pair" },
@@ -2662,6 +2717,15 @@ export function formatActiveConfigSummary(
   const tradingPairOverridden =
     baseline != null &&
     isRuntimeSettingOverridden("tradingPair", baseline, config);
+  const metalMarginOverridden =
+    baseline != null &&
+    isRuntimeSettingOverridden("metalMarginUsd", baseline, config);
+  const metalLeverageOverridden =
+    baseline != null &&
+    isRuntimeSettingOverridden("metalLeverage", baseline, config);
+  const metalNotional = (
+    Number(config.goldSilver.marginUsd) * config.goldSilver.leverage
+  ).toFixed(2);
   const lines = [
     "⚙️ Active bot configuration",
     "",
@@ -2679,6 +2743,13 @@ export function formatActiveConfigSummary(
     "",
     formatExchangeLine("Exchange A", config.exchangeA, config),
     formatExchangeLine("Exchange B", config.exchangeB, config),
+    "",
+    "Gold/silver metal trade (Arcus GLD/SLV perps):",
+    `  Margin: $${formatUsd(config.goldSilver.marginUsd)} per leg (notional $${metalNotional} at ${config.goldSilver.leverage}x)${metalMarginOverridden ? " *" : ""}`,
+    `  Leverage: ${config.goldSilver.leverage}x${metalLeverageOverridden ? " *" : ""}`,
+    `  RSI(${config.goldSilver.rsiPeriod}) band ±${config.goldSilver.rsiConfirmBand} · ${config.goldSilver.candleTimeframe} candles`,
+    `  TP floor: breakeven + $${formatUsd(config.goldSilver.tpMinNetUsd)} net (evaluated every tick)`,
+    `  SL: -${config.goldSilver.stopLossMarginPercent}% of total margin · Time-stop: ${config.goldSilver.timeStopHours}h`,
   ];
   if (
     minSpreadOverridden ||
@@ -2686,7 +2757,9 @@ export function formatActiveConfigSummary(
     leverageOverridden ||
     cooldownOverridden ||
     autoConfirmOverridden ||
-    tradingPairOverridden
+    tradingPairOverridden ||
+    metalMarginOverridden ||
+    metalLeverageOverridden
   ) {
     lines.push("", "(* adjusted at runtime — does not persist across restarts)");
   }
