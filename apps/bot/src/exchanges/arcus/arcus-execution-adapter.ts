@@ -9,6 +9,8 @@ import type {
   ExecutionOrderRequest,
   ExchangePosition,
   MarketMetadata,
+  OrderBookDepth,
+  OrderBookLevel,
   PriceRequest,
 } from "@btc-arbitrage/exchange-core";
 import { ArcusHttpClient, ArcusHttpError } from "./arcus-http-client.js";
@@ -134,6 +136,33 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
     const bidUsd = bid ?? ask;
     const askUsd = ask ?? bid;
     return { bidUsd: bidUsd!, askUsd: askUsd!, receivedAt: new Date() };
+  }
+
+  /** Public, unauthenticated L2 snapshot
+   * (GET /v1/l2OrderBook/{market}?nLevels=1..100 — docs.arcus.xyz
+   * openapi-2026.11.03). Consumed by the metal entry order-book gate to
+   * simulate the SLV taker hedge fill before entering. FAILS CLOSED when
+   * both sides come back empty; a one-sided book is returned as-is (the
+   * caller refuses on an empty crossing side). Invalid rows are dropped,
+   * never estimated. No caching: the gate needs a live book. */
+  async getOrderBookDepth(
+    input: PriceRequest & { levels?: number },
+  ): Promise<OrderBookDepth> {
+    const levels = Math.min(100, Math.max(1, Math.trunc(input.levels ?? 100)));
+    const payload = requiredRecord(
+      await this.http.get(
+        `/v1/l2OrderBook/${encodeURIComponent(arcusMarketName(input.symbol))}`,
+        { nLevels: String(levels) },
+      ),
+      "Arcus L2 orderbook",
+    );
+    const bids = arcusOrderbookLevels(payload.bids);
+    const asks = arcusOrderbookLevels(payload.asks);
+    if (bids.length === 0 && asks.length === 0)
+      throw new Error(
+        `Arcus L2 orderbook for ${input.symbol} has neither bids nor asks`,
+      );
+    return { bids, asks, receivedAt: new Date() };
   }
 
   async getMarketMetadata(input: PriceRequest): Promise<MarketMetadata> {
@@ -942,8 +971,24 @@ class ArcusExecutionAdapter implements ArcusExecutionHandle {
     }
     if (input.type === "market") {
       // MARKET orders carry a protective slippage bound within 10% of mark
-      // (Arcus hard rule); crossingPrice clamps the BBO best + 150 bps
-      // buffer into the mark ± 9.5% band.
+      // (Arcus hard rule). An explicit input.priceUsd (e.g. the metal
+      // hedge's touch ∓ GOLDSILVER_MAX_ENTRY_SLIPPAGE_BPS bound) is
+      // honored: clamped into the mark ± 9.5% band and rounded to tick.
+      // Without it, crossingPrice clamps the BBO best + 150 bps buffer
+      // into the same band.
+      if (input.priceUsd) {
+        const markUsd = await this.getMarkPriceUsd(input.symbol);
+        return {
+          orderType: "MARKET",
+          timeInForce: "IOC",
+          priceUsd: roundDecimalToStep(
+            clampIntoPriceBand(input.priceUsd, markUsd, MARKET_BOUND_BAND_BPS),
+            tickSize,
+            side === "buy" ? "up" : "down",
+          ),
+          reduceOnly,
+        };
+      }
       const bound = await this.crossingPrice(input.symbol, side, tickSize);
       return {
         orderType: "MARKET",
@@ -1192,6 +1237,40 @@ function arcusBboPrice(level: unknown): string | undefined {
   const price = level.price;
   if (typeof price !== "string" && typeof price !== "number") return undefined;
   return String(price);
+}
+
+/** Validate raw L2 rows into OrderBookLevel entries. Rows that are not
+ * two-element arrays (or {price, size} records) or carry
+ * non-positive/non-decimal values are dropped — never estimated. Same
+ * discipline as the market-data client's depth read. */
+function arcusOrderbookLevels(value: unknown): OrderBookLevel[] {
+  if (!Array.isArray(value)) return [];
+  const levels: OrderBookLevel[] = [];
+  for (const entry of value) {
+    let price: unknown;
+    let size: unknown;
+    if (Array.isArray(entry)) {
+      [price, size] = entry;
+    } else if (isRecord(entry)) {
+      price = entry.price;
+      size = entry.size;
+    } else {
+      continue;
+    }
+    if (
+      (typeof price !== "string" && typeof price !== "number") ||
+      (typeof size !== "string" && typeof size !== "number")
+    ) {
+      continue;
+    }
+    const priceUsd = String(price);
+    const sizeBase = String(size);
+    if (!/^\d+(\.\d+)?$/.test(priceUsd) || !/^\d+(\.\d+)?$/.test(sizeBase))
+      continue;
+    if (Number(priceUsd) <= 0 || Number(sizeBase) <= 0) continue;
+    levels.push({ priceUsd, sizeBase });
+  }
+  return levels;
 }
 
 /** "BUY"/"SELL" (any case) to the AccountFill side; anything else is

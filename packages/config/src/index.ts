@@ -222,6 +222,21 @@ export interface BotConfig {
      * closes at market IF net PnL >= breakeven; a losing trade keeps
      * running until the TP floor or the SL. */
     timeStopHours: number;
+    /** GOLDSILVER_MAX_ENTRY_SLIPPAGE_BPS: hard ceiling on the TOTAL
+     * estimated entry drag of a metal trade, in basis points of leg
+     * notional: SLV book-walk slippage (simulated taker fill over the L2
+     * order book) + SLV taker fee + GLD maker fee. createMetalTrade
+     * REFUSES to enter above the ceiling (metal-entry-orderbook-gate).
+     * The same value bounds the SLV hedge market order (touch ∓ this
+     * many bps, rounded to tick). Clamped 1..950 (Arcus hard-rejects
+     * market bounds outside ±10% of mark). */
+    maxEntrySlippageBps: number;
+    /** GOLDSILVER_HEDGE_RETRY_ATTEMPTS: bounded re-bound retries of the
+     * SLV market hedge IOC when it comes back zero-filled (the explicit
+     * price bound rejected liquidity instead of accepting ~150 bps of
+     * adverse fill). Exhausted retries abort the entry; the rollback
+     * market-closes the covered gold. Clamped 1..10. */
+    hedgeRetryAttempts: number;
   };
   /** /arb screener trades (ORBIT arbitrage rows, telegram-command-poller
    * arbopen/arbconfirm flow). Sizing is deliberately decoupled from the
@@ -538,6 +553,21 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     env.GOLDSILVER_TIME_STOP_HOURS ?? "48",
     "GOLDSILVER_TIME_STOP_HOURS",
   );
+  // metal-entry-orderbook-gate: entry cost ceiling and hedge retry budget.
+  // 950 bps leaves headroom under the Arcus hard 10%-of-mark market-bound
+  // rule (the bound doubles as the hedge order's price cap).
+  const goldSilverMaxEntrySlippageBps = parseClampedInteger(
+    env.GOLDSILVER_MAX_ENTRY_SLIPPAGE_BPS ?? "40",
+    "GOLDSILVER_MAX_ENTRY_SLIPPAGE_BPS",
+    1,
+    950,
+  );
+  const goldSilverHedgeRetryAttempts = parseClampedInteger(
+    env.GOLDSILVER_HEDGE_RETRY_ATTEMPTS ?? "3",
+    "GOLDSILVER_HEDGE_RETRY_ATTEMPTS",
+    1,
+    10,
+  );
 
   // /arb screener trades (ORBIT arbitrage rows): separate sizing from the
   // BTC openTrade section so /config runtime adjustments never resize
@@ -775,6 +805,8 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       exitMaxWaitMs: goldSilverExitMaxWaitMs,
       exitMaxReprices: goldSilverExitMaxReprices,
       timeStopHours: goldSilverTimeStopHours,
+      maxEntrySlippageBps: goldSilverMaxEntrySlippageBps,
+      hedgeRetryAttempts: goldSilverHedgeRetryAttempts,
     },
     arbTrade: {
       marginUsd: arbTradeMarginUsd,

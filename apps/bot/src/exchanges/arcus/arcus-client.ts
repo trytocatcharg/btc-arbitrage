@@ -3,7 +3,7 @@ import type { ExchangeAdapter, ExchangeMarket, MarketStats, PriceRequest } from 
 import { normalizeSymbol } from '@btc-arbitrage/exchange-core';
 import { extractVolume24hUsd, findMarket, getMarketId } from '../market-normalization.js';
 import { ArcusHttpClient } from './arcus-http-client.js';
-import type { ArcusBboResponse, ArcusCandle, ArcusCandlesResponse, ArcusConfig, ArcusMarketInfo, ArcusPriceEntry, ArcusPricesResponse } from './arcus.types.js';
+import type { ArcusBboResponse, ArcusCandle, ArcusCandlesResponse, ArcusConfig, ArcusMarketInfo, ArcusOrderbookSnapshot, ArcusPriceEntry, ArcusPricesResponse, OrderbookLevel } from './arcus.types.js';
 import { createArcusExecutionAdapter } from './arcus-execution-adapter.js';
 
 const DEFAULT_ARCUS_MARKET = 'BTC-USD';
@@ -96,6 +96,17 @@ export interface ArcusMarketDataClient {
   /** Raw candles NEWEST-first, exactly as the API returns them; callers
    * sort/filter. Empty/invalid payloads resolve to an empty array. */
   getCandles(input: ArcusCandlesRequest): Promise<ArcusCandle[]>;
+  /** L2 order book depth (`GET /v1/l2OrderBook/{market}?nLevels=1..100`,
+   * public). Levels are validated [price, size] decimal tuples; invalid
+   * rows are dropped, never estimated. FAILS CLOSED when both sides come
+   * back empty — a caller simulating a book walk cannot proceed without
+   * liquidity data (a one-sided book is returned as-is; the caller
+   * handles an empty crossing side). */
+  getOrderBookDepth(market: string, nLevels: number): Promise<{
+    bids: OrderbookLevel[];
+    asks: OrderbookLevel[];
+    receivedAt: Date;
+  }>;
 }
 
 export function createArcusMarketDataClient(config: ArcusConfig): ArcusMarketDataClient {
@@ -124,8 +135,57 @@ export function createArcusMarketDataClient(config: ArcusConfig): ArcusMarketDat
         to: String(Math.trunc(input.toUs))
       });
       return extractArcusCandles(payload);
+    },
+    async getOrderBookDepth(market, nLevels) {
+      const levels = Math.min(100, Math.max(1, Math.trunc(nLevels)));
+      const payload = await http.get(
+        `/v1/l2OrderBook/${encodeURIComponent(market)}`,
+        { nLevels: String(levels) }
+      );
+      const snapshot =
+        payload && typeof payload === 'object' && !Array.isArray(payload)
+          ? (payload as ArcusOrderbookSnapshot)
+          : {};
+      const bids = extractOrderbookLevels(snapshot.bids);
+      const asks = extractOrderbookLevels(snapshot.asks);
+      if (bids.length === 0 && asks.length === 0) {
+        throw new Error(`Arcus L2 orderbook for ${market} has neither bids nor asks`);
+      }
+      return { bids, asks, receivedAt: new Date() };
     }
   };
+}
+
+/** Validate raw L2 rows into [price, size] decimal tuples. Rows that are
+ * not two-element arrays (or {price, size} records) or carry
+ * non-positive/non-decimal values are dropped — never estimated. */
+function extractOrderbookLevels(value: unknown): OrderbookLevel[] {
+  if (!Array.isArray(value)) return [];
+  const levels: OrderbookLevel[] = [];
+  for (const entry of value) {
+    let price: unknown;
+    let size: unknown;
+    if (Array.isArray(entry)) {
+      [price, size] = entry;
+    } else if (entry && typeof entry === 'object') {
+      price = (entry as { price?: unknown }).price;
+      size = (entry as { size?: unknown }).size;
+    } else {
+      continue;
+    }
+    if (
+      (typeof price !== 'string' && typeof price !== 'number') ||
+      (typeof size !== 'string' && typeof size !== 'number')
+    ) {
+      continue;
+    }
+    const priceUsd = String(price);
+    const sizeBase = String(size);
+    if (!/^\d+(\.\d+)?$/.test(priceUsd) || !/^\d+(\.\d+)?$/.test(sizeBase)) continue;
+    if (Number(priceUsd) <= 0 || Number(sizeBase) <= 0) continue;
+    levels.push([priceUsd, sizeBase]);
+  }
+  return levels;
 }
 
 function extractArcusCandles(payload: unknown): ArcusCandle[] {

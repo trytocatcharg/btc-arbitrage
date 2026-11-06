@@ -46,6 +46,20 @@ export interface BestBidOffer {
   askUsd: string;
   receivedAt: Date;
 }
+/** One price level of an L2 order book snapshot (decimal strings, exact
+ * exchange precision — never rounded client-side). */
+export interface OrderBookLevel {
+  priceUsd: string;
+  sizeBase: string;
+}
+/** Top-of-book-plus-depth snapshot for cost simulation (e.g. the metal
+ * entry order-book gate walks the crossing side of the SLV book to
+ * estimate hedge slippage before entering). */
+export interface OrderBookDepth {
+  bids: OrderBookLevel[];
+  asks: OrderBookLevel[];
+  receivedAt: Date;
+}
 export interface MarketMetadata {
   minQuantityBase: string;
   quantityStepBase: string;
@@ -102,6 +116,16 @@ export interface AccountFill {
 }
 export interface ExecutionAdapter {
   getBestBidOffer(input: PriceRequest): Promise<BestBidOffer>;
+  /** L2 order book depth for pre-trade cost estimation. Optional: only
+   * exchanges with a verified public depth endpoint implement it (Arcus:
+   * `GET /v1/l2OrderBook/{market}?nLevels=1..100`). `levels` defaults to
+   * the exchange maximum (100). Implementations MUST fail closed when
+   * both sides come back empty — a caller simulating a book walk cannot
+   * proceed without liquidity data. Callers that require the estimate
+   * (createMetalTrade) must refuse to trade when the method is absent. */
+  getOrderBookDepth?(
+    input: PriceRequest & { levels?: number },
+  ): Promise<OrderBookDepth>;
   getMarketMetadata(input: PriceRequest): Promise<MarketMetadata>;
   getAvailableMarginUsd(): Promise<string>;
   validateExecutionPreflight(input: {

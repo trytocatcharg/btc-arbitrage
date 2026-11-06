@@ -82,3 +82,19 @@ export interface ArcusCandle {
 export interface ArcusCandlesResponse {
   candles?: ArcusCandle[];
 }
+
+/** One L2 order book level: [price, size] as decimal strings (docs.arcus.xyz
+ * openapi-2026.11.03, `GET /v1/l2OrderBook/{market}`). */
+export type OrderbookLevel = [price: string, size: string];
+
+/** Raw snapshot of `GET /v1/l2OrderBook/{market}?nLevels=1..100` (public,
+ * no auth). Consumed by the metal entry order-book gate to simulate the
+ * SLV taker hedge fill before entering. */
+export interface ArcusOrderbookSnapshot {
+  bids?: OrderbookLevel[];
+  asks?: OrderbookLevel[];
+  lastSequenceId?: number;
+  globalSequenceId?: number;
+  /** Epoch microseconds (same convention as the BBO timestamp). */
+  timestamp?: number;
+}

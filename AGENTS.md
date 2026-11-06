@@ -15,7 +15,7 @@ Current capabilities:
 - Telegram commands `/config`, `/trade`, `/volume`, `/lastsignal` and `/bot` (pause/resume/restart control panel, guarded by no active trades and no in-flight execution), plus an `Open Trade` inline button on each signal with `Confirm`/`Cancel` preview flow.
 - `/lastsignal` shows the last 10 spread ticks from `spread_snapshots` regardless of threshold, marking which crossed it and which generated a signal.
 - `/arb` scrapes the ORBIT perp screener (read-only) and lists the top cross-venue spreads, one message per row with an `Open Trade <SYM>` button. The button opens a two-step prepare+confirm flow (`arbopen:<SYM>:<LONG>:<SHORT>` → preview message with Confirm/Cancel → `arbconfirm:`/`arbcancel:`) that REUSES the full open-trade entry machine (passive post-only maker limit + immediate market hedge + per-leg TP/SL) through a second, ARB-sized `OpenTradeService` (`createArbOpenTradeService`): sizing comes from the `arbTrade` config section — `ARB_TRADE_MARGIN_USD` (20), `ARB_TRADE_LEVERAGE` (3), `ARB_TRADE_TAKE_PROFIT_PERCENT` (3), `ARB_TRADE_STOP_LOSS_PERCENT` (2.5), margin-based TP/SL like openTrade — decoupled from the BTC `openTrade` runtime settings, with `minSpreadUsd` overridden to `"0"` (the BTC threshold would abort every /arb entry; 0 still aborts on a negative directional spread). Arb previews carry `signal_id NULL` (migration 0007). Guards: metal-collision (an Arcus leg + an active gold/silver trade refuses at prepare AND at confirm), per-venue `capabilities.orderPlacement` + execution availability, per-leg `validateExecutionPreflight` at prepare (boot-time setup only covers the spread symbol), `hasBlockingExecution` serialization, and confirm only consumes a still-`awaiting_confirmation` preview. Known gap (accepted): the position reconciler is scoped to `config.btcSymbol` + exchangeA/B, so it does NOT see /arb positions — do not "fix" it without an operator decision.
-- Runtime settings adjusted at runtime via Telegram (`/config` buttons: cooldown, min spread, margin, leverage, metal margin 🥇, metal leverage 🥇, metal TP floor 🥇, auto-confirm) are persisted to `bot_runtime_overrides` (migration 0004) on apply and restored at boot.
+- Runtime settings adjusted at runtime via Telegram (`/config` buttons: cooldown, min spread, margin, leverage, metal margin 🥇, metal leverage 🥇, metal TP floor 🥇, metal max entry slippage 🥇, metal hedge retries 🥇, auto-confirm) are persisted to `bot_runtime_overrides` (migration 0004) on apply and restored at boot.
 - Open trade execution (bot-only, Telegram-confirmed): passive maker-limit entry with retry, immediate market hedge per fill increment, then automatic TP/SL reduce-only orders on both legs.
 - Trade monitoring detects leg closure via position polling and notifies `closed` or `unhedged` states, and samples the surviving leg's mark price + gross unrealized PnL during unhedged windows into `unhedged_leg_samples`.
 - Persists one `spread_snapshots` row per tick (every tick, threshold or not; failure-isolated so it never blocks signal emission) plus signals, trades, trade legs, trade previews, status history, Telegram command logs, operations, and events in MariaDB. `price_snapshots` exists in the schema but is written nowhere (retention prunes both tables daily).
@@ -159,6 +159,8 @@ Copy `.env.example` to `.env` and fill in real values. Never commit `.env` or re
 | `OPEN_TRADE_MIN_PROFIT_USD` | `0.05` | Fill-time edge band: minimum expected convergence beyond round-trip breakeven (fees + slippage) required to keep a trade; below it both legs close immediately (`edge_below_cost`) |
 | `OPEN_TRADE_MAX_LOSS_USD` | `0.25` | Runtime assertion bound on the edge-abort path: `\|realizedPnlUsd\|` above this fires an urgent fee-model-drift alert |
 | `OPEN_TRADE_SLIPPAGE_BPS` | `2` | Assumed exit slippage (basis points) for the edge band computation |
+| `GOLDSILVER_MAX_ENTRY_SLIPPAGE_BPS` | `40` | Metal entry order-book gate: hard ceiling on the total estimated entry drag (SLV book-walk slippage + SLV taker fee + GLD maker fee), in bps of leg notional; above it `createMetalTrade` refuses. Also bounds the SLV hedge market order (touch ∓ this many bps). Clamped 1..950. Runtime-adjustable via /config (📉 Max entry slippage 🥇) |
+| `GOLDSILVER_HEDGE_RETRY_ATTEMPTS` | `3` | Bounded re-bound retries of a zero-filled SLV hedge IOC before the metal entry aborts (the rollback market-closes covered gold). Clamped 1..10. Runtime-adjustable via /config (🔁 Hedge retries 🥇) |
 | `OPEN_TRADE_SPREAD_TP_USD` / `OPEN_TRADE_SPREAD_SL_USD` / `OPEN_TRADE_EDGE_MIN_PROFIT_USD` | — | **Removed** (change `adjust-tpsl-volume-farming`): defining any of them fails config load; spread-USD exits deleted |
 | `RISEX_MAKER_FEE_BPS` / `RISEX_TAKER_FEE_BPS` | `1` / `3` | Routing fee inputs |
 | `EXTENDED_MAKER_FEE_BPS` / `EXTENDED_TAKER_FEE_BPS` | `0` / `2.5` | Routing fee inputs |
@@ -316,6 +318,27 @@ Arcus-only pairs strategy on the GLD-USD / SLV-USD perp ratio (docs in `odd/task
   `arcus`) — no schema change beyond migration 0006. Exchange-resting
   disaster stops (stop-market reduce-only) rest on both legs as bot-down
   insurance.
+- **Order-book entry gate (metal-entry-orderbook-gate)**: before the
+  trade/legs insert, `createMetalTrade` reads the SLV L2 order book
+  (public `GET /v1/l2OrderBook/{market}?nLevels=100`, exposed as the
+  OPTIONAL `ExecutionAdapter.getOrderBookDepth` — missing ⇒ fail closed)
+  and simulates the taker fill of the full hedge quantity walking the
+  crossing side (silver short ⇒ bids, long ⇒ asks). The entry is REFUSED
+  (operator-readable throw, surfaced by the `metaltrade:open:` catch)
+  when book-walk slippage vs mid + `config.arcus.takerFeeBps` +
+  `config.arcus.makerFeeBps` exceeds `GOLDSILVER_MAX_ENTRY_SLIPPAGE_BPS`
+  (40, clamped 1..950); undefined fee inputs log a loud warning and count
+  as 0 bps. The depth read retries once (2 attempts) then refuses. The
+  SLV market hedge now carries an explicit `priceUsd` bound = touch ∓
+  `GOLDSILVER_MAX_ENTRY_SLIPPAGE_BPS` (sell below bid / buy above ask,
+  rounded to tick; the Arcus adapter honors `priceUsd` on market orders
+  by clamping it into the mark ±9.5% band instead of the generic
+  BBO ±150 bps crossing buffer), with bounded retries
+  (`GOLDSILVER_HEDGE_RETRY_ATTEMPTS`, 3): a zero-filled IOC re-bounds
+  from a fresh BBO and hedges only the remainder; partial fills
+  accumulate into the leg VWAP; a fill without an average price stays
+  fatal; exhausted retries abort the entry and the rollback
+  market-closes the covered gold.
 - **`/trade` command**: available ANYTIME regardless of the active spread
   pair. Telegram photo of a TradingView-style chart (ratio candles + RSI
   panel) via the Python renderer

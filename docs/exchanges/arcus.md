@@ -22,6 +22,7 @@ This spec captures the Arcus API facts this bot relies on, so trading work is re
 | Mark/oracle prices | wired | `GET /v1/prices` |
 | Last trade price | wired | `GET /v1/markets?market=BTC-USD` |
 | Best bid/ask | wired | `GET /v1/bbo/BTC-USD` |
+| L2 order book depth | wired (metal entry order-book gate) | `GET /v1/l2OrderBook/{market}?nLevels=1..100` |
 | All live prices | wired | `GET /v1/prices` |
 | Account reads (margin, positions, order status) | wired | `GET /v1/account`, `GET /v1/positions`, `GET /v1/order/{orderId}` |
 | Place/cancel order (Ed25519 signed) | wired | `POST /v1/placeOrder`, `POST /v1/cancelOrder` |
@@ -115,6 +116,7 @@ Perp fees MUST be read from the public, unauthenticated `GET /v1/feetiers` table
 | `GET /v1/markets` returns `markets[]` and can filter by market name. | Query `market=BTC-USD` for monitoring. |
 | `GET /v1/prices` is keyed by stringified numeric `marketId`. | Use for `mark` and `index` monitoring because Arcus documents it as safe to poll frequently. |
 | `GET /v1/bbo/{market}` returns nullable `bestBid` / `bestAsk`. | Preserve missing bid/ask as `undefined`; do not fail price monitoring if BBO side is null. |
+| `GET /v1/l2OrderBook/{market}?nLevels=1..100` is public (no auth) and returns `{ bids: [[price,size]], asks: [[price,size]], lastSequenceId, globalSequenceId, timestamp }` (openapi-2026.11.03). | Used by the metal entry order-book gate to simulate the SLV taker hedge fill. Invalid rows are dropped (never estimated); both sides empty fails closed — a one-sided book is returned as-is and the caller refuses on an empty crossing side. |
 | BBO timestamp is epoch microseconds. | Convert to JavaScript milliseconds before storing `exchangeTimestamp`. |
 | `markPrice` value `0` means no mark price has been received. | Refuse fallback to oracle when `PRICE_SOURCE=mark`. |
 | Order submission is asynchronous. | Future execution must observe orders/fills over WebSocket before considering an order terminal. |

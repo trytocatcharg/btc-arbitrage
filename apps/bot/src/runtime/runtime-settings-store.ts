@@ -8,8 +8,10 @@ import {
   applyCooldownMinutes,
   applyLeverage,
   applyMarginUsd,
+  applyMetalHedgeRetries,
   applyMetalLeverage,
   applyMetalMarginUsd,
+  applyMetalMaxEntrySlippageBps,
   applyMetalTpMinNetUsd,
   applyMinSpreadUsd,
   applyTradingPair,
@@ -44,6 +46,10 @@ function readSettingValue(config: BotConfig, key: RuntimeSettingKey): string {
       return String(config.goldSilver.leverage);
     case "metalTpMinNetUsd":
       return config.goldSilver.tpMinNetUsd;
+    case "metalMaxEntrySlippageBps":
+      return String(config.goldSilver.maxEntrySlippageBps);
+    case "metalHedgeRetries":
+      return String(config.goldSilver.hedgeRetryAttempts);
   }
 }
 
@@ -84,7 +90,9 @@ function parseStoredValue(
     case "leverage":
     case "metalMarginUsd":
     case "metalLeverage":
-    case "metalTpMinNetUsd": {
+    case "metalTpMinNetUsd":
+    case "metalMaxEntrySlippageBps":
+    case "metalHedgeRetries": {
       const value = Number(raw);
       return Number.isFinite(value) ? value : null;
     }
@@ -123,6 +131,8 @@ export async function applyPersistedRuntimeOverrides(
       "metalMarginUsd",
       "metalLeverage",
       "metalTpMinNetUsd",
+      "metalMaxEntrySlippageBps",
+      "metalHedgeRetries",
     ];
     if (!knownKeys.includes(key)) {
       console.warn("Skipping unknown persisted runtime override", {
@@ -179,6 +189,12 @@ export async function applyPersistedRuntimeOverrides(
           break;
         case "metalTpMinNetUsd":
           changes.push(applyMetalTpMinNetUsd(config, value as number));
+          break;
+        case "metalMaxEntrySlippageBps":
+          changes.push(applyMetalMaxEntrySlippageBps(config, value as number));
+          break;
+        case "metalHedgeRetries":
+          changes.push(applyMetalHedgeRetries(config, value as number));
           break;
       }
     } catch (error) {

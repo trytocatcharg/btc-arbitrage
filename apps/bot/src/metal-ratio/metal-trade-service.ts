@@ -16,6 +16,7 @@ import {
 import type {
   ExecutionAdapter,
   ExecutionOrder,
+  OrderBookDepth,
 } from "@btc-arbitrage/exchange-core";
 import { sleep } from "@btc-arbitrage/shared";
 import { extractAffectedRows, extractInsertId } from "../db-result.js";
@@ -154,6 +155,21 @@ function roundToTick(price: number, tick: number): number {
   return Math.round(price / tick) * tick;
 }
 
+/** Directional tick rounding for a protective hedge price bound: a SELL
+ * bound (floor below the bid) rounds DOWN, a BUY bound (cap above the
+ * ask) rounds UP — the rounding never tightens the bound against the
+ * fill (same convention as the adapter's roundDecimalToStep). */
+function roundBoundToTick(
+  price: number,
+  tick: number,
+  side: "buy" | "sell",
+): number {
+  if (!(tick > 0)) return price;
+  const ticks =
+    side === "sell" ? Math.floor(price / tick) : Math.ceil(price / tick);
+  return ticks * tick;
+}
+
 async function insertStatusHistory(
   ctx: MetalTradeContext,
   row: {
@@ -281,6 +297,114 @@ export async function createMetalTrade(
   }
 
   const { goldLeg, silverLeg } = metalLegMarkets(side);
+
+  // Pre-entry order-book cost gate (metal-entry-orderbook-gate): simulate
+  // the SLV taker hedge fill over the L2 book and REFUSE the entry when
+  // the estimated total drag (book-walk slippage + SLV taker fee + GLD
+  // maker fee) exceeds GOLDSILVER_MAX_ENTRY_SLIPPAGE_BPS. Runs AFTER qty
+  // computation and BEFORE the insert transaction — nothing is persisted
+  // on a refusal, and the metaltrade:open catch surfaces the message.
+  const getOrderBookDepth = ctx.execution.getOrderBookDepth;
+  if (typeof getOrderBookDepth !== "function") {
+    throw new Error(
+      "Metal entry refused: the execution adapter does not expose getOrderBookDepth — the entry cost cannot be estimated",
+    );
+  }
+  // Bounded retry (2 attempts) at the call site; the client/adapter
+  // already fail closed on an empty book.
+  let depth: OrderBookDepth | undefined;
+  let depthError: unknown;
+  for (let attempt = 0; attempt < 2 && depth === undefined; attempt += 1) {
+    try {
+      depth = await getOrderBookDepth.call(ctx.execution, {
+        symbol: SILVER_MARKET,
+        marketType: "perpetual",
+        priceSource: "mark",
+        levels: 100,
+      });
+    } catch (error) {
+      depthError = error;
+    }
+  }
+  if (!depth) {
+    throw new Error(
+      `Metal entry refused: SLV order-book depth read failed after 2 attempts (${
+        depthError instanceof Error ? depthError.message : String(depthError)
+      }) — the entry cost cannot be estimated`,
+    );
+  }
+  const crossingSide: "bids" | "asks" =
+    silverLeg.side === "short" ? "bids" : "asks";
+  const walkLevels = crossingSide === "bids" ? depth.bids : depth.asks;
+  if (walkLevels.length === 0) {
+    throw new Error(
+      `Metal entry refused: the SLV order book has no liquidity on the hedge side (${crossingSide}) — the entry cost cannot be estimated`,
+    );
+  }
+  // Reference mid from the same snapshot; a one-sided book falls back to
+  // the crossing touch so the slippage measure stays meaningful.
+  const reference =
+    depth.bids.length > 0 && depth.asks.length > 0
+      ? (parseDecimal(depth.bids[0].priceUsd, "slvBid") +
+          parseDecimal(depth.asks[0].priceUsd, "slvAsk")) /
+        2
+      : parseDecimal(walkLevels[0].priceUsd, "slvTouch");
+  let walkRemaining = silverQty;
+  let walkNotional = 0;
+  let walkLevelsUsed = 0;
+  for (const level of walkLevels) {
+    if (walkRemaining <= 1e-12) break;
+    const levelPrice = parseDecimal(level.priceUsd, "levelPrice");
+    const levelSize = parseDecimal(level.sizeBase, "levelSize");
+    const take = Math.min(walkRemaining, levelSize);
+    walkNotional += take * levelPrice;
+    walkRemaining -= take;
+    walkLevelsUsed += 1;
+  }
+  if (walkRemaining > 1e-9) {
+    throw new Error(
+      `Metal entry refused: the SLV order book is too thin — ${formatDecimal(walkRemaining, 8)} SLV of the ${formatDecimal(silverQty, 8)} hedge could not be simulated within ${walkLevels.length} book levels`,
+    );
+  }
+  const walkVwap = walkNotional / silverQty;
+  // Slippage vs mid, signed by side and clamped >= 0: selling into bids
+  // slips below the mid, buying into asks above it.
+  const slippageBps =
+    crossingSide === "bids"
+      ? Math.max(0, ((reference - walkVwap) / reference) * 10_000)
+      : Math.max(0, ((walkVwap - reference) / reference) * 10_000);
+  const takerFeeBps = ctx.config.arcus.takerFeeBps;
+  const makerFeeBps = ctx.config.arcus.makerFeeBps;
+  if (takerFeeBps === undefined || makerFeeBps === undefined) {
+    // Documented behavior (task 1): undefined fee inputs are treated as
+    // 0 bps — the estimate then covers book-walk slippage only.
+    console.warn(
+      "Metal entry cost gate: Arcus fee inputs are undefined (fee-tier resolution did not run — e.g. dry-run mode); treating fees as 0 bps in the estimate",
+      { makerFeeBps, takerFeeBps },
+    );
+  }
+  const entryDragBps = slippageBps + (takerFeeBps ?? 0) + (makerFeeBps ?? 0);
+  const maxEntrySlippageBps = ctx.config.goldSilver.maxEntrySlippageBps;
+  const topLevel = walkLevels[0];
+  if (entryDragBps > maxEntrySlippageBps) {
+    throw new Error(
+      `Metal entry refused by the order-book gate: estimated entry drag ${entryDragBps.toFixed(1)} bps exceeds GOLDSILVER_MAX_ENTRY_SLIPPAGE_BPS=${maxEntrySlippageBps} bps ` +
+        `(SLV book-walk slippage ${slippageBps.toFixed(1)} bps over ${walkLevelsUsed} level(s) vs mid $${formatDecimal(reference, 2)}, ` +
+        `top ${crossingSide === "bids" ? "bid" : "ask"} $${topLevel.priceUsd} x ${topLevel.sizeBase} SLV, ` +
+        `SLV taker fee ${takerFeeBps ?? 0} bps + GLD maker fee ${makerFeeBps ?? 0} bps). ` +
+        "Wait for a deeper/tighter SLV book or raise the threshold explicitly.",
+    );
+  }
+  console.log("Metal entry cost estimate", {
+    side,
+    slippageBps: Number(slippageBps.toFixed(2)),
+    takerFeeBps: takerFeeBps ?? 0,
+    makerFeeBps: makerFeeBps ?? 0,
+    entryDragBps: Number(entryDragBps.toFixed(2)),
+    maxEntrySlippageBps,
+    walkLevelsUsed,
+  });
+
   const created = await ctx.db.transaction(async (tx) => {
     const tradeResult = await tx.insert(trades).values({
       symbol: GOLD_SILVER_SYMBOL,
@@ -457,6 +581,10 @@ export async function executeMetalTradeEntry(
   const silverStep = parseDecimal(
     silverMeta.quantityStepBase || "0.01",
     "silverStep",
+  );
+  const silverTick = parseDecimal(
+    silverMeta.priceTickUsd || "0.01",
+    "silverTick",
   );
   const silverMin = parseDecimal(
     silverMeta.minQuantityBase || "0",
@@ -786,47 +914,113 @@ export async function executeMetalTradeEntry(
         `Hedge increment below SLV minimum (${silverQty} < ${silverMin})`,
       );
     }
-    const hedge = await ctx.execution.submitExecutionOrder({
-      clientOrderId: `mt${tradeId}s${Date.now().toString(36)}`,
-      symbol: SILVER_MARKET,
-      side: silverLeg.side === "short" ? "sell" : "buy",
-      type: "market",
-      quantityBase: formatDecimal(silverQty, 8),
-    });
-    // The fill price MUST be real: a single immediate read races Arcus's
-    // async fill reporting (trade #1320: averageFillPriceUsd was absent,
-    // the leg entry was recorded as $0.00, and the disaster stop computed
-    // an invalid $0 trigger — rejected by the exchange). Poll until the
-    // order reports a filled average price; abort the entry if it never
-    // does (a corrupt entry price poisons VWAP, PnL triggers, and stops).
-    const confirmed = await pollFilledOrder(ctx, hedge.id);
-    const fillPrice = parseDecimal(
-      confirmed.averageFillPriceUsd ?? "0",
-      "hedgeFill",
-    );
-    if (!(fillPrice > 0)) {
+    // Bounded hedge with retries (metal-entry-orderbook-gate): each
+    // attempt carries an explicit price bound = touch minus/plus
+    // GOLDSILVER_MAX_ENTRY_SLIPPAGE_BPS (sell below the bid / buy above
+    // the ask, rounded to tick), so a thin or dislocated book yields a
+    // ZERO-filled IOC and a re-bound retry instead of silently accepting
+    // up to ~150 bps of adverse fill (the old generic crossing buffer).
+    // Every retry re-reads the BBO and hedges only the remainder;
+    // partial fills accumulate into the silver VWAP. Exhausted retries
+    // throw — abortEntry market-closes the covered gold.
+    const hedgeSide = silverLeg.side === "short" ? "sell" : "buy";
+    const maxAttempts = ctx.config.goldSilver.hedgeRetryAttempts;
+    const boundFraction = ctx.config.goldSilver.maxEntrySlippageBps / 10_000;
+    const qtyBefore = progress.silverFilledQty;
+    const notionalBefore = qtyBefore * progress.silverVwap;
+    let feeThisIncrement = 0;
+    let remainingQty = silverQty;
+    let lastTerminal: ExecutionOrder | undefined;
+    let attempt = 0;
+    while (remainingQty >= Math.max(silverMin, 1e-9) && attempt < maxAttempts) {
+      attempt += 1;
+      const attemptBbo = await ctx.execution.getBestBidOffer({
+        symbol: SILVER_MARKET,
+        marketType: "perpetual",
+        priceSource: "mark",
+      });
+      const touch = parseDecimal(
+        hedgeSide === "sell" ? attemptBbo.bidUsd : attemptBbo.askUsd,
+        "silverTouch",
+      );
+      if (!(touch > 0)) {
+        throw new Error(
+          `SLV BBO has no usable ${hedgeSide === "sell" ? "bid" : "ask"} for the hedge bound`,
+        );
+      }
+      const bound = roundBoundToTick(
+        hedgeSide === "sell"
+          ? touch * (1 - boundFraction)
+          : touch * (1 + boundFraction),
+        silverTick,
+        hedgeSide,
+      );
+      const hedge = await ctx.execution.submitExecutionOrder({
+        clientOrderId: `mt${tradeId}s${attempt}${Date.now().toString(36)}`,
+        symbol: SILVER_MARKET,
+        side: hedgeSide,
+        type: "market",
+        quantityBase: formatDecimal(remainingQty, 8),
+        priceUsd: formatDecimal(bound, 4),
+      });
+      const terminal = await pollHedgeOrder(ctx, hedge.id);
+      lastTerminal = terminal;
+      const filledQty = parseDecimal(
+        terminal.filledQuantityBase ?? "0",
+        "hedgeFilled",
+      );
+      if (filledQty > 1e-9) {
+        // The fill price MUST be real (trade #1320: a missing average
+        // price recorded the leg at $0.00 and produced an invalid $0
+        // disaster-stop trigger). Fatal even on a PARTIAL fill — a
+        // corrupt price poisons the VWAP, PnL triggers, and stops.
+        const fillPrice = parseDecimal(
+          terminal.averageFillPriceUsd ?? "0",
+          "hedgeFill",
+        );
+        if (!(fillPrice > 0)) {
+          throw new Error(
+            `Hedge order ${hedge.id} filled ${formatDecimal(filledQty, 8)} SLV without an average price`,
+          );
+        }
+        const fee = terminal.feeUsd ? parseDecimal(terminal.feeUsd, "fee") : 0;
+        feeThisIncrement += fee;
+        progress.entryFeeUsd += fee;
+        const prevFee = silverLegRow.entryFeeUsd
+          ? parseDecimal(String(silverLegRow.entryFeeUsd), "fee0")
+          : 0;
+        silverLegRow.entryFeeUsd = formatDecimal(prevFee + fee, 8);
+        // Volume-weighted average silver entry price over ALL attempts.
+        const prevQty = progress.silverFilledQty;
+        progress.silverVwap =
+          prevQty > 0
+            ? (prevQty * progress.silverVwap + filledQty * fillPrice) /
+              (prevQty + filledQty)
+            : fillPrice;
+        progress.silverFilledQty += filledQty;
+        remainingQty -= filledQty;
+      }
+      if (terminal.status === "filled") break;
+      // cancelled/rejected: a zero-filled (or partially filled) IOC is
+      // retryable — the next attempt re-bounds from a fresh BBO and
+      // hedges only the remainder.
+    }
+    if (remainingQty >= Math.max(silverMin, 1e-9)) {
       throw new Error(
-        `Hedge order ${hedge.id} filled without an average price`,
+        `SLV hedge left ${formatDecimal(remainingQty, 8)} SLV unhedged after ${maxAttempts} bounded attempt(s) ` +
+          `(last order ${lastTerminal?.id ?? "n/a"} ended ${lastTerminal?.status ?? "n/a"}) — aborting the entry; the rollback market-closes the covered gold`,
       );
     }
-    const fee = confirmed.feeUsd ? parseDecimal(confirmed.feeUsd, "fee") : 0;
-    const prevFee = silverLegRow.entryFeeUsd
-      ? parseDecimal(String(silverLegRow.entryFeeUsd), "fee0")
-      : 0;
-    silverLegRow.entryFeeUsd = formatDecimal(prevFee + fee, 8);
-    // Volume-weighted average silver entry price.
-    const prevQty = progress.silverFilledQty;
-    progress.silverVwap =
-      prevQty + silverQty > 0
-        ? (prevQty * progress.silverVwap + silverQty * fillPrice) /
-          (prevQty + silverQty)
-        : fillPrice;
-    progress.silverFilledQty += silverQty;
+    const hedgedQty = progress.silverFilledQty - qtyBefore;
+    const hedgedVwap =
+      hedgedQty > 0
+        ? (progress.silverVwap * progress.silverFilledQty - notionalBefore) /
+          hedgedQty
+        : 0;
     progress.goldFilledQty += incrementGoldQty;
-    progress.entryFeeUsd += fee;
     await ctx
       .notify(
-        `⚖️ Trade #${tradeId} hedge: +${formatDecimal(incrementGoldQty, 6)} GLD @ $${formatDecimal(goldPriceUsd, 2)} → ${silverLeg.side === "short" ? "sold" : "bought"} ${formatDecimal(silverQty, 4)} SLV @ $${formatDecimal(fillPrice, 2)} (fee $${formatDecimal(fee, 4)}). ` +
+        `⚖️ Trade #${tradeId} hedge: +${formatDecimal(incrementGoldQty, 6)} GLD @ $${formatDecimal(goldPriceUsd, 2)} → ${silverLeg.side === "short" ? "sold" : "bought"} ${formatDecimal(hedgedQty, 4)} SLV @ $${formatDecimal(hedgedVwap, 2)} (fee $${formatDecimal(feeThisIncrement, 4)})${attempt > 1 ? ` after ${attempt} attempts` : ""}. ` +
           `Gold leg ${formatDecimal(progress.goldFilledQty, 6)}/${formatDecimal(progress.targetQty, 6)} filled.`,
       )
       .catch(() => undefined);
@@ -1437,11 +1631,14 @@ function slippageConsumedBps(
   return Math.max(0, (worse / baselinePrice) * 10_000);
 }
 
-/** Poll an order until it reports FILLED with an average fill price.
- * Arcus fills report asynchronously; a single read can precede the fill
- * data. Bounded: ~15 s, then throws (the caller aborts the entry with
- * verified closes rather than recording a corrupt price). */
-async function pollFilledOrder(
+/** Poll a hedge market-IOC until it reaches a TERMINAL state
+ * (filled/cancelled/rejected) and RETURN the terminal record. Unlike the
+ * old pollFilledOrder, a cancelled or rejected order is NOT fatal here:
+ * a zero-filled IOC (the explicit touch -/+ maxEntrySlippageBps bound
+ * rejected liquidity on a thin book) is retryable by hedgeIncrement's
+ * bounded re-bound loop. Only a poll timeout throws. Arcus fills report
+ * asynchronously; ~15 s bound, 500 ms cadence. */
+async function pollHedgeOrder(
   ctx: MetalTradeContext,
   orderId: string,
 ): Promise<ExecutionOrder> {
@@ -1449,17 +1646,12 @@ async function pollFilledOrder(
     const order = await ctx.execution
       .getExecutionOrder(orderId)
       .catch(() => null);
-    if (order) {
-      if (order.status === "filled" && order.averageFillPriceUsd) {
-        return order;
-      }
-      if (order.status === "cancelled" || order.status === "rejected") {
-        throw new Error(`Hedge order ${orderId} ended ${order.status}`);
-      }
+    if (order && ["filled", "cancelled", "rejected"].includes(order.status)) {
+      return order;
     }
     await sleep(500);
   }
-  throw new Error(`Hedge order ${orderId} did not report a fill in time`);
+  throw new Error(`Hedge order ${orderId} did not reach a terminal state in time`);
 }
 
 async function marketRemainder(

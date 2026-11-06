@@ -53,6 +53,8 @@ import {
   applyMarginUsd,
   applyMetalLeverage,
   applyMetalMarginUsd,
+  applyMetalHedgeRetries,
+  applyMetalMaxEntrySlippageBps,
   applyMetalTpMinNetUsd,
   applyMinSpreadUsd,
   applyTradingPair,
@@ -182,6 +184,8 @@ export class TelegramCommandPoller {
     | "metalMargin"
     | "metalLeverage"
     | "metalTpFloor"
+    | "metalMaxSlippage"
+    | "metalHedgeRetries"
     | null = null;
 
   constructor(
@@ -517,6 +521,12 @@ export class TelegramCommandPoller {
           case "metalTpFloor":
             change = applyMetalTpMinNetUsd(this.config, value);
             break;
+          case "metalMaxSlippage":
+            change = applyMetalMaxEntrySlippageBps(this.config, value);
+            break;
+          case "metalHedgeRetries":
+            change = applyMetalHedgeRetries(this.config, value);
+            break;
         }
       } catch (validationError) {
         // Invalid value: keep the prompt open so the operator can retry.
@@ -752,6 +762,48 @@ export class TelegramCommandPoller {
             SETTING_CANCEL_MARKUP,
           ).catch((error: unknown) => {
             console.warn("Telegram metal-tp-floor-prompt edit failed", {
+              messageId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
+      } else if (data === "set:metalmaxslip") {
+        this.pendingSettingPrompt = "metalMaxSlippage";
+        const messageId = callback.message?.message_id;
+        if (typeof messageId === "number") {
+          await this.editMessageText(
+            messageId,
+            "📉 Max entry slippage (basis points; 100 bps = 1%).\n" +
+              "Before opening a metal trade the bot simulates the SLV market " +
+              "hedge against the LIVE order book; if the estimated entry cost " +
+              "(spread walk + SLV taker fee + GLD maker fee) exceeds this " +
+              "many bps, the entry is REFUSED. The same value caps the hedge " +
+              "order price (touch ∓ this many bps).\n" +
+              "Lower = stricter: fewer entries, but you never start in the " +
+              "red. Sane range 20–60 (default 40). Reply with a number (e.g. " +
+              "40), or tap /config to cancel.",
+            SETTING_CANCEL_MARKUP,
+          ).catch((error: unknown) => {
+            console.warn("Telegram metal-max-slippage-prompt edit failed", {
+              messageId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
+      } else if (data === "set:metalhedgeretries") {
+        this.pendingSettingPrompt = "metalHedgeRetries";
+        const messageId = callback.message?.message_id;
+        if (typeof messageId === "number") {
+          await this.editMessageText(
+            messageId,
+            "🔁 Hedge retries (1–10, default 3).\n" +
+              "How many times the bot re-tries the SLV hedge (fresh price " +
+              "bound each attempt) when the bounded market order comes back " +
+              "unfilled before aborting the entry. Reply with a number, or " +
+              "tap /config to cancel.",
+            SETTING_CANCEL_MARKUP,
+          ).catch((error: unknown) => {
+            console.warn("Telegram metal-hedge-retries-prompt edit failed", {
               messageId,
               message: error instanceof Error ? error.message : String(error),
             });
@@ -1408,50 +1460,8 @@ export class TelegramCommandPoller {
         });
       } else if (data === "trade:active" || data === "trade:last10") {
         if (data === "trade:active") {
-          const [summary, closable] = await Promise.all([
-            buildTradeSummaryMessage({
-              db: this.db,
-              registry: this.registry,
-              config: this.config,
-            }),
-            loadClosableTrades(this.db),
-          ]);
-          // Manual escape hatch (gold-silver-decouple): one "Close @
-          // market" button per open/unhedged trade, with a two-step
-          // confirm (tradeclose:ask → tradeclose:confirm/cancel). Metal
-          // trades get a second button on the same row: arm a MARKET
-          // close once net PnL (both legs) covers the TP floor, or
-          // disarm when already armed.
-          await this.sendMessage(
-            summary,
-            closable.length > 0
-              ? {
-                  inline_keyboard: closable.map((trade) => {
-                    const row = [
-                      {
-                        text: `🔒 Close #${trade.id} (${trade.symbol}) @ market`,
-                        callback_data: `tradeclose:ask:${trade.id}`,
-                      },
-                    ];
-                    if (trade.symbol === GOLD_SILVER_SYMBOL) {
-                      const armedAt = readArmedCloseAtNetUsd(trade.raw);
-                      row.push(
-                        armedAt !== null
-                          ? {
-                              text: `🎯 Closing at +$${armedAt.toFixed(2)} profit — tap to cancel`,
-                              callback_data: `tradeclose:disarm:${trade.id}`,
-                            }
-                          : {
-                              text: `🎯 Close when profit +$${formatUsd(this.config.goldSilver.tpMinNetUsd)}`,
-                              callback_data: `tradeclose:armask:${trade.id}`,
-                            },
-                      );
-                    }
-                    return row;
-                  }),
-                }
-              : undefined,
-          );
+          const panel = await this.buildActiveTradePanel();
+          await this.sendMessage(panel.text, panel.keyboard);
         } else {
           await this.sendMessage(
             await buildLastTradesMessage(
@@ -1462,6 +1472,32 @@ export class TelegramCommandPoller {
             ),
           );
         }
+      } else if (data === "trade:active:refresh") {
+        // 🔄 Refresh: re-render the active-trade panel in place. The
+        // summary is rebuilt from the DB, so a trade that closed (or a
+        // newly armed/disarmed market close) since the message was sent
+        // shows up on tap — no chat spam.
+        const panel = await this.buildActiveTradePanel();
+        const messageId = callback.message?.message_id;
+        const redeliver = async () => {
+          await this.sendMessage(panel.text, panel.keyboard);
+        };
+        if (typeof messageId !== "number") {
+          await redeliver();
+          return;
+        }
+        await this.editMessageText(messageId, panel.text, panel.keyboard)
+          .catch((error: unknown) => {
+            // An unchanged panel cannot be edited (Telegram 400s when the
+            // text is identical) and very old messages can't be edited at
+            // all — a fresh summary still delivers the refreshed state.
+            console.warn("Telegram trade-active refresh edit failed", {
+              messageId,
+              message:
+                error instanceof Error ? error.message : String(error),
+            });
+            return redeliver();
+          });
       } else if (data.startsWith("tradeclose:")) {
         // Manual market-close flow (gold-silver-decouple): two-step,
         // operator-confirmed escape hatch for open/unhedged trades (BTC
@@ -2315,6 +2351,54 @@ export class TelegramCommandPoller {
     });
   }
 
+  /** Active-trade panel (the trade:active command and the 🔄 Refresh
+   * re-render): summary text plus the action keyboard, one button per
+   * row, 🔄 Refresh always last. Manual escape hatch
+   * (gold-silver-decouple): one "Close @ market" button per open/unhedged
+   * trade, with a two-step confirm (tradeclose:ask →
+   * tradeclose:confirm/cancel). Metal trades additionally get the
+   * operator-armed market-close row (arm once net PnL covers the TP
+   * floor, disarm when already armed). */
+  private async buildActiveTradePanel(): Promise<{
+    text: string;
+    keyboard?: unknown;
+  }> {
+    const [summary, closable] = await Promise.all([
+      buildTradeSummaryMessage({
+        db: this.db,
+        registry: this.registry,
+        config: this.config,
+      }),
+      loadClosableTrades(this.db),
+    ]);
+    if (closable.length === 0) return { text: summary };
+    const rows: unknown[][] = [];
+    for (const trade of closable) {
+      rows.push([
+        {
+          text: `🔒 Close #${trade.id} (${trade.symbol}) @ market`,
+          callback_data: `tradeclose:ask:${trade.id}`,
+        },
+      ]);
+      if (trade.symbol === GOLD_SILVER_SYMBOL) {
+        const armedAt = readArmedCloseAtNetUsd(trade.raw);
+        rows.push([
+          armedAt !== null
+            ? {
+                text: `🎯 Closing at +$${armedAt.toFixed(2)} profit — tap to cancel`,
+                callback_data: `tradeclose:disarm:${trade.id}`,
+              }
+            : {
+                text: `🎯 Close when profit +$${formatUsd(this.config.goldSilver.tpMinNetUsd)}`,
+                callback_data: `tradeclose:armask:${trade.id}`,
+              },
+        ]);
+      }
+    }
+    rows.push([{ text: "🔄 Refresh", callback_data: "trade:active:refresh" }]);
+    return { text: summary, keyboard: { inline_keyboard: rows } };
+  }
+
   private async deleteMessage(messageId: number): Promise<void> {
     const response = await this.fetchWithTimeout(
       `https://api.telegram.org/bot${this.config.telegram.botToken}/deleteMessage`,
@@ -2587,6 +2671,10 @@ const RUNTIME_SETTING_BUTTONS = [
   ],
   [{ text: "🎯 TP floor 🥇", callback_data: "set:metaltpfloor" }],
   [
+    { text: "📉 Max entry slippage 🥇", callback_data: "set:metalmaxslip" },
+    { text: "🔁 Hedge retries 🥇", callback_data: "set:metalhedgeretries" },
+  ],
+  [
     { text: "🪙 Pairs", callback_data: "set:pair" },
     { text: "🤖 Auto trade", callback_data: "set:autoconfirm" },
   ],
@@ -2832,6 +2920,12 @@ export function formatActiveConfigSummary(
   const metalTpFloorOverridden =
     baseline != null &&
     isRuntimeSettingOverridden("metalTpMinNetUsd", baseline, config);
+  const metalMaxSlippageOverridden =
+    baseline != null &&
+    isRuntimeSettingOverridden("metalMaxEntrySlippageBps", baseline, config);
+  const metalHedgeRetriesOverridden =
+    baseline != null &&
+    isRuntimeSettingOverridden("metalHedgeRetries", baseline, config);
   const metalNotional = (
     Number(config.goldSilver.marginUsd) * config.goldSilver.leverage
   ).toFixed(2);
@@ -2858,6 +2952,8 @@ export function formatActiveConfigSummary(
     `  Leverage: ${config.goldSilver.leverage}x${metalLeverageOverridden ? " *" : ""}`,
     `  RSI(${config.goldSilver.rsiPeriod}) band ±${config.goldSilver.rsiConfirmBand} · ${config.goldSilver.candleTimeframe} candles`,
     `  TP floor: breakeven + $${formatUsd(config.goldSilver.tpMinNetUsd)} net (evaluated every tick)${metalTpFloorOverridden ? " *" : ""}`,
+    `  Max entry slippage: ${config.goldSilver.maxEntrySlippageBps} bps (order-book gate)${metalMaxSlippageOverridden ? " *" : ""}`,
+    `  Hedge retries: ${config.goldSilver.hedgeRetryAttempts}${metalHedgeRetriesOverridden ? " *" : ""}`,
     `  SL: -${config.goldSilver.stopLossMarginPercent}% of total margin · Time-stop: ${config.goldSilver.timeStopHours}h`,
   ];
   if (
@@ -2869,7 +2965,9 @@ export function formatActiveConfigSummary(
     tradingPairOverridden ||
     metalMarginOverridden ||
     metalLeverageOverridden ||
-    metalTpFloorOverridden
+    metalTpFloorOverridden ||
+    metalMaxSlippageOverridden ||
+    metalHedgeRetriesOverridden
   ) {
     lines.push("", "(* adjusted at runtime — does not persist across restarts)");
   }

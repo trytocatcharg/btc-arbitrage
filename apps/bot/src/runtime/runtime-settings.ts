@@ -19,7 +19,9 @@ export type RuntimeSettingKey =
   | "tradingPair"
   | "metalMarginUsd"
   | "metalLeverage"
-  | "metalTpMinNetUsd";
+  | "metalTpMinNetUsd"
+  | "metalMaxEntrySlippageBps"
+  | "metalHedgeRetries";
 
 export interface RuntimeSettingChange {
   key: RuntimeSettingKey;
@@ -37,6 +39,8 @@ export interface RuntimeSettingsBaseline {
   metalMarginUsd: string;
   metalLeverage: number;
   metalTpMinNetUsd: string;
+  metalMaxEntrySlippageBps: number;
+  metalHedgeRetries: number;
 }
 
 const MAX_COOLDOWN_MINUTES = 10_080; // 7 days
@@ -56,6 +60,8 @@ export function snapshotRuntimeSettings(
     metalMarginUsd: config.goldSilver.marginUsd,
     metalLeverage: config.goldSilver.leverage,
     metalTpMinNetUsd: config.goldSilver.tpMinNetUsd,
+    metalMaxEntrySlippageBps: config.goldSilver.maxEntrySlippageBps,
+    metalHedgeRetries: config.goldSilver.hedgeRetryAttempts,
   };
 }
 
@@ -199,6 +205,56 @@ export function applyMetalTpMinNetUsd(
   };
 }
 
+/** Max entry slippage ceiling, same as the env parse: the value must stay
+ * under the Arcus 10%-of-mark hard bound that rejects out-of-band market
+ * bounds. */
+const MAX_METAL_ENTRY_SLIPPAGE_BPS = 950;
+const MAX_METAL_HEDGE_RETRIES = 10;
+
+export function applyMetalMaxEntrySlippageBps(
+  config: BotConfig,
+  bps: number,
+): RuntimeSettingChange {
+  if (
+    !Number.isInteger(bps) ||
+    bps < 1 ||
+    bps > MAX_METAL_ENTRY_SLIPPAGE_BPS
+  ) {
+    throw new Error(
+      `Metal max entry slippage must be an integer between 1 and ${MAX_METAL_ENTRY_SLIPPAGE_BPS} bps.`,
+    );
+  }
+  config.goldSilver.maxEntrySlippageBps = bps;
+  // Consumed by BOTH metal-entry-orderbook-gate consumers: the
+  // createMetalTrade order-book gate (book-walk slippage + SLV taker fee +
+  // GLD maker fee ceiling that refuses the entry) and the hedge order price
+  // bound (touch ∓ this many bps) in hedgeIncrement.
+  return {
+    key: "metalMaxEntrySlippageBps",
+    summary: `Metal max entry slippage: ${bps} bps (order-book gate + hedge bound)`,
+  };
+}
+
+export function applyMetalHedgeRetries(
+  config: BotConfig,
+  attempts: number,
+): RuntimeSettingChange {
+  if (
+    !Number.isInteger(attempts) ||
+    attempts < 1 ||
+    attempts > MAX_METAL_HEDGE_RETRIES
+  ) {
+    throw new Error(
+      `Metal hedge retries must be an integer between 1 and ${MAX_METAL_HEDGE_RETRIES}.`,
+    );
+  }
+  config.goldSilver.hedgeRetryAttempts = attempts;
+  return {
+    key: "metalHedgeRetries",
+    summary: `Metal hedge retries: ${attempts} attempts`,
+  };
+}
+
 export function applyAutoConfirm(
   config: BotConfig,
   enabled: boolean,
@@ -270,5 +326,12 @@ export function isRuntimeSettingOverridden(
       return config.goldSilver.leverage !== baseline.metalLeverage;
     case "metalTpMinNetUsd":
       return config.goldSilver.tpMinNetUsd !== baseline.metalTpMinNetUsd;
+    case "metalMaxEntrySlippageBps":
+      return (
+        config.goldSilver.maxEntrySlippageBps !==
+        baseline.metalMaxEntrySlippageBps
+      );
+    case "metalHedgeRetries":
+      return config.goldSilver.hedgeRetryAttempts !== baseline.metalHedgeRetries;
   }
 }
