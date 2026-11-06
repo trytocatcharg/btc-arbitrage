@@ -167,6 +167,7 @@ Copy `.env.example` to `.env` and fill in real values. Never commit `.env` or re
 | `QFEX_MAKER_FEE_BPS` / `QFEX_TAKER_FEE_BPS` | `1` / `3` | QFEX routing fee inputs (placeholder defaults pending live verification) |
 | `TELEGRAM_ENABLED` / `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | `false` / — / — | Bot enablement; token+chat required when enabled |
 | `TELEGRAM_ALERT_COOLDOWN_MS` | `3600000` | Signal alert cooldown (1 h) |
+| `TELEGRAM_POLL_INTERVAL_MS` | `1000` | Telegram command poller cadence (operator commands/callbacks), decoupled from the price tick; not gated on pause flags |
 | `DATABASE_HOST_NAME` / `DATABASE_USER_NAME` / `DB_PORT` / `DATABASE_USER_PASSWORD` / `DATABASE_DB_NAME` | `127.0.0.1` / `user` / `3306` / `password` / `btc_arbitrage` | MariaDB connection |
 | `BACKEND_HOST` / `BACKEND_PORT` | `127.0.0.1` / `3002` | Backend bind address |
 | `BACKEND_CORS_ORIGINS` | `http://127.0.0.1:5173,http://localhost:5173` | CORS allowlist; `*` supported |

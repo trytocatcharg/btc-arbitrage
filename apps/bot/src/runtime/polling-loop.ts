@@ -212,10 +212,11 @@ export async function runPollingLoop(input: {
   // Step 4 (trade-execution-queue): Telegram command polling runs on
   // its own wall-clock interval instead of inside the signal tick, so a
   // slow or hung Telegram API can no longer delay price polling and
-  // signal evaluation. Cadence reuses PRICE_POLL_INTERVAL_MS — no new
-  // env keys. Unlike the monitor interval this one is NOT gated on the
-  // pause flags: an operator keeps full control of a paused bot (this
-  // was the tick's original ordering and is preserved deliberately).
+  // signal evaluation. Cadence is TELEGRAM_POLL_INTERVAL_MS (default
+  // 1000 ms), decoupled from the price tick. Unlike the monitor
+  // interval this one is NOT gated on the pause flags: an operator
+  // keeps full control of a paused bot (this was the tick's original
+  // ordering and is preserved deliberately).
   let commandPollInFlight = false;
   // Set when the in-flight skip line has been logged, so a slow poll
   // (up to TELEGRAM_REQUEST_TIMEOUT_MS) logs the skip once instead of
@@ -243,7 +244,7 @@ export async function runPollingLoop(input: {
     // Floating promise guarded by the in-flight flag and by the catch
     // inside runTelegramPoll(), so there is no unhandled-rejection path.
     void runTelegramPoll();
-  }, input.config.pricePollIntervalMs);
+  }, input.config.telegram.pollIntervalMs);
 
   async function runTelegramPoll(): Promise<void> {
     try {

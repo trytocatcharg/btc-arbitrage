@@ -143,6 +143,11 @@ export interface BotConfig {
     botToken?: string;
     chatId?: string;
     alertCooldownMs: number;
+    /** TELEGRAM_POLL_INTERVAL_MS: wall-clock cadence of the Telegram
+     * command poller (operator commands and callback queries), decoupled
+     * from the price tick. Default 1000 ms. The poller is not gated on
+     * the pause flags so an operator keeps control of a paused bot. */
+    pollIntervalMs: number;
     /** IANA timezone (e.g. Europe/Madrid) used to render operator-facing
      * Telegram output (/lastsignal) in local time. Telegram does not send
      * the sender's device timezone with messages, so it must be configured
@@ -741,6 +746,10 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       botToken: emptyToUndefined(env.TELEGRAM_BOT_TOKEN),
       chatId: emptyToUndefined(env.TELEGRAM_CHAT_ID),
       alertCooldownMs: telegramAlertCooldownMs,
+      pollIntervalMs: parsePositiveInteger(
+        env.TELEGRAM_POLL_INTERVAL_MS ?? "1000",
+        "TELEGRAM_POLL_INTERVAL_MS",
+      ),
       operatorTimezone: telegramOperatorTimezone,
     },
     dataRetention: {
