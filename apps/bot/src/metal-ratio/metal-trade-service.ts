@@ -43,6 +43,8 @@ export interface MetalTradeRow {
   raw: unknown;
 }
 
+const IS_TEST_RUN = process.env.NODE_ENV === "test";
+
 /** One query for the active gold/silver trade (if any). Direction
  * derivation: legs are sized dollar-neutral, and the gold price is
  * always much higher than silver, so the gold leg's base quantity is
@@ -395,6 +397,7 @@ export async function createMetalTrade(
         "Wait for a deeper/tighter SLV book or raise the threshold explicitly.",
     );
   }
+    if (!IS_TEST_RUN) {
   console.log("Metal entry cost estimate", {
     side,
     slippageBps: Number(slippageBps.toFixed(2)),
@@ -404,6 +407,7 @@ export async function createMetalTrade(
     maxEntrySlippageBps,
     walkLevelsUsed,
   });
+}
 
   const created = await ctx.db.transaction(async (tx) => {
     const tradeResult = await tx.insert(trades).values({
@@ -454,13 +458,15 @@ export async function createMetalTrade(
     reason: `metal entry created (${side})`,
     metadata: { side, notionalUsd: formatDecimal(notionalUsd, 8) },
   });
-  console.warn("Metal trade created", {
-    tradeId: created,
-    side,
-    notionalUsd: formatDecimal(notionalUsd, 2),
-    goldQty: formatDecimal(goldQty, 8),
-    silverQty: formatDecimal(silverQty, 8),
-  });
+  if (!IS_TEST_RUN) {
+    console.warn("Metal trade created", {
+      tradeId: created,
+      side,
+      notionalUsd: formatDecimal(notionalUsd, 2),
+      goldQty: formatDecimal(goldQty, 8),
+      silverQty: formatDecimal(silverQty, 8),
+    });
+  }
   return created;
 }
 
@@ -893,6 +899,16 @@ export async function executeMetalTradeEntry(
     incrementGoldQty: number,
     goldPriceUsd: number,
   ): Promise<void> {
+    // The gold fill this increment hedges is ALREADY ON THE EXCHANGE: the
+    // exposure exists from the moment the limit filled, before any hedge
+    // call. Count it covered up front so EVERY throw path below (BBO read
+    // failure, SLV-minimum check, exhausted bounded retries, missing fill
+    // price) lets abortEntry market-close the gold — the old position
+    // accumulated goldFilledQty only on success, so an exhausted-retry
+    // abort saw zero covered gold, closed nothing, and leaked a live GLD
+    // position after marking the trade failed (same leak family as
+    // #1319/#1323/#1324, found by the entry-path tests).
+    progress.goldFilledQty += incrementGoldQty;
     // Convert the gold fill into SILVER units by USD notional (trade
     // #1317: hedging the raw gold quantity 1:1 left the pair massively
     // unbalanced — 0.1358 GLD ≠ 0.1358 SLV in dollars).
@@ -1017,7 +1033,8 @@ export async function executeMetalTradeEntry(
         ? (progress.silverVwap * progress.silverFilledQty - notionalBefore) /
           hedgedQty
         : 0;
-    progress.goldFilledQty += incrementGoldQty;
+    // goldFilledQty was already accumulated at the top of this function —
+    // the gold fill is covered exposure even when the hedge below fails.
     await ctx
       .notify(
         `⚖️ Trade #${tradeId} hedge: +${formatDecimal(incrementGoldQty, 6)} GLD @ $${formatDecimal(goldPriceUsd, 2)} → ${silverLeg.side === "short" ? "sold" : "bought"} ${formatDecimal(hedgedQty, 4)} SLV @ $${formatDecimal(hedgedVwap, 2)} (fee $${formatDecimal(feeThisIncrement, 4)})${attempt > 1 ? ` after ${attempt} attempts` : ""}. ` +

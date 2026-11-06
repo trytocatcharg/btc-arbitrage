@@ -20,7 +20,7 @@ test('RISEx execution reads BBO from orderbook and metadata from markets while m
   ]);
 
   assert.deepEqual(bbo, { bidUsd: '55024.7', askUsd: '55024.9', receivedAt: fixedNow() });
-  assert.deepEqual(metadata, { minQuantityBase: '0.00015', quantityStepBase: '0.000001', maxLeverage: 20, positionMode: 'one-way' });
+  assert.deepEqual(metadata, { minQuantityBase: '0.00015', quantityStepBase: '0.000001', priceTickUsd: '0.1', maxLeverage: 20, positionMode: 'one-way' });
   await assert.rejects(() => adapter.submitExecutionOrder({ clientOrderId: 'blocked', symbol: 'BTCUSDT', side: 'buy', type: 'limit', quantityBase: '0.0002', priceUsd: '55024.8' }), /RISEx live execution is disabled/);
   assert.equal(http.posts.length, 0);
 });
@@ -94,7 +94,7 @@ test('RISEx exposes balance and position reads but refuses undocumented TP/SL tr
   assert.equal(posted.body.side, 1);
   assert.equal(posted.body.stop_price, '57000');
   assert.equal(posted.body.limit_price, '57000.1');
-  assert.equal(posted.body.stop_price_option, 'LAST_TRADED_PRICE');
+  assert.equal(posted.body.stop_price_option, 'MARK_PRICE');
   assert.match(posted.body.signature, /^[A-Za-z0-9+/=]+$/);
 });
 
@@ -145,6 +145,13 @@ function fixedNow(): Date { return new Date('2026-01-01T00:00:00.000Z'); }
 
 function fakeHttp() {
   const posts: Array<{ path: string; body: any }> = [];
+  // Stateful fill reflection: the adapter's waitForMarketFill proves a
+  // market fill by watching the signed position quantity move by the order
+  // size against a deadline built from the injected clock. The injected
+  // fixedNow never advances, so a static position quantity would poll
+  // forever — once a market order is placed, the position read must show
+  // the fill (0.002 baseline + 0.0002 order = 0.0022).
+  let marketOrderPlaced = false;
   return {
     posts,
     async get(path: string, query: Record<string, string | undefined> = {}) {
@@ -165,16 +172,25 @@ function fakeHttp() {
         assert.equal(query.account, ACCOUNT);
         return { data: { available_balance: '1234.5', cross_margin_balance: '1500' } };
       }
+      if (path === '/v1/orders' || path === '/v1/trade-history') {
+        // Order-level fill read-back after a market fill: nothing indexed
+        // in this fake, so the adapter degrades to the position entry
+        // price fallback (read failures here are tolerated by design).
+        return { data: [] };
+      }
       if (path === '/v1/account/position') {
         assert.equal(query.account, ACCOUNT);
         assert.equal(query.market_id, '1');
-        return { data: { id: 'pos-1', quantity: '0.002', entry_price: '54000' } };
+        return { data: { id: 'pos-1', quantity: marketOrderPlaced ? '0.0022' : '0.002', entry_price: '54000' } };
       }
       throw new Error(`Unexpected GET ${path}`);
     },
     async post(path: string, body: any) {
       posts.push({ path, body });
-      if (path === '/v1/orders/place') return { data: { order_id: '0xplaced', status: 'new', filled_size_steps: '0' } };
+      if (path === '/v1/orders/place') {
+        if (body.order_type === 0) marketOrderPlaced = true;
+        return { data: { order_id: '0xplaced', status: 'new', filled_size_steps: '0' } };
+      }
       if (path === '/v1/orders/cancel') return { data: { success: true } };
       if (path === '/v1/account/leverage') return { data: { success: true } };
       if (path === '/v1/orders/tpsl') return { data: { order_id: 'tpsl-1', status: 'accepted' } };

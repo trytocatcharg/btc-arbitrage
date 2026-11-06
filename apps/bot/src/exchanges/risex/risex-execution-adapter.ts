@@ -32,6 +32,12 @@ import type { RisexConfig } from "./risex.types.js";
 // position move by the ordered quantity (no REST fill-history endpoint exists).
 const MARKET_FILL_TIMEOUT_MS = 15_000;
 const MARKET_FILL_POLL_MS = 300;
+/** Per-poll diagnostics are operator-facing live telemetry; under the test
+ * runner (NODE_ENV=test, set by the bot's `test` script — child test
+ * processes get a clean execArgv, so the flag cannot be detected there)
+ * they spam one line per poll and drown the test results. One-shot logs
+ * are unaffected. */
+const IS_TEST_RUN = process.env.NODE_ENV === "test";
 /** TTL for cached near-static exchange data (market info). The entry and
  * reprice paths re-fetched /v1/markets on every call; the record rotates
  * rarely, so a short TTL cache removes those round trips from the hot
@@ -850,15 +856,17 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
       pollCount += 1;
       const signed = await this.readSignedPositionQuantity(input.marketId);
       const delta = direction * (signed - input.baseline);
-      console.log("RISEx market fill poll", {
-        marketId: input.marketId,
-        poll: pollCount,
-        side: input.side,
-        baseline: input.baseline,
-        signed,
-        delta,
-        targetDelta,
-      });
+      if (!IS_TEST_RUN) {
+        console.log("RISEx market fill poll", {
+          marketId: input.marketId,
+          poll: pollCount,
+          side: input.side,
+          baseline: input.baseline,
+          signed,
+          delta,
+          targetDelta,
+        });
+      }
       if (delta >= targetDelta - tolerance) {
         // Prefer the order's own fill data over the whole-position average
         // (which blends with any residual position). Fall back to the

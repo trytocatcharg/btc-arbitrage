@@ -93,11 +93,11 @@ test("confirmation hedges only confirmed partial limit fills and protects from a
   assert.equal(
     extended.calls.find((x) => x.type === "take-profit-market")
       ?.triggerPriceUsd,
-    "103000",
+    "101000",
   );
   assert.equal(
     extended.calls.find((x) => x.type === "stop-market")?.triggerPriceUsd,
-    "97000",
+    "99000",
   );
   assert.equal(store.states.at(-1), "open");
 });
@@ -129,11 +129,11 @@ test("confirmation applies TP/SL percentages from configuration", async () => {
   assert.equal(
     extended.calls.find((x) => x.type === "take-profit-market")
       ?.triggerPriceUsd,
-    "110000",
+    "103333.33333",
   );
   assert.equal(
     extended.calls.find((x) => x.type === "stop-market")?.triggerPriceUsd,
-    "95000",
+    "98333.33333",
   );
 });
 

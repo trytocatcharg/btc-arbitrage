@@ -56,6 +56,8 @@ export function formatPnlColored(value: number | null): string {
     : `🔴 -$${Math.abs(value).toFixed(2)}`;
 }
 
+const IS_TEST_RUN = process.env.NODE_ENV === "test";
+
 /** Bot-initiated close of both legs: cancels the exchange TP/SL backstop orders,
  * submits reduce-only market closes, waits for flat, then persists leg/trade
  * closure (with realized PnL when exit prices are known) through the preview
@@ -326,12 +328,14 @@ export async function closeTradeBothLegs(
       .catch(() => undefined);
   }
 
-  console.log("Trade spread close completed", {
-    token: input.token,
-    label,
-    reason: input.reason,
-    outcomes,
-  });
+  if (!IS_TEST_RUN) {
+      console.log("Trade spread close completed", {
+        token: input.token,
+        label,
+        reason: input.reason,
+      outcomes,
+    });
+  }
 
   const pnlText = realizedKnown
     ? `${totalRealizedUsd >= 0 ? "+" : ""}$${totalRealizedUsd.toFixed(2)}`

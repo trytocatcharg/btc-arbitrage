@@ -158,7 +158,8 @@ test('buildTradeSummaryMessage summarizes multiple active trades with live quote
   assert.match(message, /LONG extended/);
   assert.match(message, /SHORT risex/);
   assert.match(message, /LONG arcus/);
-  assert.match(message, /Estimated PnL:/);
+  assert.match(message, /Global estimated PnL:/);
+  assert.match(message, /Trade estimated PnL:/);
 });
 
 function createFakeDb(tradeRows: unknown[], legRows: unknown[]) {
