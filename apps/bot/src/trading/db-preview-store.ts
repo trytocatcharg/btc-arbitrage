@@ -1,4 +1,13 @@
-import { and, desc, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
+import {
+  and,
+  desc,
+  eq,
+  gt,
+  inArray,
+  isNull,
+  notInArray,
+  sql,
+} from "drizzle-orm";
 import {
   activeTradeStatuses,
   tradePreviews,
@@ -7,7 +16,11 @@ import {
   tradeStatusHistory,
 } from "@btc-arbitrage/db";
 import type { getDb } from "@btc-arbitrage/db";
-import { formatDecimal, GOLD_SILVER_SYMBOL, parseDecimal } from "@btc-arbitrage/domain";
+import {
+  ARCUS_PAIR_SYMBOLS,
+  formatDecimal,
+  parseDecimal,
+} from "@btc-arbitrage/domain";
 import type {
   OpenTradePreview,
   OpenTradeState,
@@ -224,7 +237,7 @@ export class DbPreviewStore implements PreviewStore {
       .where(
         and(
           inArray(trades.status, [...activeTradeStatuses]),
-          ne(trades.symbol, GOLD_SILVER_SYMBOL),
+          notInArray(trades.symbol, [...ARCUS_PAIR_SYMBOLS]),
         ),
       )
       .limit(1);

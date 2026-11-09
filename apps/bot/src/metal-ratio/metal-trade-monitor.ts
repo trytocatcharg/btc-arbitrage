@@ -1,5 +1,5 @@
 import { eq } from "drizzle-orm";
-import { parseDecimal, type MetalRatioSide } from "@btc-arbitrage/domain";
+import { parseDecimal, type ArcusPairSide } from "@btc-arbitrage/domain";
 import { tradeLegs } from "@btc-arbitrage/db";
 import { GOLD_MARKET } from "./metal-ratio-warmup.js";
 import {
@@ -151,7 +151,7 @@ export async function evaluateMetalTradeExitTriggers(
 
 /** Market symbol for a leg side, exposed for monitor/test reuse. */
 export function metalLegMarketForSide(
-  side: MetalRatioSide,
+  side: ArcusPairSide,
   legSide: "short" | "long",
 ): string {
   const { goldLeg } = metalLegMarkets(side);

@@ -3,6 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import {
   ExecutionMode,
   GOLD_SILVER_SYMBOL,
+  isArcusPairSymbol,
   type ExchangeId,
   type MarketType,
   type PriceSource,
@@ -306,13 +307,16 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   if (exchangeA === exchangeB)
     throw new Error("EXCHANGE_A and EXCHANGE_B must be different");
 
-  // gold-silver-decouple: GOLDSILVER is no longer a selectable pair (the
-  // metal strategy runs on demand from /ratio alongside the spread pair),
-  // so it can never be the monitored symbol. Fail fast instead of letting
-  // every tick die on the exchanges' unknown-market errors.
-  if ((env.BTC_SYMBOL ?? "").trim().toUpperCase() === GOLD_SILVER_SYMBOL) {
+  // gold-silver-decouple: the Arcus-pair pseudo-symbols (GOLDSILVER,
+  // SPYQQQ) are not selectable pairs — those strategies run on demand from
+  // /ratio and /etf alongside the spread pair — so they can never be the
+  // monitored symbol. Fail fast instead of letting every tick die on the
+  // exchanges' unknown-market errors.
+  if (
+    isArcusPairSymbol((env.BTC_SYMBOL ?? "").trim().toUpperCase())
+  ) {
     throw new Error(
-      "BTC_SYMBOL=GOLDSILVER was removed by gold-silver-decouple: GOLD/SILVER is no longer a trading pair. Set a spread pair (e.g. BTCUSDT) and open metal trades from /ratio.",
+      "BTC_SYMBOL cannot be an Arcus-pair pseudo-symbol (GOLDSILVER/SPYQQQ): those are not trading pairs. Set a spread pair (e.g. BTCUSDT) and open Arcus-pair trades from /ratio or /etf.",
     );
   }
 

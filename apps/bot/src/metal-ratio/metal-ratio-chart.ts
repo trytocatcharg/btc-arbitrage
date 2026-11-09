@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { computeRsi, type MetalRatioSide } from "@btc-arbitrage/domain";
+import { computeRsi, type ArcusPairSide } from "@btc-arbitrage/domain";
 import type { GoldSilverCandleTimeframe } from "@btc-arbitrage/config";
 import type { MetalRatioBucket } from "./metal-ratio-warmup.js";
 
@@ -13,7 +13,7 @@ const RENDERER_PATH = join(moduleDir, "metal-ratio-chart.py");
 
 export interface MetalRatioChartLive {
   rsi?: string;
-  side?: MetalRatioSide;
+  side?: ArcusPairSide;
   ratio?: string;
   goldPriceUsd?: string;
   silverPriceUsd?: string;

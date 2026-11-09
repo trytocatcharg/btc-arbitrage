@@ -2,7 +2,7 @@ import {
   computeMetalRatio,
   computeRsi,
   rsiToSide,
-  type MetalRatioSide,
+  type ArcusPairSide,
 } from "@btc-arbitrage/domain";
 
 /** Hard cap on the in-memory ratio close series. Warmup seeds at most
@@ -35,7 +35,7 @@ export interface MetalRatioTickResult {
   /** Undefined until the close series is long enough for the RSI period. */
   rsi?: string;
   /** Defined only when the RSI is outside the dead zone around 50. */
-  side?: MetalRatioSide;
+  side?: ArcusPairSide;
   /** True only when `side` is defined and differs from the previous
    * confirmed side (hysteresis: dead-zone ticks never reset the side). */
   crossed: boolean;
@@ -50,7 +50,7 @@ export interface MetalRatioTickResult {
  * built and how TradingView's timeframe RSI behaves. */
 export class MetalRatioEngine {
   private closes: string[] = [];
-  private currentSide: MetalRatioSide | undefined;
+  private currentSide: ArcusPairSide | undefined;
   private currentBucketStartMs: number | undefined;
   private pendingBucketRatio: string | undefined;
 
@@ -111,7 +111,7 @@ export class MetalRatioEngine {
   }
 
   /** Read-only view for logging/diagnostics. */
-  getState(): { closesCount: number; currentSide?: MetalRatioSide } {
+  getState(): { closesCount: number; currentSide?: ArcusPairSide } {
     return { closesCount: this.closes.length, currentSide: this.currentSide };
   }
 }

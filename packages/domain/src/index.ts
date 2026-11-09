@@ -133,6 +133,26 @@ export const DEFAULT_TRADING_PAIR_SYMBOL = "BTCUSDT";
  * pair, and no spread-exchange adapter ever resolves this symbol. */
 export const GOLD_SILVER_SYMBOL = "GOLDSILVER";
 
+/** Symbol stored on SPY/QQQ ratio trades (`trades.symbol` = "SPYQQQ",
+ * both legs on Arcus SPY-USD / QQQ-USD). Sibling strategy of
+ * GOLD_SILVER_SYMBOL; both share ONE global active-trade slot (operator
+ * decision for the Arcus-pair strategies). */
+export const SPYQQQ_SYMBOL = "SPYQQQ";
+
+/** All Arcus-pair pseudo-symbols: strategies whose two legs live on Arcus
+ * and coexist with the BTC spread pair. At most ONE Arcus-pair trade can
+ * be active at a time across the whole set. */
+export const ARCUS_PAIR_SYMBOLS = [
+  GOLD_SILVER_SYMBOL,
+  SPYQQQ_SYMBOL,
+] as const;
+
+export type ArcusPairSymbol = (typeof ARCUS_PAIR_SYMBOLS)[number];
+
+export function isArcusPairSymbol(symbol: string): boolean {
+  return (ARCUS_PAIR_SYMBOLS as readonly string[]).includes(symbol);
+}
+
 export const TRADING_PAIRS: readonly TradingPair[] = [
   { label: "BTC/USD", symbol: "BTCUSDT" },
   { label: "ETH/USD", symbol: "ETHUSDT" },
@@ -183,7 +203,15 @@ export function calculateSpread(input: CalculateSpreadInput): SpreadSnapshot {
   };
 }
 
-export type MetalRatioSide = "short_gold_long_silver" | "long_gold_short_silver";
+/** Side of an Arcus-pair ratio trade. The VALUES are historical metal
+ * names persisted in `ratio_snapshots.side`, but they read generically as
+ * short-entry/long-hedge vs long-entry/short-hedge for every Arcus-pair
+ * strategy (GOLDSILVER and SPYQQQ alike). The entry leg's base qty is
+ * always the SMALLER of the two (its price is always the higher of the
+ * pair — GLD>SLV, SPY>QQQ), which is how the side is derived from fills. */
+export type ArcusPairSide =
+  | "short_gold_long_silver"
+  | "long_gold_short_silver";
 
 /** Gold/silver ratio from USD-denominated perp prices. Throws on an invalid
  * or non-positive silver price (division by zero / negative denominator). */
@@ -244,7 +272,7 @@ export function computeRsi(
  * >= 50 + band => ratio overbought => short gold / long silver; RSI <= 50 -
  * band => ratio oversold => long gold / short silver. Returns undefined
  * inside the dead zone around 50. */
-export function rsiToSide(rsi: string, band: string): MetalRatioSide | undefined {
+export function rsiToSide(rsi: string, band: string): ArcusPairSide | undefined {
   const value = parseDecimal(rsi, "rsi");
   const bandValue = parseDecimal(band, "band");
   if (bandValue < 0) throw new Error("band must be >= 0");

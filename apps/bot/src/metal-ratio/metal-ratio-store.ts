@@ -1,5 +1,5 @@
 import { ratioSnapshots, type getDb } from "@btc-arbitrage/db";
-import type { MetalRatioSide } from "@btc-arbitrage/domain";
+import type { ArcusPairSide } from "@btc-arbitrage/domain";
 import { extractInsertId } from "../db-result.js";
 
 export interface RatioSnapshotRow {
@@ -7,7 +7,7 @@ export interface RatioSnapshotRow {
   silverPriceUsd: string;
   ratio: string;
   rsi?: string;
-  side?: MetalRatioSide;
+  side?: ArcusPairSide;
   crossed: boolean;
   calculatedAt: Date;
 }

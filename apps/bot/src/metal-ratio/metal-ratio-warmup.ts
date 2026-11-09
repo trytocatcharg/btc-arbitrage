@@ -1,10 +1,18 @@
-import { computeMetalRatio } from "@btc-arbitrage/domain";
+import {
+  computeMetalRatio,
+  GOLD_SILVER_SYMBOL,
+} from "@btc-arbitrage/domain";
 import type { GoldSilverCandleTimeframe } from "@btc-arbitrage/config";
 import type { ArcusMarketDataClient } from "../exchanges/arcus/arcus-client.js";
 import type { ArcusCandle } from "../exchanges/arcus/arcus.types.js";
+import { ARCUS_PAIR_STRATEGIES } from "./arcus-pair-strategies.js";
 
-export const GOLD_MARKET = "GLD-USD";
-export const SILVER_MARKET = "SLV-USD";
+/** Metal-strategy leg markets, re-exported from the GOLDSILVER spec so the
+ * registry stays the single source of truth for pair identities. */
+export const GOLD_MARKET =
+  ARCUS_PAIR_STRATEGIES[GOLD_SILVER_SYMBOL].entryMarket;
+export const SILVER_MARKET =
+  ARCUS_PAIR_STRATEGIES[GOLD_SILVER_SYMBOL].hedgeMarket;
 
 /** Candle timeframe durations in milliseconds, matching
  * GOLD_SILVER_CANDLE_TIMEFRAMES in packages/config. Exported for the

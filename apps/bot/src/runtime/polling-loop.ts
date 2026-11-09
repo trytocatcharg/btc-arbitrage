@@ -1,5 +1,8 @@
 import { calculateSpread } from "@btc-arbitrage/domain";
-import { GOLD_SILVER_SYMBOL } from "@btc-arbitrage/domain";
+import {
+  ARCUS_PAIR_SYMBOLS,
+  GOLD_SILVER_SYMBOL,
+} from "@btc-arbitrage/domain";
 import type { BotConfig } from "@btc-arbitrage/config";
 import type { SpreadSnapshot } from "@btc-arbitrage/domain";
 import type { ExchangeAdapter } from "@btc-arbitrage/exchange-core";
@@ -13,7 +16,7 @@ import {
   spreadSnapshots,
   trades,
 } from "@btc-arbitrage/db";
-import { and, desc, eq, inArray, ne } from "drizzle-orm";
+import { and, desc, eq, inArray, ne, notInArray } from "drizzle-orm";
 import { monitorTrades } from "../trading/trade-monitor.js";
 import { sampleUnhedgedLegs } from "../trading/unhedged-sampler.js";
 import { recoverStaleClosingTrades } from "../trading/close-recovery-monitor.js";
@@ -519,7 +522,7 @@ export async function runPollingLoop(input: {
         .where(
           and(
             inArray(trades.status, [...activeTradeStatuses]),
-            ne(trades.symbol, GOLD_SILVER_SYMBOL),
+            notInArray(trades.symbol, [...ARCUS_PAIR_SYMBOLS]),
           ),
         )
         .orderBy(desc(trades.id));
@@ -611,13 +614,14 @@ export async function runPollingLoop(input: {
     try {
       // Active-trade gate: one cheap DB probe per tick replaces the old
       // pair-selection switch. Mirrors loadActiveMetalTrade's filter
-      // (metal-trade-service.ts) but only needs existence.
+      // (any Arcus-pair strategy shares the single active-trade slot) but
+      // only needs existence.
       const activeMetal = await input.db
         .select({ id: trades.id })
         .from(trades)
         .where(
           and(
-            eq(trades.symbol, GOLD_SILVER_SYMBOL),
+            inArray(trades.symbol, [...ARCUS_PAIR_SYMBOLS]),
             inArray(trades.status, [...activeTradeStatuses]),
           ),
         )

@@ -2,7 +2,7 @@ import { and, desc, inArray, isNotNull, sql } from "drizzle-orm";
 import { getDb, tradeLegs, trades, openTradeStatuses } from "@btc-arbitrage/db";
 import type { ExchangeAdapter } from "@btc-arbitrage/exchange-core";
 import type { MarketType, PriceSource } from "@btc-arbitrage/domain";
-import { GOLD_SILVER_SYMBOL } from "@btc-arbitrage/domain";
+import { isArcusPairSymbol } from "@btc-arbitrage/domain";
 import type { BotConfig } from "@btc-arbitrage/config";
 import {
   scanUntrackedPositions,
@@ -539,10 +539,10 @@ function formatTradeSummaryMessage(summaries: ResolvedTradeSummary[]): string {
       `Created: ${formatDate(summary.createdAt)}${summary.openedAt ? ` · Opened: ${formatDate(summary.openedAt)}` : ""}`,
     );
 
-    // Metal (GOLD/SILVER) trades are dollar-neutral pairs on ONE venue:
-    // an entry/live "spread" between legs is meaningless, so those lines
-    // are hidden for them (gold-silver-decouple).
-    if (summary.symbol !== GOLD_SILVER_SYMBOL) {
+    // Arcus-pair trades (GOLDSILVER, SPYQQQ) are dollar-neutral pairs on
+    // ONE venue: an entry/live "spread" between legs is meaningless, so
+    // those lines are hidden for them (gold-silver-decouple).
+    if (!isArcusPairSymbol(summary.symbol)) {
       if (summary.entrySpreadUsd != null) {
         lines.push(`Entry spread: ${formatSignedUsd(summary.entrySpreadUsd)}`);
       }

@@ -4,12 +4,12 @@ import { signals, tradeLegs, tradePreviews, trades } from "@btc-arbitrage/db";
 import { eq } from "drizzle-orm";
 import {
   findTradingPair,
-  GOLD_SILVER_SYMBOL,
+  isArcusPairSymbol,
   parseDecimal,
   TRADING_PAIRS,
   computeRsi,
   rsiToSide,
-  type MetalRatioSide,
+  type ArcusPairSide,
 } from "@btc-arbitrage/domain";
 import {
   buildLastTradesMessage,
@@ -1162,7 +1162,7 @@ export class TelegramCommandPoller {
           // exchange-resting disaster stops) is not something to allow
           // casually with a position open.
           const spreadTrades = active.filter(
-            (trade) => trade.symbol !== GOLD_SILVER_SYMBOL,
+            (trade) => !isArcusPairSymbol(trade.symbol),
           );
           const blockingTrades =
             data === "bot:restart" ? active : spreadTrades;
@@ -1259,7 +1259,7 @@ export class TelegramCommandPoller {
         // one action, entry runs on the serial execution queue.
         const side = data.slice("metaltrade:open:".length);
         const messageId = callback.message?.message_id;
-        const validSide: MetalRatioSide =
+        const validSide: ArcusPairSide =
           side === "long_gold_short_silver"
             ? "long_gold_short_silver"
             : "short_gold_long_silver";
@@ -1602,14 +1602,14 @@ export class TelegramCommandPoller {
           action === "armconfirm" ||
           action === "disarm"
         ) {
-          // Armed net take-profit: metal trades only. The threshold is
-          // snapshotted from the (runtime-adjustable) TP floor at arm
+          // Armed net take-profit: Arcus-pair trades only. The threshold
+          // is snapshotted from the (runtime-adjustable) TP floor at arm
           // time so a later /config change does not retroactively move
           // an armed trade's exit.
-          if (trade.symbol !== GOLD_SILVER_SYMBOL) {
+          if (!isArcusPairSymbol(trade.symbol)) {
             await reply(
-              "⚠️ Arming a net take-profit is only available on gold/silver " +
-                "metal trades.",
+              "⚠️ Arming a net take-profit is only available on Arcus-pair " +
+                "trades (GOLDSILVER / SPYQQQ).",
             );
             return;
           }
@@ -1685,12 +1685,12 @@ export class TelegramCommandPoller {
           `⏳ Closing trade #${tradeId} (${trade.symbol}) at market… ` +
             "This can take up to ~20 s.",
         );
-        const isMetal = trade.symbol === GOLD_SILVER_SYMBOL;
+        const isArcusPairTrade = isArcusPairSymbol(trade.symbol);
         this.executionQueue.enqueue({
           description: `manual-close:${tradeId}`,
           run: async () => {
             try {
-              if (isMetal) {
+              if (isArcusPairTrade) {
                 const arcusExecution = this.registry.get("arcus").execution;
                 if (!arcusExecution) {
                   await this.sendMessage(
@@ -2427,7 +2427,7 @@ export class TelegramCommandPoller {
           callback_data: `tradeclose:ask:${trade.id}`,
         },
       ]);
-      if (trade.symbol === GOLD_SILVER_SYMBOL) {
+      if (isArcusPairSymbol(trade.symbol)) {
         const armedAt = readArmedCloseAtNetUsd(trade.raw);
         rows.push([
           armedAt !== null

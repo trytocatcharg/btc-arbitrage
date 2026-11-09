@@ -2,9 +2,10 @@ import { and, eq, inArray } from "drizzle-orm";
 import type { BotConfig } from "@btc-arbitrage/config";
 import {
   GOLD_SILVER_SYMBOL,
+  ARCUS_PAIR_SYMBOLS,
   parseDecimal,
   formatDecimal,
-  type MetalRatioSide,
+  type ArcusPairSide,
 } from "@btc-arbitrage/domain";
 import {
   activeTradeStatuses,
@@ -36,7 +37,7 @@ export interface MetalTradeContext {
 export interface MetalTradeRow {
   id: number;
   status: (typeof activeTradeStatuses)[number];
-  side: MetalRatioSide;
+  side: ArcusPairSide;
   openedAt: Date | null;
   /** trades.raw (migration 0008): operator-armed flags, currently
    * closeAtNetUsd for the /trade "Arm close at +$X net" button. */
@@ -45,11 +46,13 @@ export interface MetalTradeRow {
 
 const IS_TEST_RUN = process.env.NODE_ENV === "test";
 
-/** One query for the active gold/silver trade (if any). Direction
- * derivation: legs are sized dollar-neutral, and the gold price is
- * always much higher than silver, so the gold leg's base quantity is
- * always the SMALLER of the two — the short leg being the smaller one
- * means short-gold/long-silver. */
+/** One query for the active Arcus-pair trade (if any). Operator rule:
+ * at most ONE Arcus-pair trade — GOLDSILVER or SPYQQQ — is active at a
+ * time, so this matches either pseudo-symbol. Direction derivation:
+ * legs are sized dollar-neutral, and the entry asset's price is always
+ * much higher than the hedge asset's (GLD >> SLV, SPY > QQQ), so the
+ * entry leg's base quantity is always the SMALLER of the two — the
+ * short leg being the smaller one means short-entry/long-hedge. */
 export async function loadActiveMetalTrade(
   ctx: Pick<MetalTradeContext, "db">,
 ): Promise<MetalTradeRow | undefined> {
@@ -66,7 +69,7 @@ export async function loadActiveMetalTrade(
     .innerJoin(tradeLegs, eq(tradeLegs.tradeId, trades.id))
     .where(
       and(
-        eq(trades.symbol, GOLD_SILVER_SYMBOL),
+        inArray(trades.symbol, [...ARCUS_PAIR_SYMBOLS]),
         inArray(trades.status, [...activeTradeStatuses]),
       ),
     )
@@ -78,7 +81,7 @@ export async function loadActiveMetalTrade(
     rows.find((row) => row.legSide === "short")?.legQty ?? 0,
   );
   const longQty = Number(rows.find((row) => row.legSide === "long")?.legQty ?? 0);
-  const side: MetalRatioSide =
+  const side: ArcusPairSide =
     shortQty < longQty ? "short_gold_long_silver" : "long_gold_short_silver";
   return {
     id: first.id,
@@ -132,7 +135,7 @@ export async function setArmedCloseAtNetUsd(
     .where(eq(trades.id, tradeId));
 }
 
-export function metalLegMarkets(side: MetalRatioSide): {
+export function metalLegMarkets(side: ArcusPairSide): {
   goldLeg: { market: string; side: "short" | "long" };
   silverLeg: { market: string; side: "short" | "long" };
 } {
@@ -235,7 +238,7 @@ async function transitionTrade(
  * Returns the trade id. */
 export async function createMetalTrade(
   ctx: MetalTradeContext,
-  side: MetalRatioSide,
+  side: ArcusPairSide,
 ): Promise<number> {
   const existing = await loadActiveMetalTrade(ctx);
   if (existing) {
@@ -562,7 +565,7 @@ export async function executeMetalTradeEntry(
     .select()
     .from(tradeLegs)
     .where(eq(tradeLegs.tradeId, tradeId));
-  const side: MetalRatioSide = tradeSideFromLegs(
+  const side: ArcusPairSide = tradeSideFromLegs(
     legRows.map((leg) => ({ side: leg.side, qty: String(leg.quantityBase) })),
   );
   const { goldLeg, silverLeg } = metalLegMarkets(side);
@@ -1358,7 +1361,7 @@ export async function closeMetalTrade(
           });
         });
     }
-    const side: MetalRatioSide = tradeSideFromLegs(
+    const side: ArcusPairSide = tradeSideFromLegs(
       (
         await ctx.db
           .select({ side: tradeLegs.side, qty: tradeLegs.quantityBase })
@@ -1618,7 +1621,7 @@ export async function closeMetalTrade(
  * short-gold/long-silver. */
 function tradeSideFromLegs(
   legs: Array<{ side: string; qty: string }>,
-): MetalRatioSide {
+): ArcusPairSide {
   const shortQty = Number(legs.find((leg) => leg.side === "short")?.qty ?? 0);
   const longQty = Number(legs.find((leg) => leg.side === "long")?.qty ?? 0);
   return shortQty < longQty
