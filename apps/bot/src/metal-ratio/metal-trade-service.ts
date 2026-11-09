@@ -346,7 +346,7 @@ export async function createMetalTrade(
   }
   if (!depth) {
     throw new Error(
-      `Metal entry refused: SLV order-book depth read failed after 2 attempts (${
+      `Metal entry refused: ${ctx.strategy.hedgeAsset} order-book depth read failed after 2 attempts (${
         depthError instanceof Error ? depthError.message : String(depthError)
       }) — the entry cost cannot be estimated`,
     );
@@ -356,7 +356,7 @@ export async function createMetalTrade(
   const walkLevels = crossingSide === "bids" ? depth.bids : depth.asks;
   if (walkLevels.length === 0) {
     throw new Error(
-      `Metal entry refused: the SLV order book has no liquidity on the hedge side (${crossingSide}) — the entry cost cannot be estimated`,
+      `Metal entry refused: the ${ctx.strategy.hedgeAsset} order book has no liquidity on the hedge side (${crossingSide}) — the entry cost cannot be estimated`,
     );
   }
   // Reference mid from the same snapshot; a one-sided book falls back to
@@ -381,7 +381,7 @@ export async function createMetalTrade(
   }
   if (walkRemaining > 1e-9) {
     throw new Error(
-      `Metal entry refused: the SLV order book is too thin — ${formatDecimal(walkRemaining, 8)} SLV of the ${formatDecimal(silverQty, 8)} hedge could not be simulated within ${walkLevels.length} book levels`,
+      `Metal entry refused: the ${ctx.strategy.hedgeAsset} order book is too thin — ${formatDecimal(walkRemaining, 8)} ${ctx.strategy.hedgeAsset} of the ${formatDecimal(silverQty, 8)} hedge could not be simulated within ${walkLevels.length} book levels`,
     );
   }
   const walkVwap = walkNotional / silverQty;
@@ -406,11 +406,11 @@ export async function createMetalTrade(
   const topLevel = walkLevels[0];
   if (entryDragBps > maxEntrySlippageBps) {
     throw new Error(
-      `Metal entry refused by the order-book gate: estimated entry drag ${entryDragBps.toFixed(1)} bps exceeds GOLDSILVER_MAX_ENTRY_SLIPPAGE_BPS=${maxEntrySlippageBps} bps ` +
-        `(SLV book-walk slippage ${slippageBps.toFixed(1)} bps over ${walkLevelsUsed} level(s) vs mid $${formatDecimal(reference, 2)}, ` +
+      `Metal entry refused by the order-book gate: estimated entry drag ${entryDragBps.toFixed(1)} bps exceeds ${ctx.strategy.envPrefix}_MAX_ENTRY_SLIPPAGE_BPS=${maxEntrySlippageBps} bps ` +
+        `(${ctx.strategy.hedgeAsset} book-walk slippage ${slippageBps.toFixed(1)} bps over ${walkLevelsUsed} level(s) vs mid $${formatDecimal(reference, 2)}, ` +
         `top ${crossingSide === "bids" ? "bid" : "ask"} $${topLevel.priceUsd} x ${topLevel.sizeBase} SLV, ` +
-        `SLV taker fee ${takerFeeBps ?? 0} bps + GLD maker fee ${makerFeeBps ?? 0} bps). ` +
-        "Wait for a deeper/tighter SLV book or raise the threshold explicitly.",
+        `${ctx.strategy.hedgeAsset} taker fee ${takerFeeBps ?? 0} bps + ${ctx.strategy.entryAsset} maker fee ${makerFeeBps ?? 0} bps). ` +
+        `Wait for a deeper/tighter ${ctx.strategy.hedgeAsset} book or raise the threshold explicitly.`,
     );
   }
     if (!IS_TEST_RUN) {
@@ -729,7 +729,7 @@ export async function executeMetalTradeEntry(
     await ctx
       .notify(
         `⏳ Trade #${tradeId}: limit ${entryLeg.side === "short" ? "SELL" : "BUY"} resting on GLD at $${formatDecimal(restingPrice, 2)} ` +
-          `(${formatDecimal(progress.targetQty, 6)} GLD). Hedging each fill on SLV at market. ` +
+          `(${formatDecimal(progress.targetQty, 6)} ${ctx.strategy.entryAsset}). Hedging each fill on ${ctx.strategy.hedgeAsset} at market. ` +
           `Timeout in ${Math.round(ctx.strategyConfig.limitTimeoutMs / 1000)}s.`,
       )
       // Guarded like every sibling notification in this flow: a Telegram
@@ -943,7 +943,7 @@ export async function executeMetalTradeEntry(
     );
     if (silverQty < Math.max(silverMin, 1e-9)) {
       throw new Error(
-        `Hedge increment below SLV minimum (${silverQty} < ${silverMin})`,
+        `Hedge increment below ${ctx.strategy.hedgeAsset} minimum (${silverQty} < ${silverMin})`,
       );
     }
     // Bounded hedge with retries (metal-entry-orderbook-gate): each
@@ -977,7 +977,7 @@ export async function executeMetalTradeEntry(
       );
       if (!(touch > 0)) {
         throw new Error(
-          `SLV BBO has no usable ${hedgeSide === "sell" ? "bid" : "ask"} for the hedge bound`,
+          `${ctx.strategy.hedgeAsset} BBO has no usable ${hedgeSide === "sell" ? "bid" : "ask"} for the hedge bound`,
         );
       }
       const bound = roundBoundToTick(
@@ -1012,7 +1012,7 @@ export async function executeMetalTradeEntry(
         );
         if (!(fillPrice > 0)) {
           throw new Error(
-            `Hedge order ${hedge.id} filled ${formatDecimal(filledQty, 8)} SLV without an average price`,
+            `Hedge order ${hedge.id} filled ${formatDecimal(filledQty, 8)} ${ctx.strategy.hedgeAsset} without an average price`,
           );
         }
         const fee = terminal.feeUsd ? parseDecimal(terminal.feeUsd, "fee") : 0;
@@ -1039,7 +1039,7 @@ export async function executeMetalTradeEntry(
     }
     if (remainingQty >= Math.max(silverMin, 1e-9)) {
       throw new Error(
-        `SLV hedge left ${formatDecimal(remainingQty, 8)} SLV unhedged after ${maxAttempts} bounded attempt(s) ` +
+        `${ctx.strategy.hedgeAsset} hedge left ${formatDecimal(remainingQty, 8)} ${ctx.strategy.hedgeAsset} unhedged after ${maxAttempts} bounded attempt(s) ` +
           `(last order ${lastTerminal?.id ?? "n/a"} ended ${lastTerminal?.status ?? "n/a"}) — aborting the entry; the rollback market-closes the covered gold`,
       );
     }
@@ -1053,7 +1053,7 @@ export async function executeMetalTradeEntry(
     // the gold fill is covered exposure even when the hedge below fails.
     await ctx
       .notify(
-        `⚖️ Trade #${tradeId} hedge: +${formatDecimal(incrementGoldQty, 6)} GLD @ $${formatDecimal(goldPriceUsd, 2)} → ${hedgeLeg.side === "short" ? "sold" : "bought"} ${formatDecimal(hedgedQty, 4)} SLV @ $${formatDecimal(hedgedVwap, 2)} (fee $${formatDecimal(feeThisIncrement, 4)})${attempt > 1 ? ` after ${attempt} attempts` : ""}. ` +
+        `⚖️ Trade #${tradeId} hedge: +${formatDecimal(incrementGoldQty, 6)} ${ctx.strategy.entryAsset} @ $${formatDecimal(goldPriceUsd, 2)} → ${hedgeLeg.side === "short" ? "sold" : "bought"} ${formatDecimal(hedgedQty, 4)} ${ctx.strategy.hedgeAsset} @ $${formatDecimal(hedgedVwap, 2)} (fee $${formatDecimal(feeThisIncrement, 4)})${attempt > 1 ? ` after ${attempt} attempts` : ""}. ` +
           `Gold leg ${formatDecimal(progress.goldFilledQty, 6)}/${formatDecimal(progress.targetQty, 6)} filled.`,
       )
       .catch(() => undefined);
@@ -1204,7 +1204,7 @@ export async function executeMetalTradeEntry(
       { status: "open", openedAt: new Date() },
     );
     await ctx.notify(
-      `🥇🥈 Gold/silver trade #${tradeId} OPEN ` +
+      `${ctx.strategy.emoji} ${ctx.strategy.label} trade #${tradeId} OPEN ` +
         `(${side === "short_gold_long_silver" ? "SHORT GOLD / LONG SILVER" : "LONG GOLD / SHORT SILVER"}).\n` +
         `Legs filled on Arcus. TP: RSI return to 50 with net >= breakeven + $${ctx.strategyConfig.tpMinNetUsd}. ` +
         `SL: -${ctx.strategyConfig.stopLossMarginPercent}% margin (market).`,
@@ -1279,10 +1279,10 @@ export async function executeMetalTradeEntry(
     );
     const coveredNote =
       progress.silverFilledQty > 1e-9 || progress.goldFilledQty > 1e-9
-        ? ` Covered quantity was market-closed (SLV ${formatDecimal(progress.silverFilledQty, 4)}, GLD ${formatDecimal(progress.goldFilledQty, 6)}).`
+        ? ` Covered quantity was market-closed (${ctx.strategy.hedgeAsset} ${formatDecimal(progress.silverFilledQty, 4)}, ${ctx.strategy.entryAsset} ${formatDecimal(progress.goldFilledQty, 6)}).`
         : "";
     await ctx.notifyUrgent(
-      `🥇🥈 Gold/silver trade #${tradeId} FAILED at entry: ${reason}.${coveredNote}` +
+      `${ctx.strategy.emoji} ${ctx.strategy.label} trade #${tradeId} FAILED at entry: ${reason}.${coveredNote}` +
         (failures.length > 0
           ? `\n🚨 UNVERIFIED CLOSES — POSITIONS MAY STILL BE OPEN ON ARCUS: ${failures.join("; ")}. MANUAL ACTION REQUIRED.`
           : ""),
@@ -1339,7 +1339,7 @@ export async function closeMetalTrade(
   if (!claimed) return; // SL-vs-TP race: exactly one owner wins.
   await ctx
     .notify(
-      `⏳ Closing gold/silver trade #${tradeId} (${reason}, mode: ${mode}). ` +
+      `⏳ Closing ${ctx.strategy.label} trade #${tradeId} (${reason}, mode: ${mode}). ` +
         (mode === "limit"
           ? "Dual limits resting on both legs; the unfilled leg reprices toward the book and falls back to market if the budget is exhausted."
           : "Market close on both legs."),
@@ -1621,7 +1621,7 @@ export async function closeMetalTrade(
     const message = error instanceof Error ? error.message : String(error);
     console.error("Metal trade close failed", { tradeId, reason, message });
     await ctx.notifyUrgent(
-      `🥇🥈 Gold/silver trade #${tradeId} CLOSE FAILED (${reason}): ${message}. ` +
+      `${ctx.strategy.emoji} ${ctx.strategy.label} trade #${tradeId} CLOSE FAILED (${reason}): ${message}. ` +
         "Position may still be open on Arcus — check the exchange.",
     );
     // Leave status 'closing': the stale-closing recovery sweep owns it now.
@@ -1776,7 +1776,7 @@ async function finalizeClosedTrade(
   );
   const net = grossPnl - totalFees;
   await ctx.notify(
-    `🥇🥈 Gold/silver trade #${tradeId} CLOSED (${reason}).\n` +
+    `${ctx.strategy.emoji} ${ctx.strategy.label} trade #${tradeId} CLOSED (${reason}).\n` +
       `Gross PnL: $${formatDecimal(grossPnl, 2)} · Fees: $${formatDecimal(totalFees, 2)} · Net: $${formatDecimal(net, 2)}`,
   );
 }

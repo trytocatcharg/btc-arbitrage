@@ -21,7 +21,12 @@ export type RuntimeSettingKey =
   | "metalLeverage"
   | "metalTpMinNetUsd"
   | "metalMaxEntrySlippageBps"
-  | "metalHedgeRetries";
+  | "metalHedgeRetries"
+  | "etfMarginUsd"
+  | "etfLeverage"
+  | "etfTpMinNetUsd"
+  | "etfMaxEntrySlippageBps"
+  | "etfHedgeRetries";
 
 export interface RuntimeSettingChange {
   key: RuntimeSettingKey;
@@ -41,6 +46,11 @@ export interface RuntimeSettingsBaseline {
   metalTpMinNetUsd: string;
   metalMaxEntrySlippageBps: number;
   metalHedgeRetries: number;
+  etfMarginUsd: string;
+  etfLeverage: number;
+  etfTpMinNetUsd: string;
+  etfMaxEntrySlippageBps: number;
+  etfHedgeRetries: number;
 }
 
 const MAX_COOLDOWN_MINUTES = 10_080; // 7 days
@@ -62,6 +72,11 @@ export function snapshotRuntimeSettings(
     metalTpMinNetUsd: config.goldSilver.tpMinNetUsd,
     metalMaxEntrySlippageBps: config.goldSilver.maxEntrySlippageBps,
     metalHedgeRetries: config.goldSilver.hedgeRetryAttempts,
+    etfMarginUsd: config.spyQqq.marginUsd,
+    etfLeverage: config.spyQqq.leverage,
+    etfTpMinNetUsd: config.spyQqq.tpMinNetUsd,
+    etfMaxEntrySlippageBps: config.spyQqq.maxEntrySlippageBps,
+    etfHedgeRetries: config.spyQqq.hedgeRetryAttempts,
   };
 }
 
@@ -143,29 +158,42 @@ export function applyLeverage(
   };
 }
 
-export function applyMetalMarginUsd(
+/** Shared appliers for the Arcus-pair strategy sections (goldSilver /
+ * spyQqq). The thin exported wrappers below pin each operator-facing
+ * label ("Metal" / "ETF") and the persistence key, so the metals
+ * summaries stay byte-identical. */
+type ArcusPairSection = "goldSilver" | "spyQqq";
+
+function applyPairMarginUsd(
   config: BotConfig,
+  section: ArcusPairSection,
+  key: RuntimeSettingKey,
+  label: string,
   valueUsd: number,
 ): RuntimeSettingChange {
   if (!Number.isFinite(valueUsd) || valueUsd <= 0 || valueUsd > MAX_USD_VALUE) {
     throw new Error("Margin must be between 0 and 10000 USD.");
   }
-  config.goldSilver.marginUsd = valueUsd.toFixed(2);
-  // Unlike the BTC openTrade section, the metal trade derives its notional
+  const cfg = config[section];
+  cfg.marginUsd = valueUsd.toFixed(2);
+  // Unlike the BTC openTrade section, the pair trade derives its notional
   // at ENTRY time (createMetalTrade: margin x leverage, then Arcus
   // preflight), so there is no notionalUsd field to recompute here — the
-  // override applies to the next /ratio open.
+  // override applies to the next /ratio / /etf open.
   return {
-    key: "metalMarginUsd",
+    key,
     summary:
-      `Metal trade margin: $${valueUsd.toFixed(2)} per leg ` +
-      `(notional $${(valueUsd * config.goldSilver.leverage).toFixed(2)} ` +
-      `at ${config.goldSilver.leverage}x)`,
+      `${label} trade margin: $${valueUsd.toFixed(2)} per leg ` +
+      `(notional $${(valueUsd * cfg.leverage).toFixed(2)} ` +
+      `at ${cfg.leverage}x)`,
   };
 }
 
-export function applyMetalLeverage(
+function applyPairLeverage(
   config: BotConfig,
+  section: ArcusPairSection,
+  key: RuntimeSettingKey,
+  label: string,
   leverage: number,
 ): RuntimeSettingChange {
   if (
@@ -175,84 +203,164 @@ export function applyMetalLeverage(
   ) {
     throw new Error(`Leverage must be an integer between 1 and ${MAX_LEVERAGE}.`);
   }
-  config.goldSilver.leverage = leverage;
+  const cfg = config[section];
+  cfg.leverage = leverage;
   // No exchange write here: createMetalTrade runs validateExecutionPreflight
   // against Arcus with this leverage at the next entry, so an unsupported
   // value fails closed there instead of mutating the account now.
   return {
-    key: "metalLeverage",
+    key,
     summary:
-      `Metal trade leverage: ${leverage}x ` +
-      `(notional $${(Number(config.goldSilver.marginUsd) * leverage).toFixed(2)} per leg ` +
-      `with margin $${Number(config.goldSilver.marginUsd).toFixed(2)})`,
+      `${label} trade leverage: ${leverage}x ` +
+      `(notional $${(Number(cfg.marginUsd) * leverage).toFixed(2)} per leg ` +
+      `with margin $${Number(cfg.marginUsd).toFixed(2)})`,
   };
 }
 
-export function applyMetalTpMinNetUsd(
+function applyPairTpMinNetUsd(
   config: BotConfig,
+  section: ArcusPairSection,
+  key: RuntimeSettingKey,
+  label: string,
   valueUsd: number,
 ): RuntimeSettingChange {
   if (!Number.isFinite(valueUsd) || valueUsd <= 0 || valueUsd > MAX_USD_VALUE) {
     throw new Error("TP floor must be between 0 and 10000 USD.");
   }
-  config.goldSilver.tpMinNetUsd = valueUsd.toFixed(2);
+  config[section].tpMinNetUsd = valueUsd.toFixed(2);
   // Feeds BOTH profit paths evaluated every tick: the limit TP
   // (net ≥ breakeven + floor) and the /trade armed market close
   // (threshold snapshotted from this value at arm time).
   return {
-    key: "metalTpMinNetUsd",
-    summary: `Metal TP floor: +$${valueUsd.toFixed(2)} net over breakeven`,
+    key,
+    summary: `${label} TP floor: +$${valueUsd.toFixed(2)} net over breakeven`,
   };
 }
 
 /** Max entry slippage ceiling, same as the env parse: the value must stay
  * under the Arcus 10%-of-mark hard bound that rejects out-of-band market
  * bounds. */
-const MAX_METAL_ENTRY_SLIPPAGE_BPS = 950;
-const MAX_METAL_HEDGE_RETRIES = 10;
+const MAX_PAIR_ENTRY_SLIPPAGE_BPS = 950;
+const MAX_PAIR_HEDGE_RETRIES = 10;
 
-export function applyMetalMaxEntrySlippageBps(
+function applyPairMaxEntrySlippageBps(
   config: BotConfig,
+  section: ArcusPairSection,
+  key: RuntimeSettingKey,
+  label: string,
   bps: number,
 ): RuntimeSettingChange {
   if (
     !Number.isInteger(bps) ||
     bps < 1 ||
-    bps > MAX_METAL_ENTRY_SLIPPAGE_BPS
+    bps > MAX_PAIR_ENTRY_SLIPPAGE_BPS
   ) {
     throw new Error(
-      `Metal max entry slippage must be an integer between 1 and ${MAX_METAL_ENTRY_SLIPPAGE_BPS} bps.`,
+      `${label} max entry slippage must be an integer between 1 and ${MAX_PAIR_ENTRY_SLIPPAGE_BPS} bps.`,
     );
   }
-  config.goldSilver.maxEntrySlippageBps = bps;
-  // Consumed by BOTH metal-entry-orderbook-gate consumers: the
-  // createMetalTrade order-book gate (book-walk slippage + SLV taker fee +
-  // GLD maker fee ceiling that refuses the entry) and the hedge order price
-  // bound (touch ∓ this many bps) in hedgeIncrement.
+  config[section].maxEntrySlippageBps = bps;
+  // Consumed by BOTH orderbook-gate consumers: the createMetalTrade
+  // order-book gate (book-walk slippage + hedge taker fee + entry maker
+  // fee ceiling that refuses the entry) and the hedge order price bound
+  // (touch ∓ this many bps) in hedgeIncrement.
   return {
-    key: "metalMaxEntrySlippageBps",
-    summary: `Metal max entry slippage: ${bps} bps (order-book gate + hedge bound)`,
+    key,
+    summary: `${label} max entry slippage: ${bps} bps (order-book gate + hedge bound)`,
   };
+}
+
+function applyPairHedgeRetries(
+  config: BotConfig,
+  section: ArcusPairSection,
+  key: RuntimeSettingKey,
+  label: string,
+  attempts: number,
+): RuntimeSettingChange {
+  if (
+    !Number.isInteger(attempts) ||
+    attempts < 1 ||
+    attempts > MAX_PAIR_HEDGE_RETRIES
+  ) {
+    throw new Error(
+      `${label} hedge retries must be an integer between 1 and ${MAX_PAIR_HEDGE_RETRIES}.`,
+    );
+  }
+  config[section].hedgeRetryAttempts = attempts;
+  return {
+    key,
+    summary: `${label} hedge retries: ${attempts} attempts`,
+  };
+}
+
+export function applyMetalMarginUsd(
+  config: BotConfig,
+  valueUsd: number,
+): RuntimeSettingChange {
+  return applyPairMarginUsd(config, "goldSilver", "metalMarginUsd", "Metal", valueUsd);
+}
+
+export function applyMetalLeverage(
+  config: BotConfig,
+  leverage: number,
+): RuntimeSettingChange {
+  return applyPairLeverage(config, "goldSilver", "metalLeverage", "Metal", leverage);
+}
+
+export function applyMetalTpMinNetUsd(
+  config: BotConfig,
+  valueUsd: number,
+): RuntimeSettingChange {
+  return applyPairTpMinNetUsd(config, "goldSilver", "metalTpMinNetUsd", "Metal", valueUsd);
+}
+
+export function applyMetalMaxEntrySlippageBps(
+  config: BotConfig,
+  bps: number,
+): RuntimeSettingChange {
+  return applyPairMaxEntrySlippageBps(config, "goldSilver", "metalMaxEntrySlippageBps", "Metal", bps);
 }
 
 export function applyMetalHedgeRetries(
   config: BotConfig,
   attempts: number,
 ): RuntimeSettingChange {
-  if (
-    !Number.isInteger(attempts) ||
-    attempts < 1 ||
-    attempts > MAX_METAL_HEDGE_RETRIES
-  ) {
-    throw new Error(
-      `Metal hedge retries must be an integer between 1 and ${MAX_METAL_HEDGE_RETRIES}.`,
-    );
-  }
-  config.goldSilver.hedgeRetryAttempts = attempts;
-  return {
-    key: "metalHedgeRetries",
-    summary: `Metal hedge retries: ${attempts} attempts`,
-  };
+  return applyPairHedgeRetries(config, "goldSilver", "metalHedgeRetries", "Metal", attempts);
+}
+
+export function applyEtfMarginUsd(
+  config: BotConfig,
+  valueUsd: number,
+): RuntimeSettingChange {
+  return applyPairMarginUsd(config, "spyQqq", "etfMarginUsd", "ETF", valueUsd);
+}
+
+export function applyEtfLeverage(
+  config: BotConfig,
+  leverage: number,
+): RuntimeSettingChange {
+  return applyPairLeverage(config, "spyQqq", "etfLeverage", "ETF", leverage);
+}
+
+export function applyEtfTpMinNetUsd(
+  config: BotConfig,
+  valueUsd: number,
+): RuntimeSettingChange {
+  return applyPairTpMinNetUsd(config, "spyQqq", "etfTpMinNetUsd", "ETF", valueUsd);
+}
+
+export function applyEtfMaxEntrySlippageBps(
+  config: BotConfig,
+  bps: number,
+): RuntimeSettingChange {
+  return applyPairMaxEntrySlippageBps(config, "spyQqq", "etfMaxEntrySlippageBps", "ETF", bps);
+}
+
+export function applyEtfHedgeRetries(
+  config: BotConfig,
+  attempts: number,
+): RuntimeSettingChange {
+  return applyPairHedgeRetries(config, "spyQqq", "etfHedgeRetries", "ETF", attempts);
 }
 
 export function applyAutoConfirm(
@@ -333,5 +441,18 @@ export function isRuntimeSettingOverridden(
       );
     case "metalHedgeRetries":
       return config.goldSilver.hedgeRetryAttempts !== baseline.metalHedgeRetries;
+    case "etfMarginUsd":
+      return config.spyQqq.marginUsd !== baseline.etfMarginUsd;
+    case "etfLeverage":
+      return config.spyQqq.leverage !== baseline.etfLeverage;
+    case "etfTpMinNetUsd":
+      return config.spyQqq.tpMinNetUsd !== baseline.etfTpMinNetUsd;
+    case "etfMaxEntrySlippageBps":
+      return (
+        config.spyQqq.maxEntrySlippageBps !==
+        baseline.etfMaxEntrySlippageBps
+      );
+    case "etfHedgeRetries":
+      return config.spyQqq.hedgeRetryAttempts !== baseline.etfHedgeRetries;
   }
 }

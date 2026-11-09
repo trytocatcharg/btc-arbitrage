@@ -51,6 +51,11 @@ import { DbPreviewStore } from "../trading/db-preview-store.js";
 import {
   applyAutoConfirm,
   applyCooldownMinutes,
+  applyEtfLeverage,
+  applyEtfMarginUsd,
+  applyEtfHedgeRetries,
+  applyEtfMaxEntrySlippageBps,
+  applyEtfTpMinNetUsd,
   applyLeverage,
   applyMarginUsd,
   applyMetalLeverage,
@@ -198,6 +203,11 @@ export class TelegramCommandPoller {
     | "metalTpFloor"
     | "metalMaxSlippage"
     | "metalHedgeRetries"
+    | "etfMargin"
+    | "etfLeverage"
+    | "etfTpFloor"
+    | "etfMaxSlippage"
+    | "etfHedgeRetries"
     | null = null;
 
   constructor(
@@ -546,6 +556,21 @@ export class TelegramCommandPoller {
           case "metalHedgeRetries":
             change = applyMetalHedgeRetries(this.config, value);
             break;
+          case "etfMargin":
+            change = applyEtfMarginUsd(this.config, value);
+            break;
+          case "etfLeverage":
+            change = applyEtfLeverage(this.config, value);
+            break;
+          case "etfTpFloor":
+            change = applyEtfTpMinNetUsd(this.config, value);
+            break;
+          case "etfMaxSlippage":
+            change = applyEtfMaxEntrySlippageBps(this.config, value);
+            break;
+          case "etfHedgeRetries":
+            change = applyEtfHedgeRetries(this.config, value);
+            break;
         }
       } catch (validationError) {
         // Invalid value: keep the prompt open so the operator can retry.
@@ -564,10 +589,12 @@ export class TelegramCommandPoller {
       const exchangeSyncNote =
         kind === "leverage" ? "\n(exchange leverage updated)" : "";
       // Land back on the submenu the setting came from (Arbitrage vs
-      // Metals) so the operator can keep tuning without re-opening /config.
-      const appliedMarkup =
-        kind.startsWith("metal")
-          ? { inline_keyboard: CONFIG_METALS_BUTTONS }
+      // Metals vs ETFs) so the operator can keep tuning without re-opening
+      // /config.
+      const appliedMarkup = kind.startsWith("metal")
+        ? { inline_keyboard: CONFIG_METALS_BUTTONS }
+        : kind.startsWith("etf")
+          ? { inline_keyboard: CONFIG_ETFS_BUTTONS }
           : { inline_keyboard: CONFIG_ARBITRAGE_BUTTONS };
       await this.sendMessage(
         `✅ ${change.summary}${persistNote}${exchangeSyncNote}`,
@@ -614,22 +641,23 @@ export class TelegramCommandPoller {
             },
           );
         }
-      } else if (data === "cfg:arb" || data === "cfg:metals") {
+      } else if (data === "cfg:arb" || data === "cfg:metals" || data === "cfg:etfs") {
         // Submenu navigation: entering a strategy menu cancels any
         // pending value prompt so a stale prompt never swallows the next
         // typed message.
         this.pendingSettingPrompt = null;
-        const isArbitrage = data === "cfg:arb";
+        const submenu =
+          data === "cfg:arb"
+            ? { heading: "₿ Arbitrage settings", buttons: CONFIG_ARBITRAGE_BUTTONS }
+            : data === "cfg:metals"
+              ? { heading: "🥇 Metals settings", buttons: CONFIG_METALS_BUTTONS }
+              : { heading: "📈 ETFs (SPY/QQQ) settings", buttons: CONFIG_ETFS_BUTTONS };
         const messageId = callback.message?.message_id;
         if (typeof messageId === "number") {
           await this.editMessageText(
             messageId,
-            isArbitrage ? "₿ Arbitrage settings" : "🥇 Metals settings",
-            {
-              inline_keyboard: isArbitrage
-                ? CONFIG_ARBITRAGE_BUTTONS
-                : CONFIG_METALS_BUTTONS,
-            },
+            submenu.heading,
+            { inline_keyboard: submenu.buttons },
           ).catch((error: unknown) => {
             console.warn("Telegram config-submenu edit failed", {
               messageId,
@@ -869,6 +897,100 @@ export class TelegramCommandPoller {
             SETTING_CANCEL_MARKUP,
           ).catch((error: unknown) => {
             console.warn("Telegram metal-hedge-retries-prompt edit failed", {
+              messageId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
+      } else if (data === "set:etfmargin") {
+        this.pendingSettingPrompt = "etfMargin";
+        const messageId = callback.message?.message_id;
+        if (typeof messageId === "number") {
+          await this.editMessageText(
+            messageId,
+            `Send me the new ETF TRADE (SPY/QQQ) margin per leg in USD (e.g. 20). ` +
+              `The notional derives as margin × leverage ` +
+              `(${this.config.spyQqq.leverage}x) at the next /etf open.`,
+            SETTING_CANCEL_MARKUP,
+          ).catch((error: unknown) => {
+            console.warn("Telegram etf-margin-prompt edit failed", {
+              messageId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
+      } else if (data === "set:etfleverage") {
+        this.pendingSettingPrompt = "etfLeverage";
+        const messageId = callback.message?.message_id;
+        if (typeof messageId === "number") {
+          await this.editMessageText(
+            messageId,
+            "Send me the new ETF TRADE (SPY/QQQ) leverage (integer between 1 and 50). " +
+              "Arcus validates it at the next /etf open; the current ETF " +
+              `margin is $${Number(this.config.spyQqq.marginUsd).toFixed(2)} per leg.`,
+            SETTING_CANCEL_MARKUP,
+          ).catch((error: unknown) => {
+            console.warn("Telegram etf-leverage-prompt edit failed", {
+              messageId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
+      } else if (data === "set:etftpfloor") {
+        this.pendingSettingPrompt = "etfTpFloor";
+        const messageId = callback.message?.message_id;
+        if (typeof messageId === "number") {
+          await this.editMessageText(
+            messageId,
+            "Send me the new ETF TRADE (SPY/QQQ) TP floor in USD (e.g. 10). " +
+              "The trade takes profit when net PnL reaches breakeven + this " +
+              "floor (limit TP), and the /trade armed market close snapshots " +
+              "this value at arm time.",
+            SETTING_CANCEL_MARKUP,
+          ).catch((error: unknown) => {
+            console.warn("Telegram etf-tp-floor-prompt edit failed", {
+              messageId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
+      } else if (data === "set:etfmaxslip") {
+        this.pendingSettingPrompt = "etfMaxSlippage";
+        const messageId = callback.message?.message_id;
+        if (typeof messageId === "number") {
+          await this.editMessageText(
+            messageId,
+            "📉 Max entry slippage (basis points; 100 bps = 1%).\n" +
+              "Before opening an ETF trade the bot simulates the QQQ market " +
+              "hedge against the LIVE order book; if the estimated entry cost " +
+              "(spread walk + QQQ taker fee + SPY maker fee) exceeds this " +
+              "many bps, the entry is REFUSED. The same value caps the hedge " +
+              "order price (touch ∓ this many bps).\n" +
+              "Lower = stricter: fewer entries, but you never start in the " +
+              "red. Sane range 20–60 (default 40). Reply with a number (e.g. " +
+              "40), or tap /config to cancel.",
+            SETTING_CANCEL_MARKUP,
+          ).catch((error: unknown) => {
+            console.warn("Telegram etf-max-slippage-prompt edit failed", {
+              messageId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
+      } else if (data === "set:etfhedgeretries") {
+        this.pendingSettingPrompt = "etfHedgeRetries";
+        const messageId = callback.message?.message_id;
+        if (typeof messageId === "number") {
+          await this.editMessageText(
+            messageId,
+            "🔁 Hedge retries (1–10, default 3).\n" +
+              "How many times the bot re-tries the QQQ hedge (fresh price " +
+              "bound each attempt) when the bounded market order comes back " +
+              "unfilled before aborting the entry. Reply with a number, or " +
+              "tap /config to cancel.",
+            SETTING_CANCEL_MARKUP,
+          ).catch((error: unknown) => {
+            console.warn("Telegram etf-hedge-retries-prompt edit failed", {
               messageId,
               message: error instanceof Error ? error.message : String(error),
             });
@@ -2125,9 +2247,9 @@ export class TelegramCommandPoller {
       const activeMetal = await loadActiveMetalTrade({ db: this.db });
       if (activeMetal) {
         await this.sendMessage(
-          `⛔ Cannot prepare ${request.symbol}: a gold/silver trade is active ` +
+          `⛔ Cannot prepare ${request.symbol}: an Arcus-pair trade is active ` +
             `(#${activeMetal.id}, ${activeMetal.status}) and this row uses Arcus. ` +
-            "Close the metal trade first.",
+            "Close it first (only one metal/ETF trade can be open at a time).",
         );
         return;
       }
@@ -2242,7 +2364,7 @@ export class TelegramCommandPoller {
         if (typeof messageId === "number") {
           await this.editMessageText(
             messageId,
-            `⛔ Confirm refused: a gold/silver trade is active ` +
+            `⛔ Confirm refused: an Arcus-pair trade is active ` +
               `(#${activeMetal.id}, ${activeMetal.status}) and this trade ` +
               "uses Arcus. Preview cancelled.",
           ).catch((error: unknown) => {
@@ -2760,6 +2882,7 @@ const CONFIG_ROOT_BUTTONS = [
     { text: "₿ Arbitrage", callback_data: "cfg:arb" },
     { text: "🥇 Metals", callback_data: "cfg:metals" },
   ],
+  [{ text: "📈 ETFs (SPY/QQQ)", callback_data: "cfg:etfs" }],
 ] as const;
 
 const CONFIG_ARBITRAGE_BUTTONS = [
@@ -2783,6 +2906,19 @@ const CONFIG_METALS_BUTTONS = [
   [
     { text: "📉 Max entry slippage 🥇", callback_data: "set:metalmaxslip" },
     { text: "🔁 Hedge retries 🥇", callback_data: "set:metalhedgeretries" },
+  ],
+  [CONFIG_BACK_BUTTON],
+] as const;
+
+const CONFIG_ETFS_BUTTONS = [
+  [
+    { text: "💰 Margin 📈", callback_data: "set:etfmargin" },
+    { text: "⚡️ Leverage 📈", callback_data: "set:etfleverage" },
+  ],
+  [{ text: "🎯 TP floor 📈", callback_data: "set:etftpfloor" }],
+  [
+    { text: "📉 Max entry slippage 📈", callback_data: "set:etfmaxslip" },
+    { text: "🔁 Hedge retries 📈", callback_data: "set:etfhedgeretries" },
   ],
   [CONFIG_BACK_BUTTON],
 ] as const;
@@ -3033,8 +3169,26 @@ export function formatActiveConfigSummary(
   const metalHedgeRetriesOverridden =
     baseline != null &&
     isRuntimeSettingOverridden("metalHedgeRetries", baseline, config);
+  const etfMarginOverridden =
+    baseline != null &&
+    isRuntimeSettingOverridden("etfMarginUsd", baseline, config);
+  const etfLeverageOverridden =
+    baseline != null &&
+    isRuntimeSettingOverridden("etfLeverage", baseline, config);
+  const etfTpFloorOverridden =
+    baseline != null &&
+    isRuntimeSettingOverridden("etfTpMinNetUsd", baseline, config);
+  const etfMaxSlippageOverridden =
+    baseline != null &&
+    isRuntimeSettingOverridden("etfMaxEntrySlippageBps", baseline, config);
+  const etfHedgeRetriesOverridden =
+    baseline != null &&
+    isRuntimeSettingOverridden("etfHedgeRetries", baseline, config);
   const metalNotional = (
     Number(config.goldSilver.marginUsd) * config.goldSilver.leverage
+  ).toFixed(2);
+  const etfNotional = (
+    Number(config.spyQqq.marginUsd) * config.spyQqq.leverage
   ).toFixed(2);
   const lines = [
     "⚙️ Active bot configuration",
@@ -3062,6 +3216,15 @@ export function formatActiveConfigSummary(
     `  Max entry slippage: ${config.goldSilver.maxEntrySlippageBps} bps (order-book gate)${metalMaxSlippageOverridden ? " *" : ""}`,
     `  Hedge retries: ${config.goldSilver.hedgeRetryAttempts}${metalHedgeRetriesOverridden ? " *" : ""}`,
     `  SL: -${config.goldSilver.stopLossMarginPercent}% of total margin · Time-stop: ${config.goldSilver.timeStopHours}h`,
+    "",
+    "SPY/QQQ ETF trade (Arcus SPY/QQQ perps):",
+    `  Margin: $${formatUsd(config.spyQqq.marginUsd)} per leg (notional $${etfNotional} at ${config.spyQqq.leverage}x)${etfMarginOverridden ? " *" : ""}`,
+    `  Leverage: ${config.spyQqq.leverage}x${etfLeverageOverridden ? " *" : ""}`,
+    `  RSI(${config.spyQqq.rsiPeriod}) band ±${config.spyQqq.rsiConfirmBand} · ${config.spyQqq.candleTimeframe} candles`,
+    `  TP floor: breakeven + $${formatUsd(config.spyQqq.tpMinNetUsd)} net (evaluated every tick)${etfTpFloorOverridden ? " *" : ""}`,
+    `  Max entry slippage: ${config.spyQqq.maxEntrySlippageBps} bps (order-book gate)${etfMaxSlippageOverridden ? " *" : ""}`,
+    `  Hedge retries: ${config.spyQqq.hedgeRetryAttempts}${etfHedgeRetriesOverridden ? " *" : ""}`,
+    `  SL: -${config.spyQqq.stopLossMarginPercent}% of total margin · Time-stop: ${config.spyQqq.timeStopHours}h`,
   ];
   if (
     minSpreadOverridden ||
@@ -3074,7 +3237,12 @@ export function formatActiveConfigSummary(
     metalLeverageOverridden ||
     metalTpFloorOverridden ||
     metalMaxSlippageOverridden ||
-    metalHedgeRetriesOverridden
+    metalHedgeRetriesOverridden ||
+    etfMarginOverridden ||
+    etfLeverageOverridden ||
+    etfTpFloorOverridden ||
+    etfMaxSlippageOverridden ||
+    etfHedgeRetriesOverridden
   ) {
     lines.push("", "(* adjusted at runtime — does not persist across restarts)");
   }

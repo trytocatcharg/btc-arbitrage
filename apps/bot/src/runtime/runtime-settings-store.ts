@@ -6,6 +6,11 @@ import { sql } from "drizzle-orm";
 import {
   applyAutoConfirm,
   applyCooldownMinutes,
+  applyEtfHedgeRetries,
+  applyEtfLeverage,
+  applyEtfMarginUsd,
+  applyEtfMaxEntrySlippageBps,
+  applyEtfTpMinNetUsd,
   applyLeverage,
   applyMarginUsd,
   applyMetalHedgeRetries,
@@ -50,6 +55,16 @@ function readSettingValue(config: BotConfig, key: RuntimeSettingKey): string {
       return String(config.goldSilver.maxEntrySlippageBps);
     case "metalHedgeRetries":
       return String(config.goldSilver.hedgeRetryAttempts);
+    case "etfMarginUsd":
+      return config.spyQqq.marginUsd;
+    case "etfLeverage":
+      return String(config.spyQqq.leverage);
+    case "etfTpMinNetUsd":
+      return config.spyQqq.tpMinNetUsd;
+    case "etfMaxEntrySlippageBps":
+      return String(config.spyQqq.maxEntrySlippageBps);
+    case "etfHedgeRetries":
+      return String(config.spyQqq.hedgeRetryAttempts);
   }
 }
 
@@ -92,7 +107,12 @@ function parseStoredValue(
     case "metalLeverage":
     case "metalTpMinNetUsd":
     case "metalMaxEntrySlippageBps":
-    case "metalHedgeRetries": {
+    case "metalHedgeRetries":
+    case "etfMarginUsd":
+    case "etfLeverage":
+    case "etfTpMinNetUsd":
+    case "etfMaxEntrySlippageBps":
+    case "etfHedgeRetries": {
       const value = Number(raw);
       return Number.isFinite(value) ? value : null;
     }
@@ -133,6 +153,11 @@ export async function applyPersistedRuntimeOverrides(
       "metalTpMinNetUsd",
       "metalMaxEntrySlippageBps",
       "metalHedgeRetries",
+      "etfMarginUsd",
+      "etfLeverage",
+      "etfTpMinNetUsd",
+      "etfMaxEntrySlippageBps",
+      "etfHedgeRetries",
     ];
     if (!knownKeys.includes(key)) {
       console.warn("Skipping unknown persisted runtime override", {
@@ -195,6 +220,21 @@ export async function applyPersistedRuntimeOverrides(
           break;
         case "metalHedgeRetries":
           changes.push(applyMetalHedgeRetries(config, value as number));
+          break;
+        case "etfMarginUsd":
+          changes.push(applyEtfMarginUsd(config, value as number));
+          break;
+        case "etfLeverage":
+          changes.push(applyEtfLeverage(config, value as number));
+          break;
+        case "etfTpMinNetUsd":
+          changes.push(applyEtfTpMinNetUsd(config, value as number));
+          break;
+        case "etfMaxEntrySlippageBps":
+          changes.push(applyEtfMaxEntrySlippageBps(config, value as number));
+          break;
+        case "etfHedgeRetries":
+          changes.push(applyEtfHedgeRetries(config, value as number));
           break;
       }
     } catch (error) {
