@@ -8,6 +8,7 @@ import {
   parseDecimal,
   formatDecimal,
   type ArcusPairSide,
+  type ArcusPairSymbol,
 } from "@btc-arbitrage/domain";
 import {
   activeTradeStatuses,
@@ -42,6 +43,7 @@ export interface MetalTradeContext {
 
 export interface MetalTradeRow {
   id: number;
+  symbol: ArcusPairSymbol;
   status: (typeof activeTradeStatuses)[number];
   side: ArcusPairSide;
   openedAt: Date | null;
@@ -65,6 +67,7 @@ export async function loadActiveMetalTrade(
   const rows = await ctx.db
     .select({
       id: trades.id,
+      symbol: trades.symbol,
       status: trades.status,
       openedAt: trades.openedAt,
       raw: trades.raw,
@@ -91,6 +94,7 @@ export async function loadActiveMetalTrade(
     shortQty < longQty ? "short_gold_long_silver" : "long_gold_short_silver";
   return {
     id: first.id,
+    symbol: first.symbol as ArcusPairSymbol,
     status: first.status,
     side,
     openedAt: first.openedAt,

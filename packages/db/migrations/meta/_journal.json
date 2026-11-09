@@ -64,6 +64,13 @@
       "when": 1794364800000,
       "tag": "0008_trade_raw",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "5",
+      "when": 1794231410102,
+      "tag": "0009_ratio_snapshots_pair_symbol",
+      "breakpoints": true
     }
   ]
 }

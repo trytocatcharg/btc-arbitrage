@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 import {
   findTradingPair,
   GOLD_SILVER_SYMBOL,
+  SPYQQQ_SYMBOL,
   isArcusPairSymbol,
   parseDecimal,
   TRADING_PAIRS,
@@ -82,6 +83,7 @@ import {
   ARCUS_PAIR_STRATEGIES,
   requireArcusPairStrategy,
   resolveArcusPairConfig,
+  type ArcusPairStrategySpec,
 } from "../metal-ratio/arcus-pair-strategies.js";
 import { manualMarketCloseTrade } from "../trading/manual-trade-close.js";
 import { renderMetalRatioChart } from "../metal-ratio/metal-ratio-chart.js";
@@ -175,6 +177,10 @@ const AVAILABLE_COMMANDS = [
   {
     command: "ratio",
     description: "Gold/silver ratio chart + RSI (on-demand metal trade)",
+  },
+  {
+    command: "etf",
+    description: "SPY/QQQ ratio chart + RSI (on-demand ETF trade)",
   },
 ] as const;
 
@@ -387,7 +393,14 @@ export class TelegramCommandPoller {
       }
 
       if (isTelegramCommand(text, "ratio")) {
-        await this.handleRatioChartCommand();
+        await this.handlePairChartCommand(
+          ARCUS_PAIR_STRATEGIES[GOLD_SILVER_SYMBOL],
+        );
+        return;
+      }
+
+      if (isTelegramCommand(text, "etf")) {
+        await this.handlePairChartCommand(ARCUS_PAIR_STRATEGIES[SPYQQQ_SYMBOL]);
         return;
       }
 
@@ -1259,21 +1272,19 @@ export class TelegramCommandPoller {
             this.control.requestRestart();
           }
         }
-      } else if (data.startsWith("metaltrade:open:")) {
-        // One-click open of a gold/silver pair trade from the /ratio
+      } else if (data.startsWith("pairtrade:open:")) {
+        // One-click open of an Arcus-pair trade from the /ratio or /etf
         // chart. Same contract as the BTC one-click: create + confirm are
         // one action, entry runs on the serial execution queue.
-        const side = data.slice("metaltrade:open:".length);
+        const payload = data.slice("pairtrade:open:".length);
+        const symbolPart = payload.slice(0, payload.indexOf(":"));
+        const side = payload.slice(payload.indexOf(":") + 1);
         const messageId = callback.message?.message_id;
-        const validSide: ArcusPairSide =
-          side === "long_gold_short_silver"
-            ? "long_gold_short_silver"
-            : "short_gold_long_silver";
         const reply = async (text: string) => {
           if (typeof messageId === "number") {
             await this.editMessageText(messageId, text).catch(
               (error: unknown) => {
-                console.warn("Telegram metal-open edit failed", {
+                console.warn("Telegram pair-open edit failed", {
                   messageId,
                   message:
                     error instanceof Error ? error.message : String(error),
@@ -1282,6 +1293,17 @@ export class TelegramCommandPoller {
             );
           }
         };
+        let strategy: ArcusPairStrategySpec;
+        try {
+          strategy = requireArcusPairStrategy(symbolPart);
+        } catch {
+          await reply(`❌ Unknown pair strategy: ${symbolPart}`);
+          return;
+        }
+        const validSide: ArcusPairSide =
+          side === "long_gold_short_silver"
+            ? "long_gold_short_silver"
+            : "short_gold_long_silver";
         let arcusExecution = this.registry.get("arcus").execution;
         if (!arcusExecution) {
           await reply(
@@ -1290,7 +1312,7 @@ export class TelegramCommandPoller {
           return;
         }
         try {
-          const metalCtx = {
+          const pairCtx = {
             db: this.db,
             config: this.config,
             execution: arcusExecution,
@@ -1300,18 +1322,18 @@ export class TelegramCommandPoller {
             notifyUrgent: async (text: string) => {
               await this.sendMessage(text);
             },
-            strategy: ARCUS_PAIR_STRATEGIES[GOLD_SILVER_SYMBOL],
-            strategyConfig: this.config.goldSilver,
+            strategy,
+            strategyConfig: resolveArcusPairConfig(this.config, strategy.symbol),
           };
-          const tradeId = await createMetalTrade(metalCtx, validSide);
+          const tradeId = await createMetalTrade(pairCtx, validSide);
           await reply(
-            `⏳ Opening gold/silver trade ${tradeId}...\n` +
-              "Passive limit on GLD + immediate market hedge on SLV. " +
-              `This can take up to ~${Math.round(this.config.goldSilver.limitTimeoutMs / 1000)}s.`,
+            `⏳ Opening ${strategy.label} trade ${tradeId}...\n` +
+              `Passive limit on ${strategy.entryAsset} + immediate market hedge on ${strategy.hedgeAsset}. ` +
+              `This can take up to ~${Math.round(pairCtx.strategyConfig.limitTimeoutMs / 1000)}s.`,
           );
           this.executionQueue.enqueue({
-            description: `metal-open:${tradeId}`,
-            run: () => executeMetalTradeEntry(metalCtx, tradeId),
+            description: `pair-open:${tradeId}`,
+            run: () => executeMetalTradeEntry(pairCtx, tradeId),
           });
         } catch (error) {
           await reply(
@@ -2568,47 +2590,55 @@ export class TelegramCommandPoller {
   private async buildFillSummary(token: string): Promise<string> {
     return buildTradeOpenedSummary(this.db, token);
   }
-  /** /ratio — renders the GOLDSILVER ratio candle chart + RSI panel from
-   * Yahoo futures data (GC=F/SI=F ≈ TVC:GOLDSILVER at ~99.6%) and sends it
-   * as a photo with one-click open buttons for both directions plus the
-   * strategy's suggested side (RSI vs 50 with the configured band).
-   * Available ANYTIME, regardless of the active spread pair
-   * (gold-silver-decouple). While a metal trade is active the chart still
-   * renders but the open buttons are hidden (one metal trade at a time). */
-  private async handleRatioChartCommand(): Promise<void> {
+  /** /ratio and /etf — renders the strategy's ratio candle chart + RSI
+   * panel from Yahoo data and sends it as a photo with one-click open
+   * buttons for both directions plus the strategy's suggested side (RSI
+   * vs 50 with the configured band). Available ANYTIME, regardless of the
+   * active spread pair (gold-silver-decouple). While ANY Arcus-pair trade
+   * is active (global single-trade slot) the chart still renders but the
+   * open buttons are hidden. */
+  private async handlePairChartCommand(
+    strategy: ArcusPairStrategySpec,
+  ): Promise<void> {
     try {
-      const activeMetalTrade = await loadActiveMetalTrade({ db: this.db });
-      const timeframe = this.config.goldSilver.candleTimeframe;
-      const series = await loadYahooRatioBuckets({ timeframe });
+      const strategyConfig = resolveArcusPairConfig(this.config, strategy.symbol);
+      const activePairTrade = await loadActiveMetalTrade({ db: this.db });
+      const timeframe = strategyConfig.candleTimeframe;
+      const series = await loadYahooRatioBuckets({
+        symbols: strategy.yahooSymbols,
+        timeframe,
+      });
       const closes = series.buckets.map((bucket) => bucket.close);
-      const lastRsi = computeRsi(closes, this.config.goldSilver.rsiPeriod);
+      const lastRsi = computeRsi(closes, strategyConfig.rsiPeriod);
       const side = lastRsi
-        ? rsiToSide(lastRsi, this.config.goldSilver.rsiConfirmBand)
+        ? rsiToSide(lastRsi, strategyConfig.rsiConfirmBand)
         : undefined;
       const lastClose = series.buckets[series.buckets.length - 1].close;
 
       const chart = await renderMetalRatioChart({
         buckets: series.buckets,
         timeframe,
-        rsiPeriod: this.config.goldSilver.rsiPeriod,
-        title: "GOLDSILVER (Yahoo GC=F/SI=F)",
+        rsiPeriod: strategyConfig.rsiPeriod,
+        title: `${strategy.symbol} (Yahoo ${strategy.yahooSymbols.join("/")})`,
         live: lastRsi ? { rsi: lastRsi, side, ratio: lastClose } : undefined,
       });
 
+      const longEntryLabel = `LONG ${strategy.entryAsset} / SHORT ${strategy.hedgeAsset}`;
+      const shortEntryLabel = `SHORT ${strategy.entryAsset} / LONG ${strategy.hedgeAsset}`;
       const suggestion = side
-        ? `Strategy suggests: ${side === "short_gold_long_silver" ? "SHORT GOLD / LONG SILVER" : "LONG GOLD / SHORT SILVER"} (RSI ${Number(lastRsi).toFixed(1)} vs 50)`
+        ? `Strategy suggests: ${side === "short_gold_long_silver" ? shortEntryLabel : longEntryLabel} (RSI ${Number(lastRsi).toFixed(1)} vs 50)`
         : `No suggestion: RSI ${lastRsi ? Number(lastRsi).toFixed(1) : "n/d"} is inside the confirmation band around 50`;
-      const activeNote = activeMetalTrade
-        ? `⚠️ A gold/silver trade is already active (#${activeMetalTrade.id}, ${activeMetalTrade.status}). Close it before opening another.\n`
+      const activeNote = activePairTrade
+        ? `⚠️ An Arcus-pair trade is already active (#${activePairTrade.id}, ${activePairTrade.status}) — only one metal/ETF trade can be open at a time. Close it before opening another.\n`
         : "";
       await this.sendPhoto(
         chart.png,
-        `GOLDSILVER ${Number(lastClose).toFixed(3)} · RSI(${this.config.goldSilver.rsiPeriod}) ${lastRsi ? Number(lastRsi).toFixed(2) : "n/d"} · ${timeframe} candles\n` +
-          `XAU ~$${series.lastGoldClose.toFixed(1)} · XAG ~$${series.lastSilverClose.toFixed(2)} (futures)\n` +
+        `${strategy.symbol} ${Number(lastClose).toFixed(3)} · RSI(${strategyConfig.rsiPeriod}) ${lastRsi ? Number(lastRsi).toFixed(2) : "n/d"} · ${timeframe} candles\n` +
+          `${strategy.entryAsset} ~$${series.lastEntryClose.toFixed(2)} · ${strategy.hedgeAsset} ~$${series.lastHedgeClose.toFixed(2)}\n` +
           `${suggestion}\n` +
           activeNote +
-          "Chart source: Yahoo GC=F/SI=F (TradingView-like). Execution stays on Arcus perps.",
-        activeMetalTrade
+          `Chart source: Yahoo ${strategy.yahooSymbols.join("/")} (TradingView-like). Execution stays on Arcus perps.`,
+        activePairTrade
           ? undefined
           : {
               inline_keyboard: [
@@ -2619,16 +2649,16 @@ export class TelegramCommandPoller {
                     // available for a manual override.
                     text:
                       (side === "long_gold_short_silver" ? "⭐ " : "") +
-                      "Open LONG GOLD / SHORT SILVER",
-                    callback_data: "metaltrade:open:long_gold_short_silver",
+                      `Open ${longEntryLabel}`,
+                    callback_data: `pairtrade:open:${strategy.symbol}:long_gold_short_silver`,
                   },
                 ],
                 [
                   {
                     text:
                       (side === "short_gold_long_silver" ? "⭐ " : "") +
-                      "Open SHORT GOLD / LONG SILVER",
-                    callback_data: "metaltrade:open:short_gold_long_silver",
+                      `Open ${shortEntryLabel}`,
+                    callback_data: `pairtrade:open:${strategy.symbol}:short_gold_long_silver`,
                   },
                 ],
               ],

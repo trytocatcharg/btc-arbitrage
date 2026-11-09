@@ -1,9 +1,11 @@
-import { calculateSpread } from "@btc-arbitrage/domain";
 import {
   ARCUS_PAIR_SYMBOLS,
-  GOLD_SILVER_SYMBOL,
+  calculateSpread,
 } from "@btc-arbitrage/domain";
-import type { BotConfig } from "@btc-arbitrage/config";
+import type {
+  ArcusPairStrategyConfig,
+  BotConfig,
+} from "@btc-arbitrage/config";
 import type { SpreadSnapshot } from "@btc-arbitrage/domain";
 import type { ExchangeAdapter } from "@btc-arbitrage/exchange-core";
 import { SignalEngine } from "../signals/signal-engine.js";
@@ -34,16 +36,16 @@ import {
 } from "../exchanges/arcus/arcus-client.js";
 import { MetalRatioEngine } from "../metal-ratio/metal-ratio-engine.js";
 import {
-  GOLD_MARKET,
-  GOLD_SILVER_TIMEFRAME_MS,
+  ARCUS_PAIR_TIMEFRAME_MS,
   loadMetalRatioWarmupCloses,
-  SILVER_MARKET,
 } from "../metal-ratio/metal-ratio-warmup.js";
 import { persistRatioSnapshot } from "../metal-ratio/metal-ratio-store.js";
+import { loadActiveMetalTrade } from "../metal-ratio/metal-trade-service.js";
 import { evaluateMetalTradeExitTriggers } from "../metal-ratio/metal-trade-monitor.js";
 import {
   requireArcusPairStrategy,
   resolveArcusPairConfig,
+  type ArcusPairStrategySpec,
 } from "../metal-ratio/arcus-pair-strategies.js";
 
 export interface ExchangeRegistry {
@@ -275,9 +277,12 @@ export async function runPollingLoop(input: {
   // Gold/silver ratio strategy (gold-silver-decouple): no longer a
   // selectable pair. The context initializes lazily on the first tick
   // with an ACTIVE metal trade (runMetalRatioPass gates on that) and
-  // re-warms its candle history when the ratio series has gone stale
-  // (e.g. the bot restarted mid-trade or the trade stayed open longer
-  // than the candle timeframe without a tick).
+  // Arcus-pair ratio monitor state, keyed by strategy symbol: each
+  // strategy (GOLDSILVER / SPYQQQ) owns its RSI engine + warmup stamp;
+  // the market-data client is shared (same Arcus HTTP client). A
+  // strategy's engine re-warms its candle history when its ratio series
+  // has gone stale (e.g. the bot restarted mid-trade or the trade stayed
+  // open longer than the candle timeframe without a tick).
   interface MetalRatioContext {
     client: ArcusMarketDataClient;
     engine: MetalRatioEngine;
@@ -286,60 +291,64 @@ export async function runPollingLoop(input: {
     /** Wall clock of the most recent ratio tick; 0 if never. */
     lastTickAtMs: number;
   }
-  let metalRatio: MetalRatioContext | undefined;
+  const arcusMarketClient = createArcusMarketDataClient(input.config.arcus);
+  const metalRatioContexts = new Map<string, MetalRatioContext>();
 
-  async function ensureMetalRatioContext(): Promise<MetalRatioContext> {
-    if (!metalRatio) {
-      metalRatio = {
-        client: createArcusMarketDataClient(input.config.arcus),
+  async function ensureMetalRatioContext(
+    strategy: ArcusPairStrategySpec,
+    strategyConfig: ArcusPairStrategyConfig,
+  ): Promise<MetalRatioContext> {
+    let ctx = metalRatioContexts.get(strategy.symbol);
+    if (!ctx) {
+      ctx = {
+        client: arcusMarketClient,
         engine: new MetalRatioEngine({
-          rsiPeriod: input.config.goldSilver.rsiPeriod,
-          rsiConfirmBand: input.config.goldSilver.rsiConfirmBand,
-          timeframeMs:
-            GOLD_SILVER_TIMEFRAME_MS[input.config.goldSilver.candleTimeframe],
+          rsiPeriod: strategyConfig.rsiPeriod,
+          rsiConfirmBand: strategyConfig.rsiConfirmBand,
+          timeframeMs: ARCUS_PAIR_TIMEFRAME_MS[strategyConfig.candleTimeframe],
         }),
         warmedUpAtMs: 0,
         lastTickAtMs: 0,
       };
+      metalRatioContexts.set(strategy.symbol, ctx);
     }
     const stalenessMs =
-      2 *
-      GOLD_SILVER_TIMEFRAME_MS[input.config.goldSilver.candleTimeframe];
+      2 * ARCUS_PAIR_TIMEFRAME_MS[strategyConfig.candleTimeframe];
     const seriesStale =
-      metalRatio.lastTickAtMs > 0 &&
-      Date.now() - metalRatio.lastTickAtMs > stalenessMs;
-    if (metalRatio.warmedUpAtMs === 0 || seriesStale) {
+      ctx.lastTickAtMs > 0 && Date.now() - ctx.lastTickAtMs > stalenessMs;
+    if (ctx.warmedUpAtMs === 0 || seriesStale) {
       try {
         const closes = await loadMetalRatioWarmupCloses({
-          client: metalRatio.client,
-          timeframe: input.config.goldSilver.candleTimeframe,
-          candleLimit: input.config.goldSilver.candleLimit,
+          client: ctx.client,
+          markets: [strategy.entryMarket, strategy.hedgeMarket],
+          timeframe: strategyConfig.candleTimeframe,
+          candleLimit: strategyConfig.candleLimit,
         });
         // init() resets the confirmed side, so the first tick after a
         // (re-)warmup announces the current regime — an intentional
         // boot/switch-time status alert.
-        metalRatio.engine.init(closes);
-        metalRatio.warmedUpAtMs = Date.now();
-        console.log("Gold/silver ratio monitor ready", {
+        ctx.engine.init(closes);
+        ctx.warmedUpAtMs = Date.now();
+        console.log(`${strategy.symbol} ratio monitor ready`, {
           rewarm: seriesStale,
-          timeframe: input.config.goldSilver.candleTimeframe,
+          timeframe: strategyConfig.candleTimeframe,
           warmupCloses: closes.length,
-          rsiPeriod: input.config.goldSilver.rsiPeriod,
-          rsiConfirmBand: input.config.goldSilver.rsiConfirmBand,
+          rsiPeriod: strategyConfig.rsiPeriod,
+          rsiConfirmBand: strategyConfig.rsiConfirmBand,
         });
       } catch (error) {
         // Cold start is acceptable degradation (RSI stays undefined until
         // enough live ticks); only stamp warmedUpAtMs so the failure does
         // not retry the warmup on every single tick.
         console.warn(
-          "Gold/silver ratio warmup failed; starting cold (RSI stays undefined until enough live ticks)",
+          `${strategy.symbol} ratio warmup failed; starting cold (RSI stays undefined until enough live ticks)`,
           error instanceof Error ? { message: error.message } : { error },
         );
-        metalRatio.engine.init([]);
-        metalRatio.warmedUpAtMs = Date.now();
+        ctx.engine.init([]);
+        ctx.warmedUpAtMs = Date.now();
       }
     }
-    return metalRatio;
+    return ctx;
   }
 
   // Restart is cooperative: the loop exits when control.requestRestart()
@@ -403,29 +412,35 @@ export async function runPollingLoop(input: {
         console.log("Restart requested; signal pass skipped", { tick });
       } else if (input.control.isPaused()) {
         console.log("Monitoring tick paused", { tick });
-        // gold-silver-decouple: the metal exit tick SURVIVES the operator
-        // pause. The metal SL/TP/time-stop triggers are bot-evaluated (no
-        // resting exchange protection orders), so skipping them while
-        // paused would leave an open metal position unprotected. The pass
-        // no-ops unless a G/S trade is active, so an idle paused bot still
-        // makes no Arcus calls.
+        // gold-silver-decouple: the Arcus-pair exit tick SURVIVES the
+        // operator pause. The SL/TP/time-stop triggers are bot-evaluated
+        // (no resting exchange protection orders), so skipping them while
+        // paused would leave an open position unprotected. The pass
+        // no-ops unless an Arcus-pair trade is active, so an idle paused
+        // bot still makes no Arcus calls.
         await runMetalRatioPass(tick);
-        // Manual-close detection survives the pause too, metal-scoped:
-        // a hand-closed Arcus position must flip the trade to closed/
+        // Manual-close detection survives the pause too, pair-scoped: a
+        // hand-closed Arcus position must flip the trade to closed/
         // unhedged even while paused (the interval monitor pass is skipped
         // wholesale above). The Arcus throttle inside monitorTrades caps
-        // position polls at the metal tick cadence.
+        // position polls at the strategy's tick cadence. Scoped to the
+        // ACTIVE strategy's symbol (either GOLDSILVER or SPYQQQ).
         try {
-          await monitorTrades({
+          const activePairTrade = await loadActiveMetalTrade({
             db: input.db,
-            registry: input.registry,
-            notify: (text) => input.notifier.notifyUrgent(text),
-            config: input.config,
-            onlySymbol: GOLD_SILVER_SYMBOL,
           });
+          if (activePairTrade) {
+            await monitorTrades({
+              db: input.db,
+              registry: input.registry,
+              notify: (text) => input.notifier.notifyUrgent(text),
+              config: input.config,
+              onlySymbol: activePairTrade.symbol,
+            });
+          }
         } catch (error) {
           console.error(
-            "Paused metal position monitor failed",
+            "Paused Arcus-pair position monitor failed",
             error instanceof Error
               ? { tick, message: error.message }
               : { tick, error },
@@ -607,13 +622,13 @@ export async function runPollingLoop(input: {
   }
 
   // Gold/silver metal-trade tick (gold-silver-decouple): runs alongside
-  // the BTC spread pass, but ONLY while a G/S trade is active — there is
-  // no idle monitor: no warmup, no ratio_snapshots rows, no RSI alerts
-  // (entry is operator-driven from /ratio). Per active tick: fetch GLD/SLV
-  // marks, feed the RSI engine, persist one ratio snapshot, and evaluate
-  // the exit triggers (SL / RSI-TP floor / time-stop). Own try/catch so a
-  // metal failure never breaks the tick; persistRatioSnapshot swallows DB
-  // errors.
+  // the BTC spread pass, but ONLY while an Arcus-pair trade is active —
+  // there is no idle monitor: no warmup, no ratio_snapshots rows, no RSI
+  // alerts (entry is operator-driven from /ratio and /etf). Per active
+  // tick: fetch the strategy's leg marks, feed its RSI engine, persist
+  // one ratio snapshot, and evaluate the exit triggers (SL / TP floor /
+  // time-stop). Own try/catch so a pair-strategy failure never breaks the
+  // tick; persistRatioSnapshot swallows DB errors.
   async function runMetalRatioPass(tick: number): Promise<void> {
     try {
       // Active-trade gate: one cheap DB probe per tick replaces the old
@@ -634,36 +649,49 @@ export async function runPollingLoop(input: {
       const activeStrategy = requireArcusPairStrategy(
         activeMetal[0].symbol,
       );
+      const activeStrategyConfig = resolveArcusPairConfig(
+        input.config,
+        activeStrategy.symbol,
+      );
 
-      // Cadence gate: the ratio tick runs at GOLDSILVER_PRICE_POLL_INTERVAL_MS
-      // (default 5 s), not at the 1 Hz BTC tick. The engine works on candle
-      // buckets, so 1 Hz polling only burns Arcus rate-limit budget. A 0
-      // value follows the BTC tick (legacy behavior).
-      const pollMs = input.config.goldSilver.pricePollIntervalMs;
+      // Cadence gate: the ratio tick runs at the strategy's
+      // PRICE_POLL_INTERVAL_MS (default 5 s), not at the 1 Hz BTC tick.
+      // The engine works on candle buckets, so 1 Hz polling only burns
+      // Arcus rate-limit budget. A 0 value follows the BTC tick (legacy
+      // behavior).
+      const pollMs = activeStrategyConfig.pricePollIntervalMs;
+      const existingCtx = metalRatioContexts.get(activeStrategy.symbol);
       if (
         pollMs > 0 &&
-        metalRatio &&
-        metalRatio.lastTickAtMs > 0 &&
-        Date.now() - metalRatio.lastTickAtMs < pollMs
+        existingCtx &&
+        existingCtx.lastTickAtMs > 0 &&
+        Date.now() - existingCtx.lastTickAtMs < pollMs
       ) {
         return;
       }
-      const ctx = await ensureMetalRatioContext();
+      const ctx = await ensureMetalRatioContext(
+        activeStrategy,
+        activeStrategyConfig,
+      );
       ctx.lastTickAtMs = Date.now();
       const calculatedAt = new Date();
       // ONE /v1/prices call per tick: mark prices only. The Arcus BBO
       // endpoint is rate-limited (429s after a few minutes at 1 Hz) and
       // the ratio monitor does not need it; /v1/prices is documented as
       // safe to poll frequently.
-      const marks = await ctx.client.getMarkPricesUsd([GOLD_MARKET, SILVER_MARKET]);
-      const gold = { priceUsd: marks[GOLD_MARKET] };
-      const silver = { priceUsd: marks[SILVER_MARKET] };
+      const marks = await ctx.client.getMarkPricesUsd([
+        activeStrategy.entryMarket,
+        activeStrategy.hedgeMarket,
+      ]);
+      const gold = { priceUsd: marks[activeStrategy.entryMarket] };
+      const silver = { priceUsd: marks[activeStrategy.hedgeMarket] };
       const result = ctx.engine.onTick({
         goldPriceUsd: gold.priceUsd,
         silverPriceUsd: silver.priceUsd,
         calculatedAt,
       });
       await persistRatioSnapshot(input.db, {
+        pairSymbol: activeStrategy.symbol,
         goldPriceUsd: gold.priceUsd,
         silverPriceUsd: silver.priceUsd,
         ratio: result.ratio,

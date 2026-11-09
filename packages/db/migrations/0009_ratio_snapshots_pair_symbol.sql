@@ -1,0 +1,11 @@
+-- Hand-written like 0007/0008: drizzle-kit generate cannot be trusted here
+-- (snapshot drift in migrations/meta makes it re-emit statements for
+-- existing tables — it also proposed re-adding trades.raw from 0008 and
+-- re-modifying trade_previews.signal_id from 0007). Only the
+-- ratio_snapshots.pair_symbol addition belongs in this migration.
+--
+-- Arcus-pair strategies: ratio_snapshots now tags each row with the
+-- strategy pseudo-symbol (GOLDSILVER default backfills existing metal
+-- rows), so the SPY/QQQ strategy (SPYQQQ) can share the table. The
+-- gold/silver price columns serve as generic leg-A/leg-B prices.
+ALTER TABLE `ratio_snapshots` ADD COLUMN `pair_symbol` varchar(16) NOT NULL DEFAULT 'GOLDSILVER';

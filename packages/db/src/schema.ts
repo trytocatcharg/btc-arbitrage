@@ -124,6 +124,12 @@ export const ratioSnapshots = mysqlTable(
   "ratio_snapshots",
   {
     id: int("id").autoincrement().primaryKey(),
+    /** Arcus-pair strategy pseudo-symbol (migration 0009); existing
+     * GOLDSILVER rows carry the default. The gold/silver price columns
+     * serve as generic leg-A/leg-B prices for every strategy. */
+    pairSymbol: varchar("pair_symbol", { length: 16 })
+      .notNull()
+      .default("GOLDSILVER"),
     goldPriceUsd: decimal("gold_price_usd", {
       precision: 24,
       scale: 8,

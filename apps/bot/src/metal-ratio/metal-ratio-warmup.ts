@@ -17,7 +17,7 @@ export const SILVER_MARKET =
 /** Candle timeframe durations in milliseconds, matching
  * ARCUS_PAIR_CANDLE_TIMEFRAMES in packages/config. Exported for the
  * polling loop's staleness re-warmup check. */
-export const GOLD_SILVER_TIMEFRAME_MS: Record<
+export const ARCUS_PAIR_TIMEFRAME_MS: Record<
   ArcusPairCandleTimeframe,
   number
 > = {
@@ -52,14 +52,17 @@ export interface MetalRatioBucket {
   ratio: string;
 }
 
-/** Fetches candle history for GLD-USD and SLV-USD, aligns buckets by
- * openTime, and returns per-bucket ratio closes OLDEST-first (the input
- * shape computeRsi expects). Graceful on partial data: the in-progress
- * candle (isFinal === false), buckets missing on either side, and invalid
- * closes are skipped; an unusable response resolves to an empty array so
- * the caller can start cold (RSI stays undefined until enough live ticks). */
+/** Fetches candle history for the strategy's two leg markets, aligns
+ * buckets by openTime, and returns per-bucket ratio closes OLDEST-first
+ * (the input shape computeRsi expects). Graceful on partial data: the
+ * in-progress candle (isFinal === false), buckets missing on either side,
+ * and invalid closes are skipped; an unusable response resolves to an
+ * empty array so the caller can start cold (RSI stays undefined until
+ * enough live ticks). */
 export async function loadMetalRatioWarmupCloses(input: {
   client: ArcusMarketDataClient;
+  /** (entry, hedge) Arcus markets, e.g. ["GLD-USD","SLV-USD"]. */
+  markets: [string, string];
   timeframe: ArcusPairCandleTimeframe;
   candleLimit: number;
   nowMs?: number;
@@ -69,52 +72,53 @@ export async function loadMetalRatioWarmupCloses(input: {
 }
 
 /** Same fetch/alignment as loadMetalRatioWarmupCloses but keeps the
- * bucket timestamps for display (the /ratio snapshot renders time labels
- * per bucket). */
+ * bucket timestamps for display. */
 export async function loadMetalRatioCandleSeries(input: {
   client: ArcusMarketDataClient;
+  /** (entry, hedge) Arcus markets, e.g. ["GLD-USD","SLV-USD"]. */
+  markets: [string, string];
   timeframe: ArcusPairCandleTimeframe;
   candleLimit: number;
   nowMs?: number;
 }): Promise<MetalRatioBucket[]> {
-  const timeframeMs = GOLD_SILVER_TIMEFRAME_MS[input.timeframe];
+  const timeframeMs = ARCUS_PAIR_TIMEFRAME_MS[input.timeframe];
   const toUs = (input.nowMs ?? Date.now()) * 1_000;
   const fromUs = toUs - timeframeMs * input.candleLimit * 1_000;
 
-  const [goldCandles, silverCandles] = await Promise.all([
+  const [entryCandles, hedgeCandles] = await Promise.all([
     input.client.getCandles({
-      market: GOLD_MARKET,
+      market: input.markets[0],
       timeframe: input.timeframe,
       fromUs,
       toUs,
     }),
     input.client.getCandles({
-      market: SILVER_MARKET,
+      market: input.markets[1],
       timeframe: input.timeframe,
       fromUs,
       toUs,
     }),
   ]);
 
-  const silverByOpenTime = new Map<string, ArcusCandle>();
-  for (const candle of finalCandlesOldestFirst(silverCandles)) {
+  const hedgeByOpenTime = new Map<string, ArcusCandle>();
+  for (const candle of finalCandlesOldestFirst(hedgeCandles)) {
     if (candle.openTime === undefined || candle.close === undefined) continue;
-    silverByOpenTime.set(String(candle.openTime), candle);
+    hedgeByOpenTime.set(String(candle.openTime), candle);
   }
 
   const buckets: MetalRatioBucket[] = [];
-  for (const candle of finalCandlesOldestFirst(goldCandles)) {
+  for (const candle of finalCandlesOldestFirst(entryCandles)) {
     if (candle.openTime === undefined || candle.close === undefined) continue;
-    const silver = silverByOpenTime.get(String(candle.openTime));
-    if (!silver || silver.close === undefined) continue;
+    const hedge = hedgeByOpenTime.get(String(candle.openTime));
+    if (!hedge || hedge.close === undefined) continue;
     try {
       buckets.push({
         openTimeMs: Number(candle.openTime) / 1_000,
-        open: computeMetalRatio(candle.open ?? candle.close, silver.open ?? silver.close),
-        high: computeMetalRatio(candle.high ?? candle.close, silver.low ?? silver.close),
-        low: computeMetalRatio(candle.low ?? candle.close, silver.high ?? silver.close),
-        close: computeMetalRatio(candle.close, silver.close),
-        ratio: computeMetalRatio(candle.close, silver.close),
+        open: computeMetalRatio(candle.open ?? candle.close, hedge.open ?? hedge.close),
+        high: computeMetalRatio(candle.high ?? candle.close, hedge.low ?? hedge.close),
+        low: computeMetalRatio(candle.low ?? candle.close, hedge.high ?? hedge.close),
+        close: computeMetalRatio(candle.close, hedge.close),
+        ratio: computeMetalRatio(candle.close, hedge.close),
       });
     } catch {
       // Skip buckets with non-positive/invalid prices instead of aborting

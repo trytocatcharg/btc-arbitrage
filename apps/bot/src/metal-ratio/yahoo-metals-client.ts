@@ -3,16 +3,15 @@ import { formatDecimal } from "@btc-arbitrage/domain";
 import type { MetalRatioBucket } from "./metal-ratio-warmup.js";
 
 /**
- * Yahoo Finance unofficial chart feed for the COMEX gold/silver futures.
- * Used by /ratio to render a TradingView-faithful GOLDSILVER chart: the
- * futures ratio (GC=F / SI=F) tracks TVC:GOLDSILVER (spot) at ~99.6%
- * (verified live 2026-10-25: 74.42 vs 74.15). No API key required. The
- * endpoint is unofficial and can change without notice — failures must
- * surface as friendly errors, never crash the bot.
+ * Yahoo Finance unofficial chart feed for ratio-chart candles. Used by
+ * /ratio and /etf to render a TradingView-faithful chart of the
+ * strategy's ratio: each Arcus-pair strategy supplies its Yahoo symbol
+ * pair (metals: the COMEX futures GC=F/SI=F ≈ TVC:GOLDSILVER at ~99.6%,
+ * verified live 2026-10-25; SPYQQQ: the SPY/QQQ ETFs, direct and liquid).
+ * No API key required. The endpoint is unofficial and can change without
+ * notice — failures must surface as friendly errors, never crash the bot.
  */
 const YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart";
-const GOLD_FUTURES_SYMBOL = "GC=F";
-const SILVER_FUTURES_SYMBOL = "SI=F";
 
 /** Yahoo `interval` values supported per bot timeframe. Timeframes without
  * a Yahoo equivalent throw a friendly error (the chart is a display-only
@@ -113,14 +112,17 @@ async function fetchYahooCandles(
 
 export interface YahooRatioSeries {
   buckets: MetalRatioBucket[];
-  lastGoldClose: number;
-  lastSilverClose: number;
+  lastEntryClose: number;
+  lastHedgeClose: number;
 }
 
-/** Fetches GC=F and SI=F candles, aligns by exact timestamp (same exchange
- * feed), and derives the ratio OHLC: open/close from same-bucket values,
- * high = gold.high / silver.low, low = gold.low / silver.high. */
+/** Fetches the strategy's two Yahoo symbols, aligns by exact timestamp
+ * (same exchange feed), and derives the ratio OHLC: open/close from
+ * same-bucket values, high = entry.high / hedge.low, low = entry.low /
+ * hedge.high. */
 export async function loadYahooRatioBuckets(input: {
+  /** (entry, hedge) Yahoo symbols, e.g. ["GC=F","SI=F"] or ["SPY","QQQ"]. */
+  symbols: [string, string];
   timeframe: ArcusPairCandleTimeframe;
 }): Promise<YahooRatioSeries> {
   const interval = INTERVAL_BY_TIMEFRAME[input.timeframe];
@@ -131,28 +133,32 @@ export async function loadYahooRatioBuckets(input: {
     );
   }
 
-  const [gold, silver] = await Promise.all([
-    fetchYahooCandles(GOLD_FUTURES_SYMBOL, interval, range),
-    fetchYahooCandles(SILVER_FUTURES_SYMBOL, interval, range),
+  const [entryCandles, hedgeCandles] = await Promise.all([
+    fetchYahooCandles(input.symbols[0], interval, range),
+    fetchYahooCandles(input.symbols[1], interval, range),
   ]);
-  if (gold.length === 0 || silver.length === 0) {
-    throw new Error("Yahoo returned no candles for gold or silver");
+  if (entryCandles.length === 0 || hedgeCandles.length === 0) {
+    throw new Error(
+      `Yahoo returned no candles for ${input.symbols[0]} or ${input.symbols[1]}`,
+    );
   }
 
-  const silverByTs = new Map(silver.map((candle) => [candle.timestampMs, candle]));
+  const hedgeByTs = new Map(
+    hedgeCandles.map((candle) => [candle.timestampMs, candle]),
+  );
   const buckets: MetalRatioBucket[] = [];
-  for (const candle of gold) {
-    const silverCandle = silverByTs.get(candle.timestampMs);
-    if (!silverCandle) continue;
-    const ratioOf = (goldPrice: number, silverPrice: number): string =>
-      formatDecimal(goldPrice / silverPrice, 8);
+  for (const candle of entryCandles) {
+    const hedgeCandle = hedgeByTs.get(candle.timestampMs);
+    if (!hedgeCandle) continue;
+    const ratioOf = (entryPrice: number, hedgePrice: number): string =>
+      formatDecimal(entryPrice / hedgePrice, 8);
     buckets.push({
       openTimeMs: candle.timestampMs,
-      open: ratioOf(candle.open, silverCandle.open),
-      high: ratioOf(candle.high, silverCandle.low),
-      low: ratioOf(candle.low, silverCandle.high),
-      close: ratioOf(candle.close, silverCandle.close),
-      ratio: ratioOf(candle.close, silverCandle.close),
+      open: ratioOf(candle.open, hedgeCandle.open),
+      high: ratioOf(candle.high, hedgeCandle.low),
+      low: ratioOf(candle.low, hedgeCandle.high),
+      close: ratioOf(candle.close, hedgeCandle.close),
+      ratio: ratioOf(candle.close, hedgeCandle.close),
     });
   }
   if (buckets.length < 2) {
@@ -160,7 +166,7 @@ export async function loadYahooRatioBuckets(input: {
   }
   return {
     buckets,
-    lastGoldClose: gold[gold.length - 1].close,
-    lastSilverClose: silver[silver.length - 1].close,
+    lastEntryClose: entryCandles[entryCandles.length - 1].close,
+    lastHedgeClose: hedgeCandles[hedgeCandles.length - 1].close,
   };
 }

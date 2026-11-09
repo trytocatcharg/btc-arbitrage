@@ -9,6 +9,7 @@ import type { ExchangeAdapter } from "@btc-arbitrage/exchange-core";
 import type { BotConfig } from "@btc-arbitrage/config";
 import { formatDecimal, parseDecimal } from "@btc-arbitrage/domain";
 import { loadActiveMetalTrade } from "../metal-ratio/metal-trade-service.js";
+import { resolveArcusPairConfig } from "../metal-ratio/arcus-pair-strategies.js";
 import { shouldNotifyLegClosure } from "./trade-guards.js";
 import { formatPnlColored } from "./trade-close.js";
 
@@ -34,11 +35,11 @@ export async function monitorTrades(input: {
   db: Awaited<ReturnType<typeof getDb>>;
   registry: { get(id: string): ExchangeAdapter };
   notify: (text: string) => Promise<void>;
-  /** gold-silver-decouple: when present and a G/S trade is active, Arcus
-   * leg position polls are throttled to
-   * config.goldSilver.pricePollIntervalMs (default 5 s) instead of the
-   * full monitor cadence, capping Arcus request volume (429 risk).
-   * Absent in legacy callers/tests: no throttling. */
+  /** gold-silver-decouple: when present and an Arcus-pair trade is
+   * active, Arcus leg position polls are throttled to the ACTIVE
+   * strategy's pricePollIntervalMs (default 5 s) instead of the full
+   * monitor cadence, capping Arcus request volume (429 risk). Absent in
+   * legacy callers/tests: no throttling. */
   config?: BotConfig;
   /** Optional trade-symbol scope: the paused main loop runs a
    * metal-only pass so a hand-closed Arcus position is still detected
@@ -46,14 +47,19 @@ export async function monitorTrades(input: {
    * Absent: monitor every open/unhedged leg as before. */
   onlySymbol?: string;
 }): Promise<void> {
-  // One cheap probe per monitor pass; without an active metal trade the
-  // Arcus throttle does not apply at all (no G/S legs can exist).
-  const arcusPollMinIntervalMs = input.config
-    ? input.config.goldSilver.pricePollIntervalMs
-    : 0;
-  const throttleArcusPolls =
-    arcusPollMinIntervalMs > 0 &&
-    (await loadActiveMetalTrade({ db: input.db })) != null;
+  // One cheap probe per monitor pass; without an active Arcus-pair trade
+  // the Arcus throttle does not apply at all (no Arcus-pair legs can
+  // exist). The cadence comes from the ACTIVE strategy's own config
+  // section (GOLDSILVER vs SPYQQQ).
+  const activeArcusPair = input.config
+    ? await loadActiveMetalTrade({ db: input.db })
+    : undefined;
+  const arcusPollMinIntervalMs =
+    input.config && activeArcusPair
+      ? resolveArcusPairConfig(input.config, activeArcusPair.symbol)
+          .pricePollIntervalMs
+      : 0;
+  const throttleArcusPolls = arcusPollMinIntervalMs > 0;
 
   const rows = await input.db
     .select()

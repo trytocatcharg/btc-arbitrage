@@ -3,6 +3,9 @@ import type { ArcusPairSide } from "@btc-arbitrage/domain";
 import { extractInsertId } from "../db-result.js";
 
 export interface RatioSnapshotRow {
+  /** Arcus-pair strategy pseudo-symbol (migration 0009); GOLDSILVER rows
+   * keep their historical meaning in the gold/silver price columns. */
+  pairSymbol: string;
   goldPriceUsd: string;
   silverPriceUsd: string;
   ratio: string;
@@ -21,6 +24,7 @@ export async function persistRatioSnapshot(
 ): Promise<number | null> {
   try {
     const result = await db.insert(ratioSnapshots).values({
+      pairSymbol: snapshot.pairSymbol,
       goldPriceUsd: snapshot.goldPriceUsd,
       silverPriceUsd: snapshot.silverPriceUsd,
       ratio: snapshot.ratio,
