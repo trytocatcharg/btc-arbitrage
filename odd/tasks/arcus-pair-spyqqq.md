@@ -51,7 +51,7 @@ need no migration.
       config shape in `@btc-arbitrage/config`; `spyQqq` section from
       `SPYQQQ_*` env (defaults mirror GOLDSILVER); services resolve
       `config.goldSilver.*` through the spec. Typecheck green.
-- [ ] 3. **SPYQQQ instance** — registry entry; `/etf` command (Yahoo
+- [x] 3. **SPYQQQ instance** — registry entry; `/etf` command (Yahoo
       SPY/QQQ, chart title `SPYQQQ (SPY/QQQ)`); global single Arcus-pair
       trade lock (loadActiveMetalTrade → any-strategy); `/config` 📈 ETFs
       submenu + 5 runtime settings with persistence; BTC↔Arcus collision

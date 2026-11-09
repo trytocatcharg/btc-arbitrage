@@ -372,6 +372,51 @@ Arcus-only pairs strategy on the GLD-USD / SLV-USD perp ratio (docs in `odd/task
   (`executing_limit`/`hedging`/`protecting`) have NO button — the entry
   flow owns them and already has its own timeout/cancel.
 
+### SPY/QQQ ETF pair strategy (Arcus-pair sibling)
+
+Second Arcus-pair strategy on the SPY-USD / QQQ-USD perp ratio
+(`arcus-pair-spyqqq`, 2026-11). Mechanically IDENTICAL to the gold/silver
+strategy above — same entry machine (passive ALO limit on the entry leg +
+bounded IOC hedge), order-book entry gate, TP floor / time-stop / SL
+exits, disaster stops, and `/trade` close/arm buttons — parameterized
+instead of duplicated.
+
+- **Strategy registry**: `apps/bot/src/metal-ratio/arcus-pair-strategies.ts`
+  owns the pair identities (`GOLDSILVER` and `SPYQQQ` specs: leg markets,
+  Yahoo symbols, labels, env prefix). All services take a strategy spec +
+  its config section (`MetalTradeContext.strategy/strategyConfig`) instead
+  of the old hardcoded GLD/SLV constants. Invariant: the entry asset's
+  price is ALWAYS the higher of the pair (GLD > SLV, SPY > QQQ), so the
+  entry leg's base qty is always the smaller — side derivation from fills
+  relies on it.
+- **Markets**: Arcus `SPY-USD` (marketId 23) and `QQQ-USD` (marketId 24),
+  verified ONLINE 2026-11 with the same tick structure as GLD/SLV.
+  Chart/RSI candles come from the Yahoo `SPY`/`QQQ` ETFs (liquid, direct —
+  operator decision; metals keep GC=F/SI=F futures).
+- **ONE global Arcus-pair trade slot (operator decision)**: at most ONE
+  of GOLDSILVER / SPYQQQ can be active at a time. `loadActiveMetalTrade`
+  matches any `ARCUS_PAIR_SYMBOLS` row; `/ratio` and `/etf` both render
+  the chart but hide the open buttons + warn while any Arcus-pair trade
+  is active; the /arb prepare/confirm collision guard refuses any Arcus
+  leg while one is active. Domain helpers: `SPYQQQ_SYMBOL`,
+  `ARCUS_PAIR_SYMBOLS`, `isArcusPairSymbol()`; `MetalRatioSide` was
+  renamed `ArcusPairSide` (persisted values unchanged).
+- **Config**: `SPYQQQ_*` env family → `config.spyQqq`, same shape and
+  defaults as `GOLDSILVER_*` (shared parser, per-prefix error text).
+- **Telegram**: `/etf` mirrors `/ratio` (chart + RSI + one-click open
+  buttons); open callbacks are `pairtrade:open:<SYMBOL>:<SIDE>`. The
+  `/config` menu has a 📈 ETFs (SPY/QQQ) submenu whose 5 settings (margin,
+  leverage, TP floor, max entry slippage, hedge retries) persist under
+  `etf*` runtime-override keys, mirroring the metals `metal*` keys.
+- **Storage**: `trades.symbol = 'SPYQQQ'`, both legs `arcus`
+  (SPY-USD/QQQ-USD in `leg.raw.market` — the `/trade` summary labels legs
+  by market, so no special-casing). Migration 0009 adds
+  `ratio_snapshots.pair_symbol` (GOLDSILVER default backfills existing
+  metal rows); the gold/silver price columns serve as generic
+  leg-A/leg-B prices for both strategies. The polling loop keeps a
+  per-strategy RSI engine cache (shared Arcus client) and runs the
+  tick/exit pass only for the ACTIVE strategy.
+
 ## Working principles
 
 - **If a requirement is unclear or partially specified, ASK — do not
