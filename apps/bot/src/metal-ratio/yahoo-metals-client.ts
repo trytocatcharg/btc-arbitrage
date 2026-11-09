@@ -1,4 +1,4 @@
-import type { GoldSilverCandleTimeframe } from "@btc-arbitrage/config";
+import type { ArcusPairCandleTimeframe } from "@btc-arbitrage/config";
 import { formatDecimal } from "@btc-arbitrage/domain";
 import type { MetalRatioBucket } from "./metal-ratio-warmup.js";
 
@@ -17,7 +17,7 @@ const SILVER_FUTURES_SYMBOL = "SI=F";
 /** Yahoo `interval` values supported per bot timeframe. Timeframes without
  * a Yahoo equivalent throw a friendly error (the chart is a display-only
  * feature — the strategy engine keeps its own Arcus candle source). */
-const INTERVAL_BY_TIMEFRAME: Partial<Record<GoldSilverCandleTimeframe, string>> = {
+const INTERVAL_BY_TIMEFRAME: Partial<Record<ArcusPairCandleTimeframe, string>> = {
   "1m": "1m",
   "5m": "5m",
   "15m": "15m",
@@ -29,7 +29,7 @@ const INTERVAL_BY_TIMEFRAME: Partial<Record<GoldSilverCandleTimeframe, string>> 
 
 /** Yahoo `range` per timeframe: deep enough for a 200-candle RSI warmup.
  * (1h futures trade ~20 h/day, so 1 month ≈ 440 candles.) */
-const RANGE_BY_TIMEFRAME: Partial<Record<GoldSilverCandleTimeframe, string>> = {
+const RANGE_BY_TIMEFRAME: Partial<Record<ArcusPairCandleTimeframe, string>> = {
   "1m": "5d",
   "5m": "1mo",
   "15m": "1mo",
@@ -121,7 +121,7 @@ export interface YahooRatioSeries {
  * feed), and derives the ratio OHLC: open/close from same-bucket values,
  * high = gold.high / silver.low, low = gold.low / silver.high. */
 export async function loadYahooRatioBuckets(input: {
-  timeframe: GoldSilverCandleTimeframe;
+  timeframe: ArcusPairCandleTimeframe;
 }): Promise<YahooRatioSeries> {
   const interval = INTERVAL_BY_TIMEFRAME[input.timeframe];
   const range = RANGE_BY_TIMEFRAME[input.timeframe];

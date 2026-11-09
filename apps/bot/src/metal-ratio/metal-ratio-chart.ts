@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { computeRsi, type ArcusPairSide } from "@btc-arbitrage/domain";
-import type { GoldSilverCandleTimeframe } from "@btc-arbitrage/config";
+import type { ArcusPairCandleTimeframe } from "@btc-arbitrage/config";
 import type { MetalRatioBucket } from "./metal-ratio-warmup.js";
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
@@ -32,7 +32,7 @@ export interface MetalRatioChartResult {
  * operator-friendly message when python3/Pillow is unavailable. */
 export async function renderMetalRatioChart(input: {
   buckets: MetalRatioBucket[];
-  timeframe: GoldSilverCandleTimeframe;
+  timeframe: ArcusPairCandleTimeframe;
   rsiPeriod: number;
   title?: string;
   live?: MetalRatioChartLive;

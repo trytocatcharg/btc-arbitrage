@@ -2,7 +2,7 @@ import {
   computeMetalRatio,
   GOLD_SILVER_SYMBOL,
 } from "@btc-arbitrage/domain";
-import type { GoldSilverCandleTimeframe } from "@btc-arbitrage/config";
+import type { ArcusPairCandleTimeframe } from "@btc-arbitrage/config";
 import type { ArcusMarketDataClient } from "../exchanges/arcus/arcus-client.js";
 import type { ArcusCandle } from "../exchanges/arcus/arcus.types.js";
 import { ARCUS_PAIR_STRATEGIES } from "./arcus-pair-strategies.js";
@@ -15,10 +15,10 @@ export const SILVER_MARKET =
   ARCUS_PAIR_STRATEGIES[GOLD_SILVER_SYMBOL].hedgeMarket;
 
 /** Candle timeframe durations in milliseconds, matching
- * GOLD_SILVER_CANDLE_TIMEFRAMES in packages/config. Exported for the
+ * ARCUS_PAIR_CANDLE_TIMEFRAMES in packages/config. Exported for the
  * polling loop's staleness re-warmup check. */
 export const GOLD_SILVER_TIMEFRAME_MS: Record<
-  GoldSilverCandleTimeframe,
+  ArcusPairCandleTimeframe,
   number
 > = {
   "1m": 60_000,
@@ -60,7 +60,7 @@ export interface MetalRatioBucket {
  * the caller can start cold (RSI stays undefined until enough live ticks). */
 export async function loadMetalRatioWarmupCloses(input: {
   client: ArcusMarketDataClient;
-  timeframe: GoldSilverCandleTimeframe;
+  timeframe: ArcusPairCandleTimeframe;
   candleLimit: number;
   nowMs?: number;
 }): Promise<string[]> {
@@ -73,7 +73,7 @@ export async function loadMetalRatioWarmupCloses(input: {
  * per bucket). */
 export async function loadMetalRatioCandleSeries(input: {
   client: ArcusMarketDataClient;
-  timeframe: GoldSilverCandleTimeframe;
+  timeframe: ArcusPairCandleTimeframe;
   candleLimit: number;
   nowMs?: number;
 }): Promise<MetalRatioBucket[]> {

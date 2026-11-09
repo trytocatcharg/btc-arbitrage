@@ -18,6 +18,84 @@ export interface DatabaseConfig {
   url: string;
 }
 
+/** Config of one Arcus-pair ratio strategy (two legs on one venue, opened
+ * on demand from Telegram, RSI-of-the-ratio exits). Both strategy
+ * sections — `goldSilver` and `spyQqq` — share this shape and the
+ * defaults; every field documents the GOLDSILVER_ env variable, and the
+ * spyQqq section reads the SAME field names with the SPYQQQ_ prefix (see
+ * parseArcusPairStrategyConfig). */
+export interface ArcusPairStrategyConfig {
+  /** GOLDSILVER_MARGIN_USD: margin per leg; notional derives as margin ×
+   * leverage. */
+  marginUsd: string;
+  /** GOLDSILVER_LEVERAGE: leverage for the pair legs. */
+  leverage: number;
+  /** GOLDSILVER_LIMIT_TIMEOUT_MS: passive entry-leg limit fill wait. */
+  limitTimeoutMs: number;
+  /** GOLDSILVER_LIMIT_REPRICE_INTERVAL_MS: cancel-and-replace cadence of
+   * the resting entry-leg limit. */
+  limitRepriceIntervalMs: number;
+  /** GOLDSILVER_ENTRY_IMPROVE_TICKS: ticks to improve the passive entry
+   * limit beyond best bid/ask. */
+  entryImproveTicks: number;
+  /** GOLDSILVER_RSI_PERIOD: Wilder RSI period (>= 2). */
+  rsiPeriod: number;
+  /** GOLDSILVER_RSI_CONFIRM_BAND: confirmation band around RSI 50, stored
+   * as a decimal string (matches rsiToSide(rsi, band) in domain). A cross
+   * only counts when RSI >= 50 + band or RSI <= 50 - band. */
+  rsiConfirmBand: string;
+  /** GOLDSILVER_CANDLE_TIMEFRAME: candle timeframe for ratio closes. */
+  candleTimeframe: ArcusPairCandleTimeframe;
+  /** GOLDSILVER_CANDLE_LIMIT: candles fetched per build (clamped 1..200). */
+  candleLimit: number;
+  /** GOLDSILVER_PRICE_POLL_INTERVAL_MS: cadence of the live mark-price
+   * tick while a pair trade is active (default 5000). The engine works on
+   * candle buckets, so 1 Hz polling only burns Arcus rate-limit budget
+   * without adding signal. */
+  pricePollIntervalMs: number;
+  /** GOLDSILVER_STOP_LOSS_MARGIN_PERCENT: net-PnL stop (percent of TOTAL
+   * margin, both legs) executed as immediate market close on both legs.
+   * 50 = the position is market-closed when net PnL <= -50% of
+   * 2 x GOLDSILVER_MARGIN_USD. */
+  stopLossMarginPercent: number;
+  /** GOLDSILVER_TP_MIN_NET_USD: profit floor for the take-profit: the
+   * trade only closes when net PnL >= estimated exit breakeven (fees) +
+   * this buffer. */
+  tpMinNetUsd: string;
+  /** GOLDSILVER_EXIT_REPRICE_INTERVAL_MS: dual-limit close repricing
+   * cadence for the not-yet-filled leg. */
+  exitRepriceIntervalMs: number;
+  /** GOLDSILVER_EXIT_SLIPPAGE_BUDGET_BPS: total slippage budget (basis
+   * points of the remaining notional) for the unfilled leg before the
+   * remainder goes to market. */
+  exitSlippageBudgetBps: number;
+  /** GOLDSILVER_EXIT_MAX_WAIT_MS: hard cap on the paired-close window
+   * before the remainder goes to market. */
+  exitMaxWaitMs: number;
+  /** GOLDSILVER_EXIT_MAX_REPRICES: reprice-count cap before the
+   * remainder goes to market. */
+  exitMaxReprices: number;
+  /** GOLDSILVER_TIME_STOP_HOURS: backstop while the profit floor is
+   * unmet — after this many hours from the completed hedge, the trade
+   * closes at market IF net PnL >= breakeven; a losing trade keeps
+   * running until the TP floor or the SL. */
+  timeStopHours: number;
+  /** GOLDSILVER_MAX_ENTRY_SLIPPAGE_BPS: hard ceiling on the TOTAL
+   * estimated entry drag, in basis points of leg notional: hedge-leg
+   * book-walk slippage (simulated taker fill over the L2 order book) +
+   * hedge taker fee + entry maker fee. The entry REFUSES above the
+   * ceiling (metal-entry-orderbook-gate). The same value bounds the
+   * hedge market order (touch ∓ this many bps, rounded to tick). Clamped
+   * 1..950 (Arcus hard-rejects market bounds outside ±10% of mark). */
+  maxEntrySlippageBps: number;
+  /** GOLDSILVER_HEDGE_RETRY_ATTEMPTS: bounded re-bound retries of the
+   * hedge market IOC when it comes back zero-filled (the explicit price
+   * bound rejected liquidity instead of accepting ~150 bps of adverse
+   * fill). Exhausted retries abort the entry; the rollback market-closes
+   * the covered entry leg. Clamped 1..10. */
+  hedgeRetryAttempts: number;
+}
+
 export interface BotConfig {
   database: DatabaseConfig;
   exchangeA: ExchangeId;
@@ -164,81 +242,15 @@ export interface BotConfig {
    * Since gold-silver-decouple it is opened on demand from the Telegram
    * /ratio command and coexists with the active spread pair; the
    * tick/exit pass runs only while a G/S trade is active. There are no
-   * RSI alerts and no pair-selection switch. */
-  goldSilver: {
-    /** GOLDSILVER_MARGIN_USD: margin per leg (was shared
-     * OPEN_TRADE_MARGIN_USD); notional derives as margin × leverage. */
-    marginUsd: string;
-    /** GOLDSILVER_LEVERAGE: leverage for the metal legs (was shared
-     * LEVERAGE). */
-    leverage: number;
-    /** GOLDSILVER_LIMIT_TIMEOUT_MS: passive GLD limit fill wait (was shared
-     * OPEN_TRADE_LIMIT_TIMEOUT_MS). */
-    limitTimeoutMs: number;
-    /** GOLDSILVER_LIMIT_REPRICE_INTERVAL_MS: cancel-and-replace cadence of
-     * the resting GLD limit (was shared OPEN_TRADE_REPRICE_INTERVAL_MS). */
-    limitRepriceIntervalMs: number;
-    /** GOLDSILVER_ENTRY_IMPROVE_TICKS: ticks to improve the passive GLD
-     * limit beyond best bid/ask (was shared OPEN_TRADE_ENTRY_IMPROVE_TICKS). */
-    entryImproveTicks: number;
-    /** GOLDSILVER_RSI_PERIOD: Wilder RSI period (>= 2). */
-    rsiPeriod: number;
-    /** GOLDSILVER_RSI_CONFIRM_BAND: confirmation band around RSI 50, stored
-     * as a decimal string (matches rsiToSide(rsi, band) in domain). A cross
-     * only counts when RSI >= 50 + band or RSI <= 50 - band. */
-    rsiConfirmBand: string;
-    /** GOLDSILVER_CANDLE_TIMEFRAME: candle timeframe for ratio closes. */
-    candleTimeframe: GoldSilverCandleTimeframe;
-    /** GOLDSILVER_CANDLE_LIMIT: candles fetched per build (clamped 1..200). */
-    candleLimit: number;
-    /** GOLDSILVER_PRICE_POLL_INTERVAL_MS: cadence of the live mark-price
-     * tick while a G/S trade is active (default 5000). The engine works on
-     * candle buckets, so 1 Hz polling only burns Arcus rate-limit budget
-     * without adding signal. */
-    pricePollIntervalMs: number;
-    /** GOLDSILVER_STOP_LOSS_MARGIN_PERCENT: net-PnL stop (percent of TOTAL
-     * margin, both legs) executed as immediate market close on both legs.
-     * 50 = the position is market-closed when net PnL <= -50% of
-     * 2 x GOLDSILVER_MARGIN_USD. */
-    stopLossMarginPercent: number;
-    /** GOLDSILVER_TP_MIN_NET_USD: profit floor for the RSI-50 take-profit:
-     * the cross only closes the trade when net PnL >= estimated exit
-     * breakeven (fees) + this buffer. */
-    tpMinNetUsd: string;
-    /** GOLDSILVER_EXIT_REPRICE_INTERVAL_MS: dual-limit close repricing
-     * cadence for the not-yet-filled leg. */
-    exitRepriceIntervalMs: number;
-    /** GOLDSILVER_EXIT_SLIPPAGE_BUDGET_BPS: total slippage budget (basis
-     * points of the remaining notional) for the unfilled leg before the
-     * remainder goes to market. */
-    exitSlippageBudgetBps: number;
-    /** GOLDSILVER_EXIT_MAX_WAIT_MS: hard cap on the paired-close window
-     * before the remainder goes to market. */
-    exitMaxWaitMs: number;
-    /** GOLDSILVER_EXIT_MAX_REPRICES: reprice-count cap before the
-     * remainder goes to market. */
-    exitMaxReprices: number;
-    /** GOLDSILVER_TIME_STOP_HOURS: backstop while the RSI-50 profit floor
-     * is unmet — after this many hours from the completed hedge, the trade
-     * closes at market IF net PnL >= breakeven; a losing trade keeps
-     * running until the TP floor or the SL. */
-    timeStopHours: number;
-    /** GOLDSILVER_MAX_ENTRY_SLIPPAGE_BPS: hard ceiling on the TOTAL
-     * estimated entry drag of a metal trade, in basis points of leg
-     * notional: SLV book-walk slippage (simulated taker fill over the L2
-     * order book) + SLV taker fee + GLD maker fee. createMetalTrade
-     * REFUSES to enter above the ceiling (metal-entry-orderbook-gate).
-     * The same value bounds the SLV hedge market order (touch ∓ this
-     * many bps, rounded to tick). Clamped 1..950 (Arcus hard-rejects
-     * market bounds outside ±10% of mark). */
-    maxEntrySlippageBps: number;
-    /** GOLDSILVER_HEDGE_RETRY_ATTEMPTS: bounded re-bound retries of the
-     * SLV market hedge IOC when it comes back zero-filled (the explicit
-     * price bound rejected liquidity instead of accepting ~150 bps of
-     * adverse fill). Exhausted retries abort the entry; the rollback
-     * market-closes the covered gold. Clamped 1..10. */
-    hedgeRetryAttempts: number;
-  };
+   * RSI alerts and no pair-selection switch. Parsed from GOLDSILVER_*
+   * env vars. */
+  goldSilver: ArcusPairStrategyConfig;
+  /** SPY/QQQ ratio strategy (Arcus-only SPY-USD / QQQ-USD pair trade) —
+   * the sibling of goldSilver under the Arcus-pair strategies, opened on
+   * demand from /etf. Shares the SINGLE global Arcus-pair trade slot: at
+   * most one of goldSilver/spyQqq can be active at a time. Own SPYQQQ_*
+   * env vars, same shape and defaults. */
+  spyQqq: ArcusPairStrategyConfig;
   /** /arb screener trades (ORBIT arbitrage rows, telegram-command-poller
    * arbopen/arbconfirm flow). Sizing is deliberately decoupled from the
    * openTrade section: /config runtime adjustments resize the BTC signal
@@ -259,7 +271,7 @@ export interface BotConfig {
   logLevel: string;
 }
 
-export const GOLD_SILVER_CANDLE_TIMEFRAMES = [
+export const ARCUS_PAIR_CANDLE_TIMEFRAMES = [
   "1m",
   "3m",
   "5m",
@@ -274,8 +286,8 @@ export const GOLD_SILVER_CANDLE_TIMEFRAMES = [
   "3d",
   "1w",
 ] as const;
-export type GoldSilverCandleTimeframe =
-  (typeof GOLD_SILVER_CANDLE_TIMEFRAMES)[number];
+export type ArcusPairCandleTimeframe =
+  (typeof ARCUS_PAIR_CANDLE_TIMEFRAMES)[number];
 
 export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   // Spread-USD exits were deleted by adjust-tpsl-volume-farming: these vars
@@ -473,105 +485,10 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   );
   const notionalUsd = (Number(marginUsd) * leverage).toFixed(8);
 
-  // Gold/silver ratio strategy (on-demand from /ratio since
-  // gold-silver-decouple). Sizing and the entry loop now have their own
-  // env vars (defaults equal the previously shared OPEN_TRADE_* / LEVERAGE
-  // values); the monitor knobs below only apply while a G/S trade is
-  // active.
-  const goldSilverMarginUsd = parsePositiveDecimalString(
-    env.GOLDSILVER_MARGIN_USD ?? "20",
-    "GOLDSILVER_MARGIN_USD",
-  );
-  const goldSilverLeverage = parsePositiveInteger(
-    env.GOLDSILVER_LEVERAGE ?? "3",
-    "GOLDSILVER_LEVERAGE",
-  );
-  const goldSilverLimitTimeoutMs = parsePositiveInteger(
-    env.GOLDSILVER_LIMIT_TIMEOUT_MS ?? "30000",
-    "GOLDSILVER_LIMIT_TIMEOUT_MS",
-  );
-  const goldSilverLimitRepriceIntervalMs = parseNonNegativeInteger(
-    env.GOLDSILVER_LIMIT_REPRICE_INTERVAL_MS ?? "2000",
-    "GOLDSILVER_LIMIT_REPRICE_INTERVAL_MS",
-  );
-  const goldSilverEntryImproveTicks = parseNonNegativeInteger(
-    env.GOLDSILVER_ENTRY_IMPROVE_TICKS ?? "1",
-    "GOLDSILVER_ENTRY_IMPROVE_TICKS",
-  );
-  const goldSilverRsiPeriod = parsePositiveInteger(
-    env.GOLDSILVER_RSI_PERIOD ?? "14",
-    "GOLDSILVER_RSI_PERIOD",
-  );
-  if (goldSilverRsiPeriod < 2) {
-    throw new Error("GOLDSILVER_RSI_PERIOD must be at least 2");
-  }
-  const goldSilverRsiConfirmBand = parseNonNegativeDecimalString(
-    env.GOLDSILVER_RSI_CONFIRM_BAND ?? "0",
-    "GOLDSILVER_RSI_CONFIRM_BAND",
-  );
-  const goldSilverCandleTimeframe = parseGoldSilverCandleTimeframe(
-    env.GOLDSILVER_CANDLE_TIMEFRAME ?? "1h",
-  );
-  const goldSilverCandleLimit = parseClampedInteger(
-    env.GOLDSILVER_CANDLE_LIMIT ?? "200",
-    "GOLDSILVER_CANDLE_LIMIT",
-    1,
-    200,
-  );
-  const goldSilverPricePollIntervalMs = parseNonNegativeInteger(
-    env.GOLDSILVER_PRICE_POLL_INTERVAL_MS ?? "5000",
-    "GOLDSILVER_PRICE_POLL_INTERVAL_MS",
-  );
-  if (goldSilverPricePollIntervalMs > 0 && goldSilverPricePollIntervalMs < 1000) {
-    throw new Error(
-      "GOLDSILVER_PRICE_POLL_INTERVAL_MS must be 0 (follow the BTC tick) or >= 1000",
-    );
-  }
-  const goldSilverStopLossMarginPercent = parseClampedInteger(
-    env.GOLDSILVER_STOP_LOSS_MARGIN_PERCENT ?? "50",
-    "GOLDSILVER_STOP_LOSS_MARGIN_PERCENT",
-    1,
-    100,
-  );
-  const goldSilverTpMinNetUsd = parsePositiveDecimalString(
-    env.GOLDSILVER_TP_MIN_NET_USD ?? "10",
-    "GOLDSILVER_TP_MIN_NET_USD",
-  );
-  const goldSilverExitRepriceIntervalMs = parseNonNegativeInteger(
-    env.GOLDSILVER_EXIT_REPRICE_INTERVAL_MS ?? "2000",
-    "GOLDSILVER_EXIT_REPRICE_INTERVAL_MS",
-  );
-  const goldSilverExitSlippageBudgetBps = parsePositiveInteger(
-    env.GOLDSILVER_EXIT_SLIPPAGE_BUDGET_BPS ?? "40",
-    "GOLDSILVER_EXIT_SLIPPAGE_BUDGET_BPS",
-  );
-  const goldSilverExitMaxWaitMs = parsePositiveInteger(
-    env.GOLDSILVER_EXIT_MAX_WAIT_MS ?? "60000",
-    "GOLDSILVER_EXIT_MAX_WAIT_MS",
-  );
-  const goldSilverExitMaxReprices = parsePositiveInteger(
-    env.GOLDSILVER_EXIT_MAX_REPRICES ?? "8",
-    "GOLDSILVER_EXIT_MAX_REPRICES",
-  );
-  const goldSilverTimeStopHours = parsePositiveInteger(
-    env.GOLDSILVER_TIME_STOP_HOURS ?? "48",
-    "GOLDSILVER_TIME_STOP_HOURS",
-  );
-  // metal-entry-orderbook-gate: entry cost ceiling and hedge retry budget.
-  // 950 bps leaves headroom under the Arcus hard 10%-of-mark market-bound
-  // rule (the bound doubles as the hedge order's price cap).
-  const goldSilverMaxEntrySlippageBps = parseClampedInteger(
-    env.GOLDSILVER_MAX_ENTRY_SLIPPAGE_BPS ?? "40",
-    "GOLDSILVER_MAX_ENTRY_SLIPPAGE_BPS",
-    1,
-    950,
-  );
-  const goldSilverHedgeRetryAttempts = parseClampedInteger(
-    env.GOLDSILVER_HEDGE_RETRY_ATTEMPTS ?? "3",
-    "GOLDSILVER_HEDGE_RETRY_ATTEMPTS",
-    1,
-    10,
-  );
+  // Arcus-pair ratio strategies (on demand from /ratio and /etf since
+  // gold-silver-decouple): each section parses its own env family through
+  // the shared parseArcusPairStrategyConfig (GOLDSILVER_* / SPYQQQ_*),
+  // same shape and defaults.
 
   // /arb screener trades (ORBIT arbitrage rows): separate sizing from the
   // BTC openTrade section so /config runtime adjustments never resize
@@ -791,27 +708,8 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       retentionDays: dataRetentionDays,
       batchSize: dataRetentionBatchSize,
     },
-    goldSilver: {
-      marginUsd: goldSilverMarginUsd,
-      leverage: goldSilverLeverage,
-      limitTimeoutMs: goldSilverLimitTimeoutMs,
-      limitRepriceIntervalMs: goldSilverLimitRepriceIntervalMs,
-      entryImproveTicks: goldSilverEntryImproveTicks,
-      rsiPeriod: goldSilverRsiPeriod,
-      rsiConfirmBand: goldSilverRsiConfirmBand,
-      candleTimeframe: goldSilverCandleTimeframe,
-      candleLimit: goldSilverCandleLimit,
-      pricePollIntervalMs: goldSilverPricePollIntervalMs,
-      stopLossMarginPercent: goldSilverStopLossMarginPercent,
-      tpMinNetUsd: goldSilverTpMinNetUsd,
-      exitRepriceIntervalMs: goldSilverExitRepriceIntervalMs,
-      exitSlippageBudgetBps: goldSilverExitSlippageBudgetBps,
-      exitMaxWaitMs: goldSilverExitMaxWaitMs,
-      exitMaxReprices: goldSilverExitMaxReprices,
-      timeStopHours: goldSilverTimeStopHours,
-      maxEntrySlippageBps: goldSilverMaxEntrySlippageBps,
-      hedgeRetryAttempts: goldSilverHedgeRetryAttempts,
-    },
+    goldSilver: parseArcusPairStrategyConfig(env, "GOLDSILVER"),
+    spyQqq: parseArcusPairStrategyConfig(env, "SPYQQQ"),
     arbTrade: {
       marginUsd: arbTradeMarginUsd,
       notionalUsd: (Number(arbTradeMarginUsd) * arbTradeLeverage).toFixed(8),
@@ -820,6 +718,137 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       stopLossPercent: arbTradeStopLossPercent,
     },
     logLevel: env.LOG_LEVEL ?? "info",
+  };
+}
+
+/** Parse one Arcus-pair strategy config section (goldSilver / spyQqq).
+ * `prefix` is the env var family: every variable reads as
+ * `${prefix}_MARGIN_USD` etc. and validation errors name the exact
+ * variable, so GOLDSILVER_* keeps its original error text. Both sections
+ * share the ArcusPairStrategyConfig shape and the defaults. */
+function parseArcusPairStrategyConfig(
+  env: NodeJS.ProcessEnv,
+  prefix: "GOLDSILVER" | "SPYQQQ",
+): ArcusPairStrategyConfig {
+  const varName = (suffix: string) => `${prefix}_${suffix}`;
+  // Sizing and the entry loop have their own env vars (defaults equal the
+  // previously shared OPEN_TRADE_* / LEVERAGE values); the monitor knobs
+  // below only apply while a pair trade of this strategy is active.
+  const marginUsd = parsePositiveDecimalString(
+    env[varName("MARGIN_USD")] ?? "20",
+    varName("MARGIN_USD"),
+  );
+  const leverage = parsePositiveInteger(
+    env[varName("LEVERAGE")] ?? "3",
+    varName("LEVERAGE"),
+  );
+  const limitTimeoutMs = parsePositiveInteger(
+    env[varName("LIMIT_TIMEOUT_MS")] ?? "30000",
+    varName("LIMIT_TIMEOUT_MS"),
+  );
+  const limitRepriceIntervalMs = parseNonNegativeInteger(
+    env[varName("LIMIT_REPRICE_INTERVAL_MS")] ?? "2000",
+    varName("LIMIT_REPRICE_INTERVAL_MS"),
+  );
+  const entryImproveTicks = parseNonNegativeInteger(
+    env[varName("ENTRY_IMPROVE_TICKS")] ?? "1",
+    varName("ENTRY_IMPROVE_TICKS"),
+  );
+  const rsiPeriod = parsePositiveInteger(
+    env[varName("RSI_PERIOD")] ?? "14",
+    varName("RSI_PERIOD"),
+  );
+  if (rsiPeriod < 2) {
+    throw new Error(`${varName("RSI_PERIOD")} must be at least 2`);
+  }
+  const rsiConfirmBand = parseNonNegativeDecimalString(
+    env[varName("RSI_CONFIRM_BAND")] ?? "0",
+    varName("RSI_CONFIRM_BAND"),
+  );
+  const candleTimeframe = parseArcusPairCandleTimeframe(
+    env[varName("CANDLE_TIMEFRAME")] ?? "1h",
+    prefix,
+  );
+  const candleLimit = parseClampedInteger(
+    env[varName("CANDLE_LIMIT")] ?? "200",
+    varName("CANDLE_LIMIT"),
+    1,
+    200,
+  );
+  const pricePollIntervalMs = parseNonNegativeInteger(
+    env[varName("PRICE_POLL_INTERVAL_MS")] ?? "5000",
+    varName("PRICE_POLL_INTERVAL_MS"),
+  );
+  if (pricePollIntervalMs > 0 && pricePollIntervalMs < 1000) {
+    throw new Error(
+      `${varName("PRICE_POLL_INTERVAL_MS")} must be 0 (follow the BTC tick) or >= 1000`,
+    );
+  }
+  const stopLossMarginPercent = parseClampedInteger(
+    env[varName("STOP_LOSS_MARGIN_PERCENT")] ?? "50",
+    varName("STOP_LOSS_MARGIN_PERCENT"),
+    1,
+    100,
+  );
+  const tpMinNetUsd = parsePositiveDecimalString(
+    env[varName("TP_MIN_NET_USD")] ?? "10",
+    varName("TP_MIN_NET_USD"),
+  );
+  const exitRepriceIntervalMs = parseNonNegativeInteger(
+    env[varName("EXIT_REPRICE_INTERVAL_MS")] ?? "2000",
+    varName("EXIT_REPRICE_INTERVAL_MS"),
+  );
+  const exitSlippageBudgetBps = parsePositiveInteger(
+    env[varName("EXIT_SLIPPAGE_BUDGET_BPS")] ?? "40",
+    varName("EXIT_SLIPPAGE_BUDGET_BPS"),
+  );
+  const exitMaxWaitMs = parsePositiveInteger(
+    env[varName("EXIT_MAX_WAIT_MS")] ?? "60000",
+    varName("EXIT_MAX_WAIT_MS"),
+  );
+  const exitMaxReprices = parsePositiveInteger(
+    env[varName("EXIT_MAX_REPRICES")] ?? "8",
+    varName("EXIT_MAX_REPRICES"),
+  );
+  const timeStopHours = parsePositiveInteger(
+    env[varName("TIME_STOP_HOURS")] ?? "48",
+    varName("TIME_STOP_HOURS"),
+  );
+  // metal-entry-orderbook-gate: entry cost ceiling and hedge retry budget.
+  // 950 bps leaves headroom under the Arcus hard 10%-of-mark market-bound
+  // rule (the bound doubles as the hedge order's price cap).
+  const maxEntrySlippageBps = parseClampedInteger(
+    env[varName("MAX_ENTRY_SLIPPAGE_BPS")] ?? "40",
+    varName("MAX_ENTRY_SLIPPAGE_BPS"),
+    1,
+    950,
+  );
+  const hedgeRetryAttempts = parseClampedInteger(
+    env[varName("HEDGE_RETRY_ATTEMPTS")] ?? "3",
+    varName("HEDGE_RETRY_ATTEMPTS"),
+    1,
+    10,
+  );
+  return {
+    marginUsd,
+    leverage,
+    limitTimeoutMs,
+    limitRepriceIntervalMs,
+    entryImproveTicks,
+    rsiPeriod,
+    rsiConfirmBand,
+    candleTimeframe,
+    candleLimit,
+    pricePollIntervalMs,
+    stopLossMarginPercent,
+    tpMinNetUsd,
+    exitRepriceIntervalMs,
+    exitSlippageBudgetBps,
+    exitMaxWaitMs,
+    exitMaxReprices,
+    timeStopHours,
+    maxEntrySlippageBps,
+    hedgeRetryAttempts,
   };
 }
 
@@ -944,13 +973,14 @@ function parseBoolean(value: string): boolean {
   throw new Error(`Expected boolean string true/false, got ${value}`);
 }
 
-function parseGoldSilverCandleTimeframe(
+function parseArcusPairCandleTimeframe(
   value: string,
-): GoldSilverCandleTimeframe {
-  if ((GOLD_SILVER_CANDLE_TIMEFRAMES as readonly string[]).includes(value))
-    return value as GoldSilverCandleTimeframe;
+  prefix: "GOLDSILVER" | "SPYQQQ",
+): ArcusPairCandleTimeframe {
+  if ((ARCUS_PAIR_CANDLE_TIMEFRAMES as readonly string[]).includes(value))
+    return value as ArcusPairCandleTimeframe;
   throw new Error(
-    `GOLDSILVER_CANDLE_TIMEFRAME must be one of: ${GOLD_SILVER_CANDLE_TIMEFRAMES.join(", ")}`,
+    `${prefix}_CANDLE_TIMEFRAME must be one of: ${ARCUS_PAIR_CANDLE_TIMEFRAMES.join(", ")}`,
   );
 }
 
