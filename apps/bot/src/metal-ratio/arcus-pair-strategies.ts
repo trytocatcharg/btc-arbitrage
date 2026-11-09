@@ -4,6 +4,7 @@ import {
   isArcusPairSymbol,
   type ArcusPairSymbol,
 } from "@btc-arbitrage/domain";
+import type { ArcusPairStrategyConfig, BotConfig } from "@btc-arbitrage/config";
 
 /** Spec of one Arcus pair-trade strategy. Both legs live on Arcus
  * (operator decision 2026-10-27): the entry leg rests a passive post-only
@@ -30,6 +31,13 @@ export interface ArcusPairStrategySpec {
    * (entry, hedge) order. Metals use the futures pair GC=F/SI=F (tracks
    * TVC:GOLDSILVER at ~99.6%); SPYQQQ uses the liquid ETFs directly. */
   yahooSymbols: [string, string];
+  /** Env var family of the strategy's config section (GOLDSILVER /
+   * SPYQQQ), used to name variables in operator-facing errors. */
+  envPrefix: "GOLDSILVER" | "SPYQQQ";
+  /** Base asset of each leg market, for operator-facing labels
+   * ("SHORT GLD / LONG SLV" / "SHORT SPY / LONG QQQ"). */
+  entryAsset: string;
+  hedgeAsset: string;
 }
 
 export const ARCUS_PAIR_STRATEGIES: Record<
@@ -43,6 +51,9 @@ export const ARCUS_PAIR_STRATEGIES: Record<
     entryMarket: "GLD-USD",
     hedgeMarket: "SLV-USD",
     yahooSymbols: ["GC=F", "SI=F"],
+    envPrefix: "GOLDSILVER",
+    entryAsset: "GLD",
+    hedgeAsset: "SLV",
   },
   [SPYQQQ_SYMBOL]: {
     symbol: SPYQQQ_SYMBOL,
@@ -51,6 +62,9 @@ export const ARCUS_PAIR_STRATEGIES: Record<
     entryMarket: "SPY-USD",
     hedgeMarket: "QQQ-USD",
     yahooSymbols: ["SPY", "QQQ"],
+    envPrefix: "SPYQQQ",
+    entryAsset: "SPY",
+    hedgeAsset: "QQQ",
   },
 };
 
@@ -60,4 +74,24 @@ export function getArcusPairStrategy(
   return isArcusPairSymbol(symbol)
     ? ARCUS_PAIR_STRATEGIES[symbol as ArcusPairSymbol]
     : undefined;
+}
+
+/** getArcusPairStrategy that fails loudly on an unknown symbol — for call
+ * sites that already know the row is an Arcus-pair trade. */
+export function requireArcusPairStrategy(
+  symbol: string,
+): ArcusPairStrategySpec {
+  const spec = getArcusPairStrategy(symbol);
+  if (!spec) throw new Error(`Unknown Arcus-pair strategy symbol: ${symbol}`);
+  return spec;
+}
+
+/** Resolve the BotConfig section for a strategy symbol (GOLDSILVER ->
+ * config.goldSilver, SPYQQQ -> config.spyQqq). Callers pass only symbols
+ * already validated as Arcus-pair (requireArcusPairStrategy). */
+export function resolveArcusPairConfig(
+  config: BotConfig,
+  symbol: string,
+): ArcusPairStrategyConfig {
+  return symbol === SPYQQQ_SYMBOL ? config.spyQqq : config.goldSilver;
 }

@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { parseDecimal, type ArcusPairSide } from "@btc-arbitrage/domain";
 import { tradeLegs } from "@btc-arbitrage/db";
-import { GOLD_MARKET } from "./metal-ratio-warmup.js";
+import type { ArcusPairStrategySpec } from "./arcus-pair-strategies.js";
 import {
   closeMetalTrade,
   loadActiveMetalTrade,
@@ -37,7 +37,7 @@ export async function evaluateMetalTradeExitTriggers(
     .from(tradeLegs)
     .where(eq(tradeLegs.tradeId, trade.id));
   if (legs.length === 0) return;
-  const { goldLeg } = metalLegMarkets(trade.side);
+  const { entryLeg } = metalLegMarkets(ctx.strategy, trade.side);
 
   let grossPnl = 0;
   let entryFees = 0;
@@ -50,7 +50,7 @@ export async function evaluateMetalTradeExitTriggers(
       ? parseDecimal(String(leg.quantityBase), "qty")
       : 0;
     const mark =
-      leg.side === goldLeg.side
+      leg.side === entryLeg.side
         ? parseDecimal(tick.goldPriceUsd, "goldMark")
         : parseDecimal(tick.silverPriceUsd, "silverMark");
     const sideSign = leg.side === "long" ? 1 : -1;
@@ -71,12 +71,12 @@ export async function evaluateMetalTradeExitTriggers(
   const breakeven = entryFees + exitEstimate;
   const net = grossPnl - breakeven;
 
-  const marginUsd = parseDecimal(ctx.config.goldSilver.marginUsd, "marginUsd");
+  const marginUsd = parseDecimal(ctx.strategyConfig.marginUsd, "marginUsd");
   const totalMargin = 2 * marginUsd;
   const slThreshold =
-    -(ctx.config.goldSilver.stopLossMarginPercent / 100) * totalMargin;
+    -(ctx.strategyConfig.stopLossMarginPercent / 100) * totalMargin;
   const tpFloor =
-    breakeven + parseDecimal(ctx.config.goldSilver.tpMinNetUsd, "tpMinNetUsd");
+    breakeven + parseDecimal(ctx.strategyConfig.tpMinNetUsd, "tpMinNetUsd");
 
   // 1) Stop-loss: deepest priority, market close on both legs.
   if (net <= slThreshold) {
@@ -133,7 +133,7 @@ export async function evaluateMetalTradeExitTriggers(
   if (trade.openedAt) {
     const ageMs = Date.now() - trade.openedAt.getTime();
     if (
-      ageMs >= ctx.config.goldSilver.timeStopHours * 3_600_000 &&
+      ageMs >= ctx.strategyConfig.timeStopHours * 3_600_000 &&
       net >= breakeven
     ) {
       console.warn("Metal trade time-stop trigger", {
@@ -151,9 +151,12 @@ export async function evaluateMetalTradeExitTriggers(
 
 /** Market symbol for a leg side, exposed for monitor/test reuse. */
 export function metalLegMarketForSide(
+  strategy: ArcusPairStrategySpec,
   side: ArcusPairSide,
   legSide: "short" | "long",
 ): string {
-  const { goldLeg } = metalLegMarkets(side);
-  return legSide === goldLeg.side ? GOLD_MARKET : "SLV-USD";
+  const { entryLeg } = metalLegMarkets(strategy, side);
+  return legSide === entryLeg.side
+    ? strategy.entryMarket
+    : strategy.hedgeMarket;
 }

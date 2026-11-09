@@ -16,7 +16,7 @@ import {
   spreadSnapshots,
   trades,
 } from "@btc-arbitrage/db";
-import { and, desc, eq, inArray, ne, notInArray } from "drizzle-orm";
+import { and, desc, eq, inArray, notInArray } from "drizzle-orm";
 import { monitorTrades } from "../trading/trade-monitor.js";
 import { sampleUnhedgedLegs } from "../trading/unhedged-sampler.js";
 import { recoverStaleClosingTrades } from "../trading/close-recovery-monitor.js";
@@ -41,6 +41,10 @@ import {
 } from "../metal-ratio/metal-ratio-warmup.js";
 import { persistRatioSnapshot } from "../metal-ratio/metal-ratio-store.js";
 import { evaluateMetalTradeExitTriggers } from "../metal-ratio/metal-trade-monitor.js";
+import {
+  requireArcusPairStrategy,
+  resolveArcusPairConfig,
+} from "../metal-ratio/arcus-pair-strategies.js";
 
 export interface ExchangeRegistry {
   get(id: string): ExchangeAdapter;
@@ -617,7 +621,7 @@ export async function runPollingLoop(input: {
       // (any Arcus-pair strategy shares the single active-trade slot) but
       // only needs existence.
       const activeMetal = await input.db
-        .select({ id: trades.id })
+        .select({ id: trades.id, symbol: trades.symbol })
         .from(trades)
         .where(
           and(
@@ -627,6 +631,9 @@ export async function runPollingLoop(input: {
         )
         .limit(1);
       if (activeMetal.length === 0) return;
+      const activeStrategy = requireArcusPairStrategy(
+        activeMetal[0].symbol,
+      );
 
       // Cadence gate: the ratio tick runs at GOLDSILVER_PRICE_POLL_INTERVAL_MS
       // (default 5 s), not at the 1 Hz BTC tick. The engine works on candle
@@ -679,6 +686,11 @@ export async function runPollingLoop(input: {
               notify: (text) => input.notifier.notifyUrgent(text),
               notifyUrgent: (text) => input.notifier.notifyUrgent(text),
               enqueue: (job) => input.executionQueue.enqueue(job),
+              strategy: activeStrategy,
+              strategyConfig: resolveArcusPairConfig(
+                input.config,
+                activeStrategy.symbol,
+              ),
             },
             {
               goldPriceUsd: gold.priceUsd,

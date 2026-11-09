@@ -4,6 +4,7 @@ import { signals, tradeLegs, tradePreviews, trades } from "@btc-arbitrage/db";
 import { eq } from "drizzle-orm";
 import {
   findTradingPair,
+  GOLD_SILVER_SYMBOL,
   isArcusPairSymbol,
   parseDecimal,
   TRADING_PAIRS,
@@ -77,6 +78,11 @@ import {
   readArmedCloseAtNetUsd,
   setArmedCloseAtNetUsd,
 } from "../metal-ratio/metal-trade-service.js";
+import {
+  ARCUS_PAIR_STRATEGIES,
+  requireArcusPairStrategy,
+  resolveArcusPairConfig,
+} from "../metal-ratio/arcus-pair-strategies.js";
 import { manualMarketCloseTrade } from "../trading/manual-trade-close.js";
 import { renderMetalRatioChart } from "../metal-ratio/metal-ratio-chart.js";
 import { loadYahooRatioBuckets } from "../metal-ratio/yahoo-metals-client.js";
@@ -1294,6 +1300,8 @@ export class TelegramCommandPoller {
             notifyUrgent: async (text: string) => {
               await this.sendMessage(text);
             },
+            strategy: ARCUS_PAIR_STRATEGIES[GOLD_SILVER_SYMBOL],
+            strategyConfig: this.config.goldSilver,
           };
           const tradeId = await createMetalTrade(metalCtx, validSide);
           await reply(
@@ -1709,6 +1717,11 @@ export class TelegramCommandPoller {
                     notifyUrgent: async (text: string) => {
                       await this.sendMessage(text);
                     },
+                    strategy: requireArcusPairStrategy(trade.symbol),
+                    strategyConfig: resolveArcusPairConfig(
+                      this.config,
+                      trade.symbol,
+                    ),
                   },
                   tradeId,
                   "manual operator close",
