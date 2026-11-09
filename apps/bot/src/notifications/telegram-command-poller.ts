@@ -325,7 +325,7 @@ export class TelegramCommandPoller {
       if (isTelegramCommand(text, "config")) {
         await this.sendMessage(
           formatActiveConfigSummary(this.config, this.settingsBaseline),
-          { inline_keyboard: RUNTIME_SETTING_BUTTONS },
+          { inline_keyboard: CONFIG_ROOT_BUTTONS },
         );
         return;
       }
@@ -544,8 +544,15 @@ export class TelegramCommandPoller {
       const persistNote = await this.persistAppliedChange(change);
       const exchangeSyncNote =
         kind === "leverage" ? "\n(exchange leverage updated)" : "";
+      // Land back on the submenu the setting came from (Arbitrage vs
+      // Metals) so the operator can keep tuning without re-opening /config.
+      const appliedMarkup =
+        kind.startsWith("metal")
+          ? { inline_keyboard: CONFIG_METALS_BUTTONS }
+          : { inline_keyboard: CONFIG_ARBITRAGE_BUTTONS };
       await this.sendMessage(
         `✅ ${change.summary}${persistNote}${exchangeSyncNote}`,
+        appliedMarkup,
       );
     } catch (error) {
       console.error("Telegram setting input failed", {
@@ -587,6 +594,44 @@ export class TelegramCommandPoller {
               });
             },
           );
+        }
+      } else if (data === "cfg:arb" || data === "cfg:metals") {
+        // Submenu navigation: entering a strategy menu cancels any
+        // pending value prompt so a stale prompt never swallows the next
+        // typed message.
+        this.pendingSettingPrompt = null;
+        const isArbitrage = data === "cfg:arb";
+        const messageId = callback.message?.message_id;
+        if (typeof messageId === "number") {
+          await this.editMessageText(
+            messageId,
+            isArbitrage ? "₿ Arbitrage settings" : "🥇 Metals settings",
+            {
+              inline_keyboard: isArbitrage
+                ? CONFIG_ARBITRAGE_BUTTONS
+                : CONFIG_METALS_BUTTONS,
+            },
+          ).catch((error: unknown) => {
+            console.warn("Telegram config-submenu edit failed", {
+              messageId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
+      } else if (data === "cfg:back") {
+        this.pendingSettingPrompt = null;
+        const messageId = callback.message?.message_id;
+        if (typeof messageId === "number") {
+          await this.editMessageText(
+            messageId,
+            formatActiveConfigSummary(this.config, this.settingsBaseline),
+            { inline_keyboard: CONFIG_ROOT_BUTTONS },
+          ).catch((error: unknown) => {
+            console.warn("Telegram config-back edit failed", {
+              messageId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
         }
       } else if (data === "set:cooldown") {
         const messageId = callback.message?.message_id;
@@ -644,6 +689,7 @@ export class TelegramCommandPoller {
               await this.editMessageText(
                 messageId,
                 `✅ ${change.summary}${persistNote}`,
+                { inline_keyboard: CONFIG_ARBITRAGE_BUTTONS },
               ).catch((error: unknown) => {
                 console.warn("Telegram cooldown-apply edit failed", {
                   messageId,
@@ -854,6 +900,7 @@ export class TelegramCommandPoller {
             await this.editMessageText(
               messageId,
               `✅ ${change.summary}${persistNote}`,
+              { inline_keyboard: CONFIG_ROOT_BUTTONS },
             ).catch((error: unknown) => {
                 console.warn("Telegram auto-confirm-apply edit failed", {
                   messageId,
@@ -2650,13 +2697,29 @@ const VOLUME_VIEW_BUTTONS = [
   { text: "6 months", callback_data: "volume:6m" },
 ] as const;
 
-// Two buttons per row, in operator-priority order: the everyday alert
-// settings first, the sizing settings second (BTC margin + leverage derive
-// the per-leg notional together, metal margin + leverage right under for
-// the gold/silver trade), and the strategy-level row last — Pairs and the
-// dangerous auto-trading toggle, which must never render glued to the
-// everyday settings.
-const RUNTIME_SETTING_BUTTONS = [
+// Config menu navigation. The root menu groups the strategy-specific
+// settings one level down (Arbitrage = BTC spread trade, Metals =
+// gold/silver ratio trade) so the top level stays compact; each submenu
+// carries a Back button that re-renders the root menu. The strategy-level
+// row (Pairs + the dangerous auto-trading toggle) stays at the root and
+// must never render glued to the everyday settings.
+const CONFIG_BACK_BUTTON = {
+  text: "← Back",
+  callback_data: "cfg:back",
+} as const;
+
+const CONFIG_ROOT_BUTTONS = [
+  [
+    { text: "🪙 Pairs", callback_data: "set:pair" },
+    { text: "🤖 Auto trade", callback_data: "set:autoconfirm" },
+  ],
+  [
+    { text: "₿ Arbitrage", callback_data: "cfg:arb" },
+    { text: "🥇 Metals", callback_data: "cfg:metals" },
+  ],
+] as const;
+
+const CONFIG_ARBITRAGE_BUTTONS = [
   [
     { text: "⏱ Cooldown", callback_data: "set:cooldown" },
     { text: "📏 Min spread", callback_data: "set:spread" },
@@ -2665,6 +2728,10 @@ const RUNTIME_SETTING_BUTTONS = [
     { text: "💰 Margin", callback_data: "set:margin" },
     { text: "⚡️ Leverage", callback_data: "set:leverage" },
   ],
+  [CONFIG_BACK_BUTTON],
+] as const;
+
+const CONFIG_METALS_BUTTONS = [
   [
     { text: "💰 Margin 🥇", callback_data: "set:metalmargin" },
     { text: "⚡️ Leverage 🥇", callback_data: "set:metalleverage" },
@@ -2674,10 +2741,7 @@ const RUNTIME_SETTING_BUTTONS = [
     { text: "📉 Max entry slippage 🥇", callback_data: "set:metalmaxslip" },
     { text: "🔁 Hedge retries 🥇", callback_data: "set:metalhedgeretries" },
   ],
-  [
-    { text: "🪙 Pairs", callback_data: "set:pair" },
-    { text: "🤖 Auto trade", callback_data: "set:autoconfirm" },
-  ],
+  [CONFIG_BACK_BUTTON],
 ] as const;
 
 /** Pair submenu buttons, generated from the shared TRADING_PAIRS catalog so
