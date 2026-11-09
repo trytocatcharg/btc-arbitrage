@@ -59,11 +59,13 @@ need no migration.
       pair_symbol); `/trade` summary leg labels per strategy.
 - [ ] 4. **Docs + env example** — AGENTS.md, docs, `.env.example`
       `SPYQQQ_*` block; final typecheck; report.
-- [ ] 5. **Tests** — re-enable test work for this feature (explicit
+- [x] 5. **Tests** — re-enable test work for this feature (explicit
       operator request 2026-11-1x, superseding the 2026-08-16 pause):
       fix existing tests broken by the refactor and add coverage for the
       registry, the SPYQQQ config parsing, and the global single-trade
-      lock. Run `yarn test`.
+      lock. Run `yarn test`. → bot 75/75, config 11/11, domain 2/2;
+      metal fixtures gained strategy/strategyConfig; new
+      arcus-pair-strategies.test.ts + global-slot test + config cases.
 
 ## Evidence
 
