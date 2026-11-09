@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { BotConfig } from "@btc-arbitrage/config";
 import { tradeLegs, trades } from "@btc-arbitrage/db";
-import { ExecutionMode } from "@btc-arbitrage/domain";
+import { ExecutionMode, GOLD_SILVER_SYMBOL } from "@btc-arbitrage/domain";
+import { ARCUS_PAIR_STRATEGIES } from "../src/metal-ratio/arcus-pair-strategies.js";
 import type {
   BestBidOffer,
   ExecutionAdapter,
@@ -179,6 +180,8 @@ function makeContext(
     notifyUrgent: async (text) => {
       urgentNotifications.push(text);
     },
+    strategy: ARCUS_PAIR_STRATEGIES[GOLD_SILVER_SYMBOL],
+    strategyConfig: config.goldSilver,
   };
   return { ctx, notifications, urgentNotifications };
 }

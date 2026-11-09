@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { BotConfig } from "@btc-arbitrage/config";
 import { tradeLegs, trades } from "@btc-arbitrage/db";
-import { ExecutionMode } from "@btc-arbitrage/domain";
+import { ExecutionMode, GOLD_SILVER_SYMBOL } from "@btc-arbitrage/domain";
+import { ARCUS_PAIR_STRATEGIES } from "../src/metal-ratio/arcus-pair-strategies.js";
 import type {
   BestBidOffer,
   ExecutionAdapter,
@@ -217,6 +218,8 @@ function makeContext(
     notifyUrgent: async (text) => {
       urgentNotifications.push(text);
     },
+    strategy: ARCUS_PAIR_STRATEGIES[GOLD_SILVER_SYMBOL],
+    strategyConfig: config.goldSilver,
   };
   return { ctx, notifications, urgentNotifications };
 }
@@ -411,6 +414,56 @@ test("duplicate guard refuses while another metal trade is active (joined query)
   assert.equal(db.rows(trades).length, 1);
   assert.equal(db.rows(tradeLegs).length, 2);
   // The projection + innerJoin + inArray condition was fully parsed.
+  assert.equal(db.unparsedConditions.length, 0);
+});
+
+test("global Arcus-pair slot: an active SPYQQQ trade also refuses a GOLDSILVER entry", async () => {
+  const db = createFakeDrizzleDb();
+  db.seed(trades, [
+    {
+      id: 10,
+      symbol: "SPYQQQ",
+      marketType: "perpetual",
+      priceSource: "mark",
+      mode: "dry-run",
+      status: "open",
+      longExchange: "arcus",
+      shortExchange: "arcus",
+      leverage: 3,
+      filledNotionalUsd: "120",
+      openedAt: new Date(),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    },
+  ]);
+  db.seed(tradeLegs, [
+    {
+      id: 101,
+      tradeId: 10,
+      exchangeId: "arcus",
+      side: "short",
+      status: "open",
+      quantityBase: "0.08",
+      raw: { market: "SPY-USD" },
+    },
+    {
+      id: 102,
+      tradeId: 10,
+      exchangeId: "arcus",
+      side: "long",
+      status: "open",
+      quantityBase: "0.18",
+      raw: { market: "QQQ-USD" },
+    },
+  ]);
+  const { execution, calls } = fakeMetalExecution();
+  const { ctx } = makeContext(db, execution);
+  await assert.rejects(
+    () => createMetalTrade(ctx, "short_gold_long_silver"),
+    /already active \(trade #10, open\)/,
+  );
+  assert.equal(calls.length, 0);
+  assert.equal(db.rows(trades).length, 1);
   assert.equal(db.unparsedConditions.length, 0);
 });
 

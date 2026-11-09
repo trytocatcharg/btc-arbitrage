@@ -49,6 +49,41 @@ test('loadBotConfig parses configurable TP/SL percentages for open-trade protect
   assert.equal(config.openTrade.stopLossPercent, '2.5');
 });
 
+test('loadBotConfig parses the SPYQQQ_* env family into config.spyQqq independently of GOLDSILVER_*', () => {
+  const config = loadBotConfig({});
+  // Same shape and defaults as the metals section until overridden.
+  assert.equal(config.spyQqq.marginUsd, config.goldSilver.marginUsd);
+  assert.equal(config.spyQqq.leverage, config.goldSilver.leverage);
+  assert.equal(config.spyQqq.tpMinNetUsd, config.goldSilver.tpMinNetUsd);
+  assert.equal(config.spyQqq.maxEntrySlippageBps, config.goldSilver.maxEntrySlippageBps);
+  assert.equal(config.spyQqq.hedgeRetryAttempts, config.goldSilver.hedgeRetryAttempts);
+
+  const overridden = loadBotConfig({
+    SPYQQQ_MARGIN_USD: '35',
+    SPYQQQ_LEVERAGE: '5',
+    SPYQQQ_TP_MIN_NET_USD: '15',
+    SPYQQQ_MAX_ENTRY_SLIPPAGE_BPS: '60',
+    SPYQQQ_HEDGE_RETRY_ATTEMPTS: '4',
+  });
+  assert.equal(Number(overridden.spyQqq.marginUsd), 35);
+  assert.equal(overridden.spyQqq.leverage, 5);
+  assert.equal(Number(overridden.spyQqq.tpMinNetUsd), 15);
+  assert.equal(overridden.spyQqq.maxEntrySlippageBps, 60);
+  assert.equal(overridden.spyQqq.hedgeRetryAttempts, 4);
+  // The metals section is untouched by the SPYQQQ_* overrides.
+  assert.equal(overridden.goldSilver.leverage, 3);
+});
+
+test('loadBotConfig names SPYQQQ_* variables in validation errors', () => {
+  assert.throws(() => loadBotConfig({ SPYQQQ_RSI_PERIOD: '1' }), /SPYQQQ_RSI_PERIOD/);
+  assert.throws(() => loadBotConfig({ SPYQQQ_CANDLE_TIMEFRAME: '7h' }), /SPYQQQ_CANDLE_TIMEFRAME/);
+});
+
+test('loadBotConfig rejects Arcus-pair pseudo-symbols as BTC_SYMBOL', () => {
+  assert.throws(() => loadBotConfig({ BTC_SYMBOL: 'SPYQQQ' }), /Arcus-pair pseudo-symbol/);
+  assert.throws(() => loadBotConfig({ BTC_SYMBOL: 'GOLDSILVER' }), /Arcus-pair pseudo-symbol/);
+});
+
 test('redactSecrets redacts token-like fields and database passwords', () => {
   const redacted = redactSecrets({ databaseUrl: 'mysql://u:pass@host/db', telegramBotToken: 'abc', nested: { apiKey: 'key' } });
   assert.deepEqual(redacted, { databaseUrl: '[REDACTED]', telegramBotToken: '[REDACTED]', nested: { apiKey: '[REDACTED]' } });
