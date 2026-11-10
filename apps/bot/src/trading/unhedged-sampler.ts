@@ -22,7 +22,24 @@ import { formatDecimal, parseDecimal } from "@btc-arbitrage/domain";
  * (mark − entry) × qty × (long ? 1 : −1), NULL when entry/qty is unknown —
  * never estimated. Sampling is best-effort: a failing adapter logs a warn
  * and the pass continues with the next leg.
+ *
+ * Symbol resolution: the trade-level `symbol` IS the market for BTC spread
+ * trades, but Arcus-pair trades (GOLDSILVER/SPYQQQ) carry a pseudo-symbol
+ * that no exchange resolves — those legs persist the real venue market
+ * (e.g. SLV-USD) in `trade_legs.raw.market`, and it wins when present.
  */
+/** Defensive read of the per-leg market hint persisted in the leg's
+ * raw JSON. Arcus-pair trades (GOLDSILVER/SPYQQQ) store the real venue
+ * market there (e.g. SLV-USD) because the trade-level pseudo-symbol is
+ * not resolvable by any exchange (same `raw.market` contract
+ * metal-trade-service.ts reads). BTC spread legs carry no hint — their
+ * trade symbol IS the market — so the caller falls back to it. */
+function readLegMarketHint(raw: unknown): string | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const value = (raw as Record<string, unknown>).market;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
 export async function sampleUnhedgedLegs(input: {
   db: Awaited<ReturnType<typeof getDb>>;
   registry: { get(id: string): ExchangeAdapter };
@@ -71,10 +88,11 @@ export async function sampleUnhedgedLegs(input: {
 
     const leg = row.trade_legs;
     try {
+      const marketSymbol = readLegMarketHint(leg.raw) ?? row.trades.symbol;
       const snapshot = await input.registry
         .get(leg.exchangeId)
         .getPriceSnapshot({
-          symbol: row.trades.symbol,
+          symbol: marketSymbol,
           marketType: input.config.marketType,
           priceSource: input.config.priceSource,
         });

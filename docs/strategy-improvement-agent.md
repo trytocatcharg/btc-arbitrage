@@ -2,7 +2,8 @@
 
 Status: active — phase 1 (observability) implemented on branch
 `feat/unhedged-observability` (commit `046ac50`), pending deploy + push.
-Last updated: 2026-10-09.
+Phase 2 implemented (unhedged-pnl-sampling), pending deploy.
+Last updated: 2026-11-14.
 
 ## Goal
 
@@ -64,6 +65,25 @@ live order path.
 - Read-only DB access (or the backend base URL) for the environment where it
   runs.
 - Approval of each proposed change; push/deploy of the bot and backend.
+
+## Strategy coverage (operator decision 2026-11-14)
+
+Unhedged-window observability (phases 1-2) covers ALL trade symbols, not
+just BTC: the analysis service is symbol-agnostic and every event/timeline
+payload carries the trade `symbol` (`BTCUSDT`, `GOLDSILVER`, `SPYQQQ`).
+Metal/ETF trades write `trade_status_history` through their own service and
+their unhedged flips (disaster-stop fires detected by the metal-scoped
+position monitor) flow into the same endpoints.
+
+- Sampler symbol resolution: Arcus-pair trades carry a pseudo-symbol at the
+trade level, so the phase-2 sampler resolves each leg's real venue market
+from `trade_legs.raw.market` (e.g. `SLV-USD`) when present, falling back to
+`trades.symbol` for BTC spread legs.
+- Phases 3-6 (decision events, analysis agent, backtest, policy engine)
+  remain BTC-centric: they target the unhedged-window exit-policy problem.
+  Extending them to metal/ETF strategy questions (TP-floor calibration from
+  realized data, entry/exit quality per strategy) is a future operator
+  decision, not planned work.
 
 ## Key data conventions
 
