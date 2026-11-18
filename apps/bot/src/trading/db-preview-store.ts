@@ -30,8 +30,32 @@ import type {
 import { extractAffectedRows, extractInsertId } from "../db-result.js";
 
 export class DbPreviewStore implements PreviewStore {
-  constructor(private readonly db: Awaited<ReturnType<typeof getDb>>) {}
+  /**
+   * @param instanceId bot-instance-split: the owning bot process id
+   * (config.instanceId). Required for the ownership-scoped operations
+   * (createPreview / startExecution / hasBlockingExecution) — they stamp
+   * and filter rows by trades/trade_previews.bot_instance. Transition-only
+   * stores (close/recovery flows operate by token) may omit it.
+   */
+  constructor(
+    private readonly db: Awaited<ReturnType<typeof getDb>>,
+    private readonly instanceId?: string,
+  ) {}
+
+  /** Fail-closed accessor: ownership-scoped operations never run without
+   * the instance id (a missing id must die loudly, never stamp or scan
+   * rows across instances). */
+  private requireInstanceId(): string {
+    if (!this.instanceId) {
+      throw new Error(
+        "DbPreviewStore: bot instance id is required for ownership-scoped operations",
+      );
+    }
+    return this.instanceId;
+  }
+
   async createPreview(preview: OpenTradePreview): Promise<void> {
+    const instanceId = this.requireInstanceId();
     if (await this.hasBlockingExecution())
       throw new Error(
         "Cannot open a new trade: another trade is active or awaiting confirmation",
@@ -42,6 +66,10 @@ export class DbPreviewStore implements PreviewStore {
       status: "awaiting_confirmation",
       expiresAt: preview.expiresAt,
       payload: preview,
+      // bot-instance-split: the preview row is stamped with the owning
+      // bot process (both the signal-driven and /arb screener paths
+      // funnel through this method).
+      botInstance: instanceId,
       createdAt: new Date(),
       updatedAt: new Date(),
     });
@@ -92,6 +120,9 @@ export class DbPreviewStore implements PreviewStore {
         longExchange: preview.longExchange,
         shortExchange: preview.shortExchange,
         leverage,
+        // bot-instance-split: the trade row is stamped with the owning
+        // bot process; every monitor/ownership query filters on it.
+        botInstance: this.requireInstanceId(),
         entrySpreadUsd: formatDecimal(
           Number(preview.shortPriceUsd) - Number(preview.longPriceUsd),
           8,
@@ -220,10 +251,16 @@ export class DbPreviewStore implements PreviewStore {
     return extractAffectedRows(result) === 1;
   }
   async hasBlockingExecution(): Promise<boolean> {
+    const instanceId = this.requireInstanceId();
     const pendingPreview = await this.db
       .select({ id: tradePreviews.id })
       .from(tradePreviews)
-      .where(eq(tradePreviews.status, "awaiting_confirmation"))
+      .where(
+        and(
+          eq(tradePreviews.status, "awaiting_confirmation"),
+          eq(tradePreviews.botInstance, instanceId),
+        ),
+      )
       .limit(1);
     if (pendingPreview.length > 0) return true;
     // gold-silver-decouple: active GOLD/SILVER trades do NOT block BTC
@@ -231,12 +268,18 @@ export class DbPreviewStore implements PreviewStore {
     // exchanges, metal on Arcus), so there is no collateral or execution
     // conflict. A second BTC trade while another BTC trade is active is
     // still blocked by this same query.
+    // bot-instance-split: ownership is decided by the bot_instance column
+    // (WHO owns the row); the Arcus-pair symbol exclusion stays as a
+    // strategy-KIND discriminator (BTC entries never conflict with
+    // Arcus-pair trades of the SAME instance), which only matters for a
+    // both-strategy instance. This is not a symbol ownership fallback.
     const activeTrade = await this.db
       .select({ id: trades.id })
       .from(trades)
       .where(
         and(
           inArray(trades.status, [...activeTradeStatuses]),
+          eq(trades.botInstance, instanceId),
           notInArray(trades.symbol, [...ARCUS_PAIR_SYMBOLS]),
         ),
       )

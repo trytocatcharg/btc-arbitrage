@@ -35,12 +35,13 @@ export async function monitorTrades(input: {
   db: Awaited<ReturnType<typeof getDb>>;
   registry: { get(id: string): ExchangeAdapter };
   notify: (text: string) => Promise<void>;
-  /** gold-silver-decouple: when present and an Arcus-pair trade is
-   * active, Arcus leg position polls are throttled to the ACTIVE
-   * strategy's pricePollIntervalMs (default 5 s) instead of the full
-   * monitor cadence, capping Arcus request volume (429 risk). Absent in
-   * legacy callers/tests: no throttling. */
-  config?: BotConfig;
+  /** gold-silver-decouple: when an Arcus-pair trade is active, Arcus leg
+   * position polls are throttled to the ACTIVE strategy's
+   * pricePollIntervalMs (default 5 s) instead of the full monitor
+   * cadence, capping Arcus request volume (429 risk). REQUIRED
+   * (bot-instance-split): config.instanceId also scopes the monitored
+   * legs to this bot process — there is no unscoped mode. */
+  config: BotConfig;
   /** Optional trade-symbol scope: the paused main loop runs a
    * metal-only pass so a hand-closed Arcus position is still detected
    * while paused (metal trades have no resting exchange protection).
@@ -50,15 +51,16 @@ export async function monitorTrades(input: {
   // One cheap probe per monitor pass; without an active Arcus-pair trade
   // the Arcus throttle does not apply at all (no Arcus-pair legs can
   // exist). The cadence comes from the ACTIVE strategy's own config
-  // section (GOLDSILVER vs SPYQQQ).
-  const activeArcusPair = input.config
-    ? await loadActiveMetalTrade({ db: input.db })
-    : undefined;
-  const arcusPollMinIntervalMs =
-    input.config && activeArcusPair
-      ? resolveArcusPairConfig(input.config, activeArcusPair.symbol)
-          .pricePollIntervalMs
-      : 0;
+  // section (GOLDSILVER vs SPYQQQ). Instance-scoped (bot-instance-split):
+  // the probe only sees trades owned by THIS bot process.
+  const activeArcusPair = await loadActiveMetalTrade({
+    db: input.db,
+    config: input.config,
+  });
+  const arcusPollMinIntervalMs = activeArcusPair
+    ? resolveArcusPairConfig(input.config, activeArcusPair.symbol)
+        .pricePollIntervalMs
+    : 0;
   const throttleArcusPolls = arcusPollMinIntervalMs > 0;
 
   const rows = await input.db
@@ -68,6 +70,13 @@ export async function monitorTrades(input: {
     .where(
       and(
         ...(input.onlySymbol != null ? [eq(trades.symbol, input.onlySymbol)] : []),
+        // bot-instance-split (CRITICAL): monitor ONLY legs owned by this
+        // bot process. Two bot instances share the database with
+        // different wallets; without this filter each instance's
+        // getPosition would return null for the OTHER instance's legs
+        // and this monitor would falsely mark them closed, fabricating
+        // closures and PnL. REQUIRED: no unscoped mode exists.
+        eq(trades.botInstance, input.config.instanceId),
         // F1 (trade-execution-queue Step 2, safety re-review 2026-10-07,
         // completed same day): monitor 'open' AND 'unhedged' trades. The
         // hedging-phase risk F1 guards against is real — the hedge leg row

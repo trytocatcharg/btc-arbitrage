@@ -2,7 +2,7 @@ import type { BotConfig } from "@btc-arbitrage/config";
 import { isArcusPairSymbol } from "@btc-arbitrage/domain";
 import { botRuntimeOverrides } from "@btc-arbitrage/db";
 import type { getDb } from "@btc-arbitrage/db";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import {
   applyAutoConfirm,
   applyCooldownMinutes,
@@ -68,7 +68,10 @@ function readSettingValue(config: BotConfig, key: RuntimeSettingKey): string {
   }
 }
 
-/** Upsert one runtime override so it survives bot restarts. Rethrows on failure. */
+/** Upsert one runtime override so it survives bot restarts. Rethrows on failure.
+ * bot-instance-split: the row is stamped with (and upserts on the composite
+ * PK of) this process's config.instanceId, so two instances sharing the
+ * database keep fully independent override sets. */
 export async function persistRuntimeOverride(
   db: Db,
   config: BotConfig,
@@ -80,6 +83,7 @@ export async function persistRuntimeOverride(
       .values({
         settingKey: key,
         settingValue: readSettingValue(config, key),
+        botInstance: config.instanceId,
       })
       .onDuplicateKeyUpdate({
         set: {
@@ -131,12 +135,19 @@ function parseStoredValue(
  * Apply persisted overrides onto the live config at boot. Unknown keys and
  * invalid stored values are skipped with a warning — a bad row must never
  * prevent the bot from starting.
+ * bot-instance-split: only rows stamped with THIS process's instanceId are
+ * applied (the composite PK backfill attributed the metal- and
+ * etf-prefixed keys to the metal instance and the rest to the btc
+ * instance).
  */
 export async function applyPersistedRuntimeOverrides(
   db: Db,
   config: BotConfig,
 ): Promise<RuntimeSettingChange[]> {
-  const rows = await db.select().from(botRuntimeOverrides);
+  const rows = await db
+    .select()
+    .from(botRuntimeOverrides)
+    .where(eq(botRuntimeOverrides.botInstance, config.instanceId));
   const changes: RuntimeSettingChange[] = [];
 
   for (const row of rows) {

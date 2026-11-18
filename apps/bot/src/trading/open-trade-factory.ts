@@ -97,7 +97,7 @@ export function createOpenTradeService(input: {
 }): OpenTradeService {
   return new OpenTradeService(
     input.registry,
-    new DbPreviewStore(input.db),
+    new DbPreviewStore(input.db, input.config.instanceId),
     buildOpenTradeOptions(input.config, input.notify),
   );
 }
@@ -119,7 +119,7 @@ export function createArbOpenTradeService(input: {
 }): OpenTradeService {
   return new OpenTradeService(
     input.registry,
-    new DbPreviewStore(input.db),
+    new DbPreviewStore(input.db, input.config.instanceId),
     buildOpenTradeOptions(input.config, input.notify, {
       notionalUsd: input.config.arbTrade.notionalUsd,
       leverage: input.config.arbTrade.leverage,

@@ -1,8 +1,9 @@
 # Bot instance split (BTC + metal as separate processes)
 
-**Status:** PLANNED — design approved by operator 2026-11-12, pending
-implementation. Do NOT start without re-confirming the open decision at
-the bottom.
+**Status:** CODE PHASE DONE (uncommitted, verified by gentle-ai-verify +
+`yarn typecheck` exit 0) — pending operator deploy. Migration 0010
+applied to the live DB manually 2026-11. Do NOT deploy without reading
+the transition note at the bottom.
 
 ## Goal
 
@@ -35,16 +36,33 @@ the OTHER instance's legs as position-less and falsely close them,
  fabricating closures/PnL. Every monitor/recovery/reconciler query must
 be instance-scoped BEFORE any split is deployed.
 
-## Migration 0009 (sketch)
+## Migration 0010 (hand-written, file ready)
 
 Hand-written, same style as 0007/0008 (drizzle-kit generate not trusted
-here — snapshot drift in migrations/meta).
+here — snapshot drift in migrations/meta). File:
+`packages/db/migrations/0010_bot_instance.sql` (journal entry added,
+idx 10). 0009 was already taken by `ratio_snapshots_pair_symbol`, so
+the split migration is 0010, not 0009 as originally sketched.
 
 Column on: `trades`, `trade_previews`, `bot_runtime_overrides`
-(PK becomes `(setting_key, bot_instance)`), `telegram_command_logs`.
+(PK becomes `(setting_key, bot_instance)`), `telegram_command_logs`
+(kept `'legacy'` — command history can't be attributed retroactively).
 NOT on: `trade_legs`, `unhedged_leg_samples`, `ratio_snapshots`,
 `spread_snapshots`, `signals`, `events`, `operations` (derivable by join
-or single-strategy).
+or single-strategy). Plus `trade_instance_status_idx`
+(`bot_instance`, `status`) for the instance-scoped monitor queries.
+
+Backfill (deviations from the original sketch, both operator-visible):
+- `trades`: `symbol IN ('GOLDSILVER','SPYQQQ')` → `'metal'` (SPYQQQ did
+  not exist when the sketch was written), rest → `'btc'`.
+- `bot_runtime_overrides`: `metal%` AND `etf%` keys → `'metal'` (etf* =
+  SPY/QQQ settings), rest → `'btc'`.
+- `trade_previews`: from parent trade via join, else `'btc'`.
+
+Applied MANUALLY by the operator (paste, not `yarn db:migrate`)
+(operator policy 2026-11: migrations are ALWAYS applied by hand;
+`__drizzle_migrations` does not exist in the DB and must not be created
+— `yarn db:migrate` would try to re-apply 0000+ and fail).
 
 ```sql
 ALTER TABLE `trades` ADD COLUMN `bot_instance` varchar(32) NOT NULL DEFAULT 'legacy';
@@ -61,8 +79,8 @@ ALTER TABLE `bot_runtime_overrides` DROP PRIMARY KEY;
 ALTER TABLE `bot_runtime_overrides` ADD PRIMARY KEY (`setting_key`, `bot_instance`);
 ```
 
-Also: `_journal.json` entry (idx 9), drizzle schema.ts, and a note in
-AGENTS.md's migration-drift landmines.
+Also: `_journal.json` entry (idx 10, done), drizzle schema.ts, and a
+note in AGENTS.md's migration-drift landmines.
 
 ## Config
 
@@ -119,8 +137,44 @@ becomes `eq(trades.botInstance, config.instanceId)` in:
    real value (see open decision).
 3. Boot the second instance with its own Telegram token + Arcus wallet.
 
-## Open decision (ask the operator before implementing)
+## Implementation tasks (code phase)
 
-The backfill `UPDATE`s assume instance ids `btc` / `metal`. Confirm the
-final values (they're baked into the migration backfill and every
-deploy env).
+1. `schema.ts`: `botInstance` column on trades/tradePreviews/telegramCommandLogs; botRuntimeOverrides column + composite PK. (Done — column added manually by operator.)
+2. Config: `BOT_INSTANCE` (default `'main'`) → `config.instanceId`; `BOT_STRATEGY=btc|metal|both` (default `both`) → `config.strategy`. Validate, show in `/config` summary + boot log.
+3. Stamp sites: BTC open-trade insert, `createMetalTrade`, preview inserts (db-preview-store), telegram_command_logs (schema-only — no writer exists in code today).
+4. Instance-scope ~10 queries (strict `eq(botInstance, instanceId)`, see semantics below).
+5. Loop split + adapter construction per strategy + Telegram surface gating.
+6. Typecheck clean. (Done — plus F2 hardening: monitorTrades config,
+hasActiveTrades/loadClosableTrades/loadActiveTrades instanceId, and
+TradeSummaryDependencies.config are all REQUIRED — no unscoped mode.)
+
+## Post-verify notes
+
+- F1 (CONFIRMED by operator 2026-11: keep conservative):
+  `runtime-control.ts` `loadActiveTrades` (/bot pause/restart + pair:apply
+  guards) stays CROSS-INSTANCE on purpose — an instance cannot restart
+  while the OTHER instance has an open trade. Over-blocking, never
+  under-blocking. Do NOT instance-scope it without a new operator
+  decision.
+- One ripple outside the planned surfaces: `open-trade-factory.ts`
+  (2 lines) passes `config.instanceId` into both DbPreviewStore
+  constructions — unavoidable, that's where the stores are built.
+- BTC-entry guards keep `AND notInArray(symbol, ARCUS_PAIR_SYMBOLS)`
+  alongside the instance filter: that symbol check is the strategy-KIND
+  discriminator (gold-silver-decouple), not ownership. Removing it would
+  let an active metal trade block BTC entries on a `both` instance.
+- `telegram_command_logs.bot_instance` is schema-only: no writer exists
+  in code (verified by grep).
+
+## Ownership semantics (refined during mapping)
+
+- EVERY ownership decision is strict `eq(trades.botInstance, config.instanceId)` — no symbol fallback, no `'legacy'` OR-branch. The backfill left zero `'legacy'` trade rows, and a both-strategy instance only sees rows stamped with its own id.
+- Consequence for the transition: the pre-split single bot CANNOT keep running both strategies after this code deploys with its real instance id — deploy = stop bot, set `BOT_INSTANCE`/`BOT_STRATEGY` per instance, start both (step 2+3 of the transition plan happen together). No broken window beyond downtime.
+- Runtime overrides: each instance applies only rows WHERE bot_instance = its id (backfilled metal%/etf% → metal, rest → btc).
+- Retention pruner runs in the instance whose strategy includes btc (both → runs; metal-only → doesn't).
+
+## Open decision (CONFIRMED 2026-XX: `btc` / `metal`)
+
+The operator green-lit the migration with instance ids `btc` / `metal`
+baked into the backfill. If an id ever changes, the backfill in
+0010_bot_instance.sql and every deploy env change together.

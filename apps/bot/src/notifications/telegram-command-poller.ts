@@ -229,13 +229,27 @@ export class TelegramCommandPoller {
     if (!this.config.telegram.enabled) return;
     if (!this.config.telegram.botToken || !this.config.telegram.chatId) return;
 
+    // bot-instance-split: the published command list is scoped to the
+    // strategy this instance runs (BTC surface vs Arcus-pair surface).
+    const availableCommands = AVAILABLE_COMMANDS.filter(({ command }) => {
+      if (
+        command === "arb" ||
+        command === "volume" ||
+        command === "lastsignal"
+      )
+        return this.config.strategy !== "metal";
+      if (command === "ratio" || command === "etf")
+        return this.config.strategy !== "btc";
+      return true;
+    });
+
     const response = await this.fetchWithTimeout(
       `https://api.telegram.org/bot${this.config.telegram.botToken}/setMyCommands`,
       {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          commands: AVAILABLE_COMMANDS,
+          commands: availableCommands,
           scope: {
             type: "chat",
             chat_id: normalizeTelegramChatId(this.config.telegram.chatId),
@@ -339,6 +353,34 @@ export class TelegramCommandPoller {
         this.pendingSettingPrompt = null;
       }
 
+      // bot-instance-split: strategy-scoped command surface. Commands of
+      // the other strategy are hidden here (and from setMyCommands) and
+      // get a short explicit note, never silence.
+      for (const cmd of ["volume", "lastsignal", "arb"] as const) {
+        if (
+          isTelegramCommand(text, cmd) &&
+          this.config.strategy === "metal"
+        ) {
+          await this.sendMessage(
+            `/${cmd} is not available on this bot instance ` +
+              `(${this.config.instanceId}, strategy: ${this.config.strategy}).`,
+          );
+          return;
+        }
+      }
+      for (const cmd of ["ratio", "etf"] as const) {
+        if (
+          isTelegramCommand(text, cmd) &&
+          this.config.strategy === "btc"
+        ) {
+          await this.sendMessage(
+            `/${cmd} is not available on this bot instance ` +
+              `(${this.config.instanceId}, strategy: ${this.config.strategy}).`,
+          );
+          return;
+        }
+      }
+
       if (isTelegramCommand(text, "bot")) {
         await this.sendBotControlPanel();
         return;
@@ -347,7 +389,7 @@ export class TelegramCommandPoller {
       if (isTelegramCommand(text, "config")) {
         await this.sendMessage(
           formatActiveConfigSummary(this.config, this.settingsBaseline),
-          { inline_keyboard: CONFIG_ROOT_BUTTONS },
+          { inline_keyboard: configRootButtons(this.config.strategy) },
         );
         return;
       }
@@ -359,14 +401,19 @@ export class TelegramCommandPoller {
         // (position reconciler): "no active trades" must never hide a
         // naked exchange position.
         const [hasActive, untrackedScan] = await Promise.all([
-          hasActiveTrades(this.db),
-          scanUntrackedPositions({
-            db: this.db,
-            registry: this.registry,
-            config: this.config,
-          }),
+          hasActiveTrades(this.db, this.config.instanceId),
+          // bot-instance-split: the untracked-position scan reconciles
+          // config.exchangeA/B — a metal-strategy instance never builds
+          // those adapters, so the scan is BTC-strategy only.
+          this.config.strategy !== "metal"
+            ? scanUntrackedPositions({
+                db: this.db,
+                registry: this.registry,
+                config: this.config,
+              })
+            : Promise.resolve(null),
         ]);
-        const untrackedCount = untrackedScan.findings.length;
+        const untrackedCount = untrackedScan?.findings.length ?? 0;
         let panelText: string;
         if (hasActive) {
           panelText = "Trade panel: choose what to view.";
@@ -627,6 +674,41 @@ export class TelegramCommandPoller {
       return;
     const data = callback.data ?? "";
     try {
+      // bot-instance-split: callbacks from the other strategy's surface
+      // (stale buttons on old messages) get an explicit note, never a
+      // silent no-op.
+      const btcOnlyCallback =
+        data.startsWith("arb") ||
+        data.startsWith("open:") ||
+        data.startsWith("retrade:") ||
+        data.startsWith("volume:") ||
+        data === "cfg:arb" ||
+        data === "set:pair" ||
+        data.startsWith("pair:") ||
+        data === "set:autoconfirm" ||
+        data === "ac:on" ||
+        data === "ac:off" ||
+        data === "set:cooldown" ||
+        data.startsWith("cd:") ||
+        data === "set:spread" ||
+        data === "set:margin" ||
+        data === "set:leverage";
+      const metalOnlyCallback =
+        data === "cfg:metals" ||
+        data === "cfg:etfs" ||
+        data.startsWith("set:metal") ||
+        data.startsWith("set:etf") ||
+        data.startsWith("pairtrade:open:");
+      if (
+        (btcOnlyCallback && this.config.strategy === "metal") ||
+        (metalOnlyCallback && this.config.strategy === "btc")
+      ) {
+        await this.answerCallback(
+          callback.id,
+          `Not available on this bot instance (strategy: ${this.config.strategy}).`,
+        );
+        return;
+      }
       if (data === "set:cancel") {
         this.pendingSettingPrompt = null;
         const messageId = callback.message?.message_id;
@@ -672,7 +754,7 @@ export class TelegramCommandPoller {
           await this.editMessageText(
             messageId,
             formatActiveConfigSummary(this.config, this.settingsBaseline),
-            { inline_keyboard: CONFIG_ROOT_BUTTONS },
+            { inline_keyboard: configRootButtons(this.config.strategy) },
           ).catch((error: unknown) => {
             console.warn("Telegram config-back edit failed", {
               messageId,
@@ -1041,7 +1123,7 @@ export class TelegramCommandPoller {
             await this.editMessageText(
               messageId,
               `✅ ${change.summary}${persistNote}`,
-              { inline_keyboard: CONFIG_ROOT_BUTTONS },
+              { inline_keyboard: configRootButtons(this.config.strategy) },
             ).catch((error: unknown) => {
                 console.warn("Telegram auto-confirm-apply edit failed", {
                   messageId,
@@ -1600,7 +1682,7 @@ export class TelegramCommandPoller {
          * easy revert together with the "confirm:" branch above.
          *
         const token = data.slice(7);
-        await new DbPreviewStore(this.db).transition(token, "cancelled");
+        await new DbPreviewStore(this.db, this.config.instanceId).transition(token, "cancelled");
         if (typeof callback.message?.message_id === "number")
           await this.deleteMessage(callback.message.message_id);
         */
@@ -2244,7 +2326,7 @@ export class TelegramCommandPoller {
       request.longExchange === "arcus" ||
       request.shortExchange === "arcus"
     ) {
-      const activeMetal = await loadActiveMetalTrade({ db: this.db });
+      const activeMetal = await loadActiveMetalTrade({ db: this.db, config: this.config });
       if (activeMetal) {
         await this.sendMessage(
           `⛔ Cannot prepare ${request.symbol}: an Arcus-pair trade is active ` +
@@ -2353,12 +2435,12 @@ export class TelegramCommandPoller {
       preview.longExchange === "arcus" ||
       preview.shortExchange === "arcus"
     ) {
-      const activeMetal = await loadActiveMetalTrade({ db: this.db });
+      const activeMetal = await loadActiveMetalTrade({ db: this.db, config: this.config });
       if (activeMetal) {
         // Cancel the preview so it does not linger in
         // awaiting_confirmation (that status blocks every other trade via
         // hasBlockingExecution until the TTL expires).
-        await new DbPreviewStore(this.db).transition(token, "cancelled", {
+        await new DbPreviewStore(this.db, this.config.instanceId).transition(token, "cancelled", {
           error: "blocked_by_metal_trade",
         });
         if (typeof messageId === "number") {
@@ -2459,7 +2541,7 @@ export class TelegramCommandPoller {
       }
       return;
     }
-    await new DbPreviewStore(this.db).transition(token, "cancelled");
+    await new DbPreviewStore(this.db, this.config.instanceId).transition(token, "cancelled");
     if (typeof messageId === "number") {
       await this.editMessageText(
         messageId,
@@ -2573,7 +2655,7 @@ export class TelegramCommandPoller {
         registry: this.registry,
         config: this.config,
       }),
-      loadClosableTrades(this.db),
+      loadClosableTrades(this.db, this.config.instanceId),
     ]);
     if (closable.length === 0) return { text: summary };
     const rows: unknown[][] = [];
@@ -2724,7 +2806,7 @@ export class TelegramCommandPoller {
   ): Promise<void> {
     try {
       const strategyConfig = resolveArcusPairConfig(this.config, strategy.symbol);
-      const activePairTrade = await loadActiveMetalTrade({ db: this.db });
+      const activePairTrade = await loadActiveMetalTrade({ db: this.db, config: this.config });
       const timeframe = strategyConfig.candleTimeframe;
       const series = await loadYahooRatioBuckets({
         symbols: strategy.yahooSymbols,
@@ -2873,7 +2955,7 @@ const CONFIG_BACK_BUTTON = {
   callback_data: "cfg:back",
 } as const;
 
-const CONFIG_ROOT_BUTTONS = [
+const CONFIG_ROOT_BUTTONS_BOTH = [
   [
     { text: "🪙 Pairs", callback_data: "set:pair" },
     { text: "🤖 Auto trade", callback_data: "set:autoconfirm" },
@@ -2884,6 +2966,30 @@ const CONFIG_ROOT_BUTTONS = [
   ],
   [{ text: "📈 ETFs (SPY/QQQ)", callback_data: "cfg:etfs" }],
 ] as const;
+
+// bot-instance-split: each strategy hides the other strategy's /config
+// buttons. btc -> Pairs/Auto-trade/Arbitrage only; metal -> Metals/ETFs
+// only; both -> the full pre-split menu.
+const CONFIG_ROOT_BUTTONS_BTC = [
+  [
+    { text: "🪙 Pairs", callback_data: "set:pair" },
+    { text: "🤖 Auto trade", callback_data: "set:autoconfirm" },
+  ],
+  [{ text: "₿ Arbitrage", callback_data: "cfg:arb" }],
+] as const;
+
+const CONFIG_ROOT_BUTTONS_METAL = [
+  [
+    { text: "🥇 Metals", callback_data: "cfg:metals" },
+    { text: "📈 ETFs (SPY/QQQ)", callback_data: "cfg:etfs" },
+  ],
+] as const;
+
+function configRootButtons(strategy: BotConfig["strategy"]) {
+  if (strategy === "btc") return CONFIG_ROOT_BUTTONS_BTC;
+  if (strategy === "metal") return CONFIG_ROOT_BUTTONS_METAL;
+  return CONFIG_ROOT_BUTTONS_BOTH;
+}
 
 const CONFIG_ARBITRAGE_BUTTONS = [
   [
@@ -3193,6 +3299,9 @@ export function formatActiveConfigSummary(
   const lines = [
     "⚙️ Active bot configuration",
     "",
+    // bot-instance-split: identity (ownership column) and behavior of
+    // this process.
+    `Instance: ${config.instanceId} · Strategy: ${config.strategy}`,
     `Symbol: ${config.btcSymbol}${tradingPairOverridden ? " *" : ""}`,
     `Market: ${config.marketType}`,
     `Price source: ${config.priceSource}`,

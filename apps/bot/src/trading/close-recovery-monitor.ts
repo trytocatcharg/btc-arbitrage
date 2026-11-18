@@ -20,6 +20,11 @@ export async function recoverStaleClosingTrades(input: {
   db: Awaited<ReturnType<typeof getDb>>;
   registry: { get(id: string): ExchangeAdapter };
   notifier: { notifyUrgent: (text: string) => Promise<void> };
+  /** bot-instance-split: owning bot process id (config.instanceId). The
+   * sweep only recovers trades owned by THIS process — recovering the
+   * other instance's stale 'closing' trade would race its own close
+   * owner. */
+  instanceId: string;
   /** How long a trade may sit in 'closing' before the recovery sweep
    * re-runs its close. Defaults to 120 s (a close takes at most ~20 s). */
   closingStaleAfterMs?: number;
@@ -31,6 +36,7 @@ export async function recoverStaleClosingTrades(input: {
     .where(
       and(
         eq(trades.status, "closing"),
+        eq(trades.botInstance, input.instanceId),
         lt(trades.updatedAt, new Date(Date.now() - staleAfterMs)),
       ),
     );
@@ -70,7 +76,7 @@ export async function recoverStaleClosingTrades(input: {
         continue;
       }
       if (staleLegs.length === 0) {
-        await new DbPreviewStore(input.db).transition(
+        await new DbPreviewStore(input.db, input.instanceId).transition(
           tokenRow.token,
           "closed",
           {
@@ -87,7 +93,7 @@ export async function recoverStaleClosingTrades(input: {
         continue;
       }
       await closeTradeBothLegs({
-        store: new DbPreviewStore(input.db),
+        store: new DbPreviewStore(input.db, input.instanceId),
         registry: input.registry,
         token: tokenRow.token,
         label: `#${stale.id}`,

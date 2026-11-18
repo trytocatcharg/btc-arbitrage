@@ -71,6 +71,13 @@
       "when": 1794231410102,
       "tag": "0009_ratio_snapshots_pair_symbol",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "5",
+      "when": 1794700000000,
+      "tag": "0010_bot_instance",
+      "breakpoints": true
     }
   ]
 }

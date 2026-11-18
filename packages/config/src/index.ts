@@ -98,6 +98,20 @@ export interface ArcusPairStrategyConfig {
 
 export interface BotConfig {
   database: DatabaseConfig;
+  /** BOT_INSTANCE (default 'main'): identity/ownership of this bot process.
+   * Every row it writes is stamped with this id (trades.bot_instance,
+   * trade_previews.bot_instance, bot_runtime_overrides.bot_instance) and
+   * every ownership decision filters on it. Two processes sharing one
+   * database MUST use distinct ids (operator deployment: 'btc' / 'metal').
+   * Validated: non-empty, <= 32 chars, [a-zA-Z0-9_-]. */
+  instanceId: string;
+  /** BOT_STRATEGY (default 'both'): WHAT the process runs, distinct from
+   * BOT_INSTANCE (WHO it is). 'btc' = spread strategy only (signal pass,
+   * BTC monitor, position reconciler); 'metal' = Arcus-pair strategies
+   * only (ratio tick, metal exits, metal monitor — risex/extended
+   * adapters are never constructed); 'both' = current single-bot
+   * behavior. */
+  strategy: BotStrategy;
   exchangeA: ExchangeId;
   exchangeB: ExchangeId;
   exchangeLong?: ExchangeId;
@@ -271,6 +285,11 @@ export interface BotConfig {
   logLevel: string;
 }
 
+export const BOT_STRATEGIES = ["btc", "metal", "both"] as const;
+/** BOT_STRATEGY values (bot-instance-split): which strategy passes this
+ * bot process runs. Parsed and validated by loadBotConfig. */
+export type BotStrategy = (typeof BOT_STRATEGIES)[number];
+
 export const ARCUS_PAIR_CANDLE_TIMEFRAMES = [
   "1m",
   "3m",
@@ -331,6 +350,9 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       "BTC_SYMBOL cannot be an Arcus-pair pseudo-symbol (GOLDSILVER/SPYQQQ): those are not trading pairs. Set a spread pair (e.g. BTCUSDT) and open Arcus-pair trades from /ratio or /etf.",
     );
   }
+
+  const instanceId = parseBotInstance(env.BOT_INSTANCE ?? "main");
+  const strategy = parseBotStrategy(env.BOT_STRATEGY ?? "both");
 
   const priceSource = parsePriceSource(env.PRICE_SOURCE ?? "mark");
   const marketType = parseMarketType(env.MARKET_TYPE ?? "perpetual");
@@ -516,6 +538,8 @@ export function loadBotConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
 
   return {
     database,
+    instanceId,
+    strategy,
     exchangeA,
     exchangeB,
     exchangeLong: env.EXCHANGE_LONG
@@ -923,6 +947,27 @@ function buildDatabaseUrl(input: Omit<DatabaseConfig, "url">): string {
 
 function redactString(value: string): string {
   return value.replace(/(mysql:\/\/[^:]+:)[^@]+(@)/, "$1[REDACTED]$2");
+}
+
+function parseBotInstance(value: string): string {
+  const id = value.trim();
+  if (id.length === 0)
+    throw new Error("BOT_INSTANCE must be a non-empty identifier");
+  if (id.length > 32)
+    throw new Error("BOT_INSTANCE must be at most 32 characters");
+  if (!/^[a-zA-Z0-9_-]+$/.test(id))
+    throw new Error(
+      "BOT_INSTANCE may only contain letters, digits, '-' and '_'",
+    );
+  return id;
+}
+
+function parseBotStrategy(value: string): BotStrategy {
+  if ((BOT_STRATEGIES as readonly string[]).includes(value))
+    return value as BotStrategy;
+  throw new Error(
+    `BOT_STRATEGY must be one of: ${BOT_STRATEGIES.join(", ")}`,
+  );
 }
 
 function parseExchange(value: string, field: string): ExchangeId {

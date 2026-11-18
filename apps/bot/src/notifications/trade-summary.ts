@@ -1,4 +1,4 @@
-import { and, desc, inArray, isNotNull, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { getDb, tradeLegs, trades, openTradeStatuses } from "@btc-arbitrage/db";
 import type { ExchangeAdapter } from "@btc-arbitrage/exchange-core";
 import type { MarketType, PriceSource } from "@btc-arbitrage/domain";
@@ -29,10 +29,11 @@ export interface ExchangeRegistryLike {
 export interface TradeSummaryDependencies {
   db: BotDatabase;
   registry: ExchangeRegistryLike;
-  /** When present, the summary appends an untracked-positions section
-   * (position reconciler scan). Optional so existing callers and tests
-   * without a config keep the pre-scan message byte-for-byte. */
-  config?: BotConfig;
+  /** The summary appends an untracked-positions section (position
+   * reconciler scan). REQUIRED (bot-instance-split): config.instanceId
+   * also scopes the listed trades to this bot process — there is no
+   * unscoped mode. */
+  config: BotConfig;
 }
 
 interface ResolvedTradeSummary {
@@ -81,8 +82,11 @@ export async function buildTradeSummaryMessage(
   deps: TradeSummaryDependencies,
 ): Promise<string> {
   const [activeTrades, untrackedScan] = await Promise.all([
-    loadActiveTrades(deps.db),
-    deps.config
+    loadActiveTrades(deps.db, deps.config.instanceId),
+    // bot-instance-split: the untracked-position scan only exists for
+    // the BTC strategy (it reconciles config.exchangeA/B, which a
+    // metal-strategy instance never builds adapters for).
+    deps.config && deps.config.strategy !== "metal"
       ? scanUntrackedPositions({
           db: deps.db,
           registry: deps.registry,
@@ -146,11 +150,21 @@ function formatUntrackedPositionsSection(scan: UntrackedScanResult): string[] {
 /** True when at least one trade is in an active (openTradeStatuses) state.
  * Same filter as buildTradeSummaryMessage, so the panel button and the
  * summary never disagree about what "active" means. */
-export async function hasActiveTrades(db: BotDatabase): Promise<boolean> {
+export async function hasActiveTrades(
+  db: BotDatabase,
+  /** bot-instance-split: owning bot process id (config.instanceId).
+   * REQUIRED — no unscoped mode exists. */
+  instanceId: string,
+): Promise<boolean> {
   const rows = await db
     .select({ id: trades.id })
     .from(trades)
-    .where(inArray(trades.status, [...openTradeStatuses]))
+    .where(
+      and(
+        inArray(trades.status, [...openTradeStatuses]),
+        eq(trades.botInstance, instanceId),
+      ),
+    )
     .limit(1);
   return rows.length > 0;
 }
@@ -169,11 +183,19 @@ export interface ClosableTradeRef {
  * timeout/cancel), and 'closing' is already claimed by a close owner. */
 export async function loadClosableTrades(
   db: BotDatabase,
+  /** bot-instance-split: owning bot process id (config.instanceId).
+   * REQUIRED — no unscoped mode exists. */
+  instanceId: string,
 ): Promise<ClosableTradeRef[]> {
   return db
     .select({ id: trades.id, symbol: trades.symbol, raw: trades.raw })
     .from(trades)
-    .where(inArray(trades.status, ["open", "unhedged"]))
+    .where(
+      and(
+        inArray(trades.status, ["open", "unhedged"]),
+        eq(trades.botInstance, instanceId),
+      ),
+    )
     .orderBy(desc(trades.openedAt), desc(trades.createdAt));
 }
 
@@ -272,11 +294,21 @@ function tradeNetPnlUsd(trade: TradeRow): number | null {
   return fees != null ? realized - fees : realized;
 }
 
-async function loadActiveTrades(db: BotDatabase): Promise<TradeRow[]> {
+async function loadActiveTrades(
+  db: BotDatabase,
+  /** bot-instance-split: owning bot process id (config.instanceId).
+   * REQUIRED — no unscoped mode exists. */
+  instanceId: string,
+): Promise<TradeRow[]> {
   return db
     .select()
     .from(trades)
-    .where(inArray(trades.status, [...openTradeStatuses]))
+    .where(
+      and(
+        inArray(trades.status, [...openTradeStatuses]),
+        eq(trades.botInstance, instanceId),
+      ),
+    )
     .orderBy(desc(trades.openedAt), desc(trades.createdAt));
 }
 

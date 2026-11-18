@@ -211,6 +211,10 @@ export async function scanUntrackedPositions(input: {
         and(
           inArray(trades.status, [...activeTradeStatuses]),
           eq(trades.symbol, input.config.btcSymbol),
+          // bot-instance-split: only legs of trades owned by THIS bot
+          // process count as tracked; the other instance's legs live on
+          // a different wallet and must never mask an untracked position.
+          eq(trades.botInstance, input.config.instanceId),
           // Terminal leg states never hold a position; exclude them so a
           // future non-terminal status stays tracked automatically
           // (whitelist would silently drop it — verifier finding).

@@ -143,6 +143,8 @@ Copy `.env.example` to `.env` and fill in real values. Never commit `.env` or re
 | `MIN_PRICE_DIFF_USD` | `40` | Spread threshold |
 | `LEVERAGE` | `3` | Leverage in signals and trades |
 | `BOT_RUN_ONCE` | `false` | Run a single tick and exit |
+| `BOT_INSTANCE` | `main` | **Bot instance split** (design doc `odd/tasks/bot-instance-split.md`): identity/ownership of this bot process. Every trade/preview/runtime-override row is stamped with it (`bot_instance` column, migration 0010) and EVERY ownership decision filters by the column — never by symbol, never with a 'legacy' OR-branch. Two processes sharing one DB use distinct ids (operator deployment: `btc` / `metal`). Validated: non-empty, ≤32 chars, `[a-zA-Z0-9_-]` |
+| `BOT_STRATEGY` | `both` | WHAT the process runs (distinct from `BOT_INSTANCE` = WHO it is): `btc` = spread strategy only (signal pass, BTC monitor, position reconciler, data retention pruner); `metal` = Arcus-pair strategies only (ratio tick, metal exits, metal monitor — risex/extended adapters are NEVER constructed, Arcus-only registry); `both` = current single-bot behavior |
 | `BOT_EXECUTION_MODE` | `dry-run` | `dry-run` / `live` (cross-validated with `ENABLE_ORDER_PLACEMENT`) |
 | `ENABLE_ORDER_PLACEMENT` | `false` | Cross-validated with mode; see "Execution gates" below |
 | `EXTENDED_TRADING_ENABLED` / `ARCUS_TRADING_ENABLED` / `QFEX_TRADING_ENABLED` | `false` | Per-exchange live trading gates |
@@ -460,7 +462,7 @@ instead of duplicated.
 - `validateDbConnection` is imported in bot `main.ts` but its call is commented out.
 - `packages/db/src/connection.ts` has stale fallback defaults (`root`/empty password/`wolfe_trading`) that contradict `loadDatabaseConfig` — harmless when env vars are set, but do not copy them.
 - Committed build artifacts (`*.js`, `*.d.ts`, maps) sit next to sources in `packages/db/src/` and are stale (e.g., `schema.js` has an old `openTradeStatuses` list). Runtime uses `.ts` via tsx; ignore the `.js` files, and do not import from them.
-- Migration drift: `migrations/meta/` has no `0001_snapshot.json`, and migration 0001 did not widen `trade_status_history` enum columns while `schema.ts` types them with the full 10-value set.
+- Migration drift: `migrations/meta/` has no `0001_snapshot.json`, and migration 0010 (`bot_instance` columns + composite PK on `bot_runtime_overrides`) was applied BY HAND (operator policy 2026-11: migrations are always applied manually; `__drizzle_migrations` does not exist and must not be created — do NOT run `yarn db:migrate`), so drizzle-kit snapshot/meta drift for it is expected. The older drift follows: `migrations/meta/` has no `0001_snapshot.json`, and migration 0001 did not widen `trade_status_history` enum columns while `schema.ts` types them with the full 10-value set.
 - `packages/db/README.md` documents an outdated `openTradeStatuses` list.
 - Signal suppression in `polling-loop.ts` uses `continue`, which skips the tick's sleep — the loop does not rest while a trade stays active. Treat as a known quirk; ask before "fixing" behavior changes.
 - `docs/architecture.md` claims the root `package.json` intentionally lacks a `packageManager` field — it now has one (`yarn@4.18.0`). The doc is wrong; the field is correct.

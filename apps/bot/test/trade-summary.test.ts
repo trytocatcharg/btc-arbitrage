@@ -2,12 +2,21 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { buildTradeSummaryMessage } from '../src/notifications/trade-summary.js';
 import { tradeLegs, trades } from '@btc-arbitrage/db';
+import type { BotConfig } from '@btc-arbitrage/config';
+
+// bot-instance-split: buildTradeSummaryMessage requires config (fail-closed
+// instance scoping). strategy 'metal' keeps the untracked-position scan
+// skipped, matching these tests' pre-split fake registry.
+const testConfig = {
+  instanceId: 'test',
+  strategy: 'metal',
+} as unknown as BotConfig;
 
 test('buildTradeSummaryMessage returns a no-trades message when no active trades exist', async () => {
   const db = createFakeDb([], []);
   const registry = createFakeRegistry({});
 
-  const message = await buildTradeSummaryMessage({ db, registry });
+  const message = await buildTradeSummaryMessage({ db, registry, config: testConfig });
   assert.equal(message, '📭 No active trades found.');
 });
 
@@ -150,7 +159,7 @@ test('buildTradeSummaryMessage summarizes multiple active trades with live quote
     arcus: '100020'
   });
 
-  const message = await buildTradeSummaryMessage({ db: createFakeDb(tradeRows, legRows), registry });
+  const message = await buildTradeSummaryMessage({ db: createFakeDb(tradeRows, legRows), registry, config: testConfig });
 
   assert.match(message, /Active trade summary/);
   assert.match(message, /Trade #7 · BTCUSDT · open/);

@@ -54,6 +54,8 @@ export async function sampleUnhedgedLegs(input: {
     .where(
       and(
         eq(trades.status, "unhedged"),
+        // bot-instance-split: sample only legs owned by this bot process.
+        eq(trades.botInstance, input.config.instanceId),
         // The survivor only: a 'closed' leg has no mark-to-market left.
         inArray(tradeLegs.status, ["open", "unhedged"]),
       ),

@@ -62,7 +62,7 @@ const IS_TEST_RUN = process.env.NODE_ENV === "test";
  * entry leg's base quantity is always the SMALLER of the two — the
  * short leg being the smaller one means short-entry/long-hedge. */
 export async function loadActiveMetalTrade(
-  ctx: Pick<MetalTradeContext, "db">,
+  ctx: Pick<MetalTradeContext, "db" | "config">,
 ): Promise<MetalTradeRow | undefined> {
   const rows = await ctx.db
     .select({
@@ -79,6 +79,11 @@ export async function loadActiveMetalTrade(
     .where(
       and(
         inArray(trades.symbol, [...ARCUS_PAIR_SYMBOLS]),
+        // bot-instance-split: keep the symbol filter (WHAT kind of trade)
+        // AND add the instance filter (WHO owns the row) — the BTC
+        // instance must never see this process's metal trades and vice
+        // versa.
+        eq(trades.botInstance, ctx.config.instanceId),
         inArray(trades.status, [...activeTradeStatuses]),
       ),
     )
@@ -436,6 +441,9 @@ export async function createMetalTrade(
       shortExchange: "arcus",
       leverage,
       filledNotionalUsd: "0",
+      // bot-instance-split: the trade row is stamped with the owning bot
+      // process; every monitor/ownership query filters on it.
+      botInstance: ctx.config.instanceId,
       createdAt: new Date(),
       updatedAt: new Date(),
     });

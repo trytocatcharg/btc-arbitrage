@@ -74,11 +74,19 @@ export async function runPollingLoop(input: {
   executionQueue: ExecutionQueue;
   control: BotControl;
 }): Promise<void> {
-  const exchangeA = input.registry.get(input.config.exchangeA);
-  const exchangeB = input.registry.get(input.config.exchangeB);
+  // bot-instance-split: which strategy passes this process runs.
+  // 'btc'  -> signal pass + BTC monitor + BTC position reconciler
+  // 'metal'-> metal tick/exit pass + metal monitor only (the spread-pair
+  //           adapters are never resolved — main.ts built an Arcus-only
+  //           registry for this strategy)
+  // 'both' -> every pass (current single-bot behavior)
+  const runBtcPasses = input.config.strategy !== "metal";
+  const runMetalPasses = input.config.strategy !== "btc";
   let tick = 0;
 
   console.log("Monitoring loop ready", {
+    instanceId: input.config.instanceId,
+    strategy: input.config.strategy,
     exchangeA: input.config.exchangeA,
     exchangeB: input.config.exchangeB,
     symbol: input.config.btcSymbol,
@@ -175,6 +183,7 @@ export async function runPollingLoop(input: {
           db: input.db,
           registry: input.registry,
           notifier: input.notifier,
+          instanceId: input.config.instanceId,
         });
       } catch (error) {
         console.error(
@@ -185,15 +194,21 @@ export async function runPollingLoop(input: {
         );
       }
       try {
-        // The reconciler owns its own cadence (POSITION_RECONCILE_INTERVAL_MS,
-        // checked internally) — the pass invokes it unconditionally.
-        await runPositionReconciliation({
-          db: input.db,
-          registry: input.registry,
-          config: input.config,
-          notify: (text, keyboard) =>
-            input.notifier.notifyUrgent(text, keyboard),
-        });
+        // bot-instance-split: the position reconciler only exists for the
+        // BTC strategy — it reconciles config.exchangeA/B, which a
+        // metal-strategy instance never builds adapters for. The
+        // reconciler owns its own cadence
+        // (POSITION_RECONCILE_INTERVAL_MS, checked internally) — the pass
+        // invokes it unconditionally.
+        if (runBtcPasses) {
+          await runPositionReconciliation({
+            db: input.db,
+            registry: input.registry,
+            config: input.config,
+            notify: (text, keyboard) =>
+              input.notifier.notifyUrgent(text, keyboard),
+          });
+        }
       } catch (error) {
         console.error(
           "Position reconciliation failed",
@@ -268,11 +283,16 @@ export async function runPollingLoop(input: {
     }
   }
 
-  const retentionScheduler = startRetentionScheduler({
-    db: input.db,
-    config: input.config,
-    isShuttingDown,
-  });
+  // bot-instance-split: the data-retention pruner runs in ONE instance
+  // only — the one whose strategy includes the BTC pass (both -> runs;
+  // metal-only -> does not).
+  const retentionScheduler = runBtcPasses
+    ? startRetentionScheduler({
+        db: input.db,
+        config: input.config,
+        isShuttingDown,
+      })
+    : undefined;
 
   // Gold/silver ratio strategy (gold-silver-decouple): no longer a
   // selectable pair. The context initializes lazily on the first tick
@@ -384,7 +404,7 @@ export async function runPollingLoop(input: {
       // retention fires on its own daily timer (quiet hour), not here.
       // Run-once mode has no timer lifetime — the process exits after
       // this tick — so it keeps the single inline pass it always had.
-      if (input.config.botRunOnce) {
+      if (input.config.botRunOnce && runBtcPasses) {
         try {
           await runDataRetention(input.db, input.config);
         } catch (error) {
@@ -412,43 +432,55 @@ export async function runPollingLoop(input: {
         console.log("Restart requested; signal pass skipped", { tick });
       } else if (input.control.isPaused()) {
         console.log("Monitoring tick paused", { tick });
-        // gold-silver-decouple: the Arcus-pair exit tick SURVIVES the
-        // operator pause. The SL/TP/time-stop triggers are bot-evaluated
-        // (no resting exchange protection orders), so skipping them while
-        // paused would leave an open position unprotected. The pass
-        // no-ops unless an Arcus-pair trade is active, so an idle paused
-        // bot still makes no Arcus calls.
-        await runMetalRatioPass(tick);
-        // Manual-close detection survives the pause too, pair-scoped: a
-        // hand-closed Arcus position must flip the trade to closed/
-        // unhedged even while paused (the interval monitor pass is skipped
-        // wholesale above). The Arcus throttle inside monitorTrades caps
-        // position polls at the strategy's tick cadence. Scoped to the
-        // ACTIVE strategy's symbol (either GOLDSILVER or SPYQQQ).
-        try {
-          const activePairTrade = await loadActiveMetalTrade({
-            db: input.db,
-          });
-          if (activePairTrade) {
-            await monitorTrades({
-              db: input.db,
-              registry: input.registry,
-              notify: (text) => input.notifier.notifyUrgent(text),
-              config: input.config,
-              onlySymbol: activePairTrade.symbol,
-            });
+        if (runMetalPasses) {
+          // gold-silver-decouple: the Arcus-pair exit tick SURVIVES the
+          // operator pause. The SL/TP/time-stop triggers are bot-evaluated
+          // (no resting exchange protection orders), so skipping them while
+          // paused would leave an open position unprotected. The pass
+          // no-ops unless an Arcus-pair trade is active, so an idle paused
+          // bot still makes no Arcus calls.
+          await runMetalRatioPass(tick);
+          // Manual-close detection survives the pause too: a hand-closed
+          // Arcus position must flip the trade to closed/unhedged even
+          // while paused (the interval monitor pass is skipped wholesale
+          // above). bot-instance-split: the metal-strategy instance runs
+          // its FULL own-instance monitor here (its monitor pass interval
+          // is paused above and its trades are all Arcus-pair); a
+          // both-strategy instance keeps the metal-scoped monitor of the
+          // 2026-11-12 fix so its BTC monitor stays paused. The Arcus
+          // throttle inside monitorTrades caps position polls at the
+          // strategy's tick cadence.
+          try {
+            const onlySymbol =
+              input.config.strategy === "both"
+                ? (
+                    await loadActiveMetalTrade({
+                      db: input.db,
+                      config: input.config,
+                    })
+                  )?.symbol
+                : undefined;
+            if (input.config.strategy === "metal" || onlySymbol != null) {
+              await monitorTrades({
+                db: input.db,
+                registry: input.registry,
+                notify: (text) => input.notifier.notifyUrgent(text),
+                config: input.config,
+                ...(onlySymbol != null ? { onlySymbol } : {}),
+              });
+            }
+          } catch (error) {
+            console.error(
+              "Paused Arcus-pair position monitor failed",
+              error instanceof Error
+                ? { tick, message: error.message }
+                : { tick, error },
+            );
           }
-        } catch (error) {
-          console.error(
-            "Paused Arcus-pair position monitor failed",
-            error instanceof Error
-              ? { tick, message: error.message }
-              : { tick, error },
-          );
         }
       } else {
-        await runSignalPass(tick);
-        await runMetalRatioPass(tick);
+        if (runBtcPasses) await runSignalPass(tick);
+        if (runMetalPasses) await runMetalRatioPass(tick);
       }
       console.log("Monitoring tick completed", {
         tick,
@@ -480,11 +512,15 @@ export async function runPollingLoop(input: {
   // stop() a pending daily timer would keep the Node event loop alive
   // and the process would never exit (relevant in run-once mode too,
   // where the scheduler started but never fired).
-  retentionScheduler.stop();
+  retentionScheduler?.stop();
 
   // Price snapshots + spread evaluation + signal emission + auto-confirm
   // enqueue, extracted from the tick so a paused bot skips it wholesale.
   async function runSignalPass(tick: number): Promise<void> {
+    // Resolved here, not at loop scope: a metal-strategy instance runs an
+    // Arcus-only registry and never reaches this pass.
+    const exchangeA = input.registry.get(input.config.exchangeA);
+    const exchangeB = input.registry.get(input.config.exchangeB);
     const [priceA, priceB] = await Promise.all([
       exchangeA.getPriceSnapshot({
         symbol: input.config.btcSymbol,
@@ -535,12 +571,19 @@ export async function runPollingLoop(input: {
       // gold-silver-decouple: active GOLD/SILVER metal trades must NOT
       // suppress spread signals — the two strategies coexist, so the
       // suppression query excludes them.
+      // bot-instance-split: ownership is decided by the bot_instance
+      // column (WHO owns the row); the Arcus-pair symbol exclusion stays
+      // as a strategy-KIND discriminator (an active Arcus-pair trade of
+      // the SAME instance never suppresses BTC signals), which only
+      // matters for a both-strategy instance. Not a symbol ownership
+      // fallback.
       const active = await input.db
         .select({ id: trades.id })
         .from(trades)
         .where(
           and(
             inArray(trades.status, [...activeTradeStatuses]),
+            eq(trades.botInstance, input.config.instanceId),
             notInArray(trades.symbol, [...ARCUS_PAIR_SYMBOLS]),
           ),
         )
@@ -641,6 +684,9 @@ export async function runPollingLoop(input: {
         .where(
           and(
             inArray(trades.symbol, [...ARCUS_PAIR_SYMBOLS]),
+            // bot-instance-split: only this process's metal trades drive
+            // its ratio tick.
+            eq(trades.botInstance, input.config.instanceId),
             inArray(trades.status, [...activeTradeStatuses]),
           ),
         )

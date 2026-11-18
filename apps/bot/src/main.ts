@@ -2,11 +2,16 @@ import {
   loadBotConfig,
   loadDotEnvFile,
   redactSecrets,
+  type BotConfig,
 } from "@btc-arbitrage/config";
 import { getDb } from "@btc-arbitrage/db";
-import type { ExecutionAdapter } from "@btc-arbitrage/exchange-core";
+import type {
+  ExchangeAdapter,
+  ExecutionAdapter,
+} from "@btc-arbitrage/exchange-core";
 import { sleep } from "@btc-arbitrage/shared";
 import { createExchangeRegistry } from "./exchanges/registry.js";
+import { createArcusAdapter } from "./exchanges/arcus/arcus-client.js";
 import type { ArcusExecutionHandle } from "./exchanges/arcus/arcus-execution-adapter.js";
 import { TelegramCommandPoller } from "./notifications/telegram-command-poller.js";
 import { TelegramNotifier } from "./notifications/telegram-notifier.js";
@@ -61,6 +66,25 @@ async function runStartupPreflightWithTransientRetry(
       await sleep(backoff);
     }
   }
+}
+
+/** bot-instance-split: a metal-strategy instance owns ONLY the Arcus-pair
+ * strategies and must NEVER construct the risex/extended adapters (this
+ * process has no credentials or wallets for them — construction must fail
+ * loud rather than carry dead adapters). The registry surface stays the
+ * same { get(id) } contract; asking for any other id throws. */
+function createMetalOnlyRegistry(config: BotConfig) {
+  const arcus = createArcusAdapter(config.arcus);
+  return {
+    get(id: string): ExchangeAdapter {
+      if (id !== "arcus") {
+        throw new Error(
+          `Unsupported exchange for a metal-strategy instance: ${id} (only arcus is constructed)`,
+        );
+      }
+      return arcus;
+    },
+  };
 }
 
 async function main() {
@@ -145,6 +169,8 @@ async function main() {
   console.log(
     "Bot runtime config loaded",
     redactSecrets({
+      instanceId: config.instanceId,
+      strategy: config.strategy,
       database: {
         hostName: config.database.hostName,
         port: config.database.port,
@@ -186,8 +212,14 @@ async function main() {
     }
   }
 
-  console.log("Initializing exchange registry");
-  const registry = createExchangeRegistry(config);
+  console.log("Initializing exchange registry", {
+    instanceId: config.instanceId,
+    strategy: config.strategy,
+  });
+  const registry =
+    config.strategy === "metal"
+      ? createMetalOnlyRegistry(config)
+      : createExchangeRegistry(config);
 
   // One-time execution setup, hoisted from the per-trade preflight:
   // aligns exchange account leverage (RISEx write, Extended PATCH) and
@@ -195,7 +227,13 @@ async function main() {
   // except transient timeouts, retried with backoff (see
   // runStartupPreflightWithTransientRetry and
   // specs/exchange-execution.md).
-  for (const exchangeId of [config.exchangeA, config.exchangeB]) {
+  // bot-instance-split: a metal-strategy instance has no spread pair (its
+  // registry is Arcus-only), so the spread-symbol preflight is skipped.
+  const preflightExchangeIds =
+    config.strategy === "metal"
+      ? []
+      : [config.exchangeA, config.exchangeB];
+  for (const exchangeId of preflightExchangeIds) {
     const adapter = registry.get(exchangeId);
     // Each client mirrors its config.<exchange>.tradingEnabled into
     // capabilities.orderPlacement at construction time, so the adapter is
@@ -235,8 +273,17 @@ async function main() {
   // expensive, conservative tier) is used. Explicit env overrides
   // (ARCUS_MAKER_FEE_BPS/ARCUS_TAKER_FEE_BPS) win and skip the fetch.
   // Fail fast: an unreachable fee table must die at boot, not mid-trade.
+  // bot-instance-split: a metal-strategy instance trades Arcus-pair
+  // strategies and ALWAYS needs the fee inputs (the metal entry
+  // order-book gate reads config.arcus.makerFeeBps/takerFeeBps); a
+  // btc/both instance keeps the pre-split rule (resolve only when Arcus
+  // is a spread leg).
+  const arcusIsSpreadLeg =
+    config.exchangeA === "arcus" || config.exchangeB === "arcus";
+  const needsArcusFees =
+    config.strategy === "metal" ? true : arcusIsSpreadLeg;
   if (
-    (config.exchangeA === "arcus" || config.exchangeB === "arcus") &&
+    needsArcusFees &&
     registry.get("arcus").capabilities.orderPlacement
   ) {
     if (
@@ -305,7 +352,7 @@ async function main() {
       await commandPoller.configureAvailableCommands();
       console.log("Telegram commands configured", {
         scope: "chat",
-        commands: ["bot", "config", "trade", "volume", "lastsignal"],
+        strategy: config.strategy,
       });
     } catch (error) {
       console.warn(

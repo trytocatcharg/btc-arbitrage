@@ -6,6 +6,7 @@ import {
   json,
   mysqlEnum,
   mysqlTable,
+  primaryKey,
   timestamp,
   varchar,
 } from "drizzle-orm/mysql-core";
@@ -212,6 +213,13 @@ export const trades = mysqlTable(
     // /trade lives here as raw.closeAtNetUsd. JSON keeps per-trade flags
     // schema-free; trade_legs.raw carries the per-leg shape instead.
     raw: json("raw"),
+    // bot-instance-split (migration 0010): the bot process that owns this
+    // trade. EVERY ownership decision filters on this column
+    // (eq(trades.botInstance, config.instanceId)) — never on the symbol.
+    // 'legacy' only marks pre-split rows the backfill could not attribute.
+    botInstance: varchar("bot_instance", { length: 32 })
+      .notNull()
+      .default("legacy"),
     createdAt: timestamp("created_at").notNull(),
     updatedAt: timestamp("updated_at").notNull(),
   },
@@ -219,6 +227,11 @@ export const trades = mysqlTable(
     statusCreatedAtIdx: index("trade_status_created_at_idx").on(
       table.status,
       table.createdAt,
+    ),
+    // Instance-scoped monitor queries (bot-instance-split, migration 0010).
+    instanceStatusIdx: index("trade_instance_status_idx").on(
+      table.botInstance,
+      table.status,
     ),
     statusOpenedAtIdx: index("trade_status_opened_at_idx").on(
       table.status,
@@ -245,6 +258,11 @@ export const tradePreviews = mysqlTable(
     expiresAt: timestamp("expires_at").notNull(),
     consumedAt: timestamp("consumed_at"),
     payload: json("payload").notNull(),
+    // bot-instance-split (migration 0010): the bot process that owns this
+    // preview (stamped at insert from config.instanceId).
+    botInstance: varchar("bot_instance", { length: 32 })
+      .notNull()
+      .default("legacy"),
     createdAt: timestamp("created_at").notNull(),
     updatedAt: timestamp("updated_at").notNull(),
   },
@@ -374,6 +392,12 @@ export const telegramCommandLogs = mysqlTable(
     command: varchar("command", { length: 64 }).notNull(),
     allowed: boolean("allowed").notNull(),
     responseSummary: varchar("response_summary", { length: 512 }),
+    // bot-instance-split (migration 0010): column exists for symmetry with
+    // the other owned tables, but NO writer exists in the codebase today —
+    // every row is inserted by hand/ops, so nothing stamps it from code.
+    botInstance: varchar("bot_instance", { length: 32 })
+      .notNull()
+      .default("legacy"),
     createdAt: timestamp("created_at").notNull(),
   },
   (table) => ({
@@ -413,13 +437,24 @@ export const operations = mysqlTable(
 );
 
 // Runtime-adjustable bot settings persisted by Telegram control commands so
-// overrides survive bot restarts. One row per setting; values are stored as
-// strings and validated by the runtime appliers at boot.
-export const botRuntimeOverrides = mysqlTable("bot_runtime_overrides", {
-  settingKey: varchar("setting_key", { length: 32 }).primaryKey(),
-  settingValue: varchar("setting_value", { length: 64 }).notNull(),
-  updatedAt: timestamp("updated_at").notNull().defaultNow().onUpdateNow(),
-});
+// overrides survive bot restarts. bot-instance-split (migration 0010): one
+// row per (setting, bot instance) — each instance applies/persists only the
+// rows stamped with its own config.instanceId. Values are stored as strings
+// and validated by the runtime appliers at boot.
+export const botRuntimeOverrides = mysqlTable(
+  "bot_runtime_overrides",
+  {
+    settingKey: varchar("setting_key", { length: 32 }).notNull(),
+    settingValue: varchar("setting_value", { length: 64 }).notNull(),
+    botInstance: varchar("bot_instance", { length: 32 })
+      .notNull()
+      .default("legacy"),
+    updatedAt: timestamp("updated_at").notNull().defaultNow().onUpdateNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.settingKey, table.botInstance] }),
+  }),
+);
 
 export const events = mysqlTable(
   "events",
