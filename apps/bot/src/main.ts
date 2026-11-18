@@ -366,7 +366,8 @@ async function main() {
   // exists; the console banner above already logged the same summaries.
   if (restored.length > 0 && config.telegram.enabled) {
     await notifier.notifyUrgent(
-      "🔄 Bot iniciado. Ajustes restaurados desde la base de datos:\n" +
+      `🔄 Bot iniciado · instancia: ${config.instanceId} · estrategia: ${config.strategy}.\n` +
+        "Ajustes restaurados desde la base de datos:\n" +
         restored.map((change) => `• ${change.summary}`).join("\n"),
     );
   }
