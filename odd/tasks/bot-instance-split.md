@@ -173,7 +173,27 @@ TradeSummaryDependencies.config are all REQUIRED — no unscoped mode.)
 - Runtime overrides: each instance applies only rows WHERE bot_instance = its id (backfilled metal%/etf% → metal, rest → btc).
 - Retention pruner runs in the instance whose strategy includes btc (both → runs; metal-only → doesn't).
 
-## Open decision (CONFIRMED 2026-XX: `btc` / `metal`)
+## Open decision (CONFIRMED 2026-11: keep as-is)
+
+The operator decided NOT to harden BOT_STRATEGY: `both` stays a valid
+value (default), and the one-strategy-per-bot rule is enforced by
+deployment envs, not by config validation. Do NOT remove `both` without
+a new operator decision.
+
+## Deploy checklist (operator-owned)
+
+1. Stop the current single bot.
+2. Instance btc: `BOT_INSTANCE=btc` + `BOT_STRATEGY=btc` (current envs
+   otherwise).
+3. Instance metal: `BOT_INSTANCE=metal` + `BOT_STRATEGY=metal` + its own
+   `TELEGRAM_BOT_TOKEN` (second bot from @BotFather) + its own Arcus
+   wallet; risex/extended creds must be ABSENT (the instance never
+   builds those adapters).
+4. `TELEGRAM_CHAT_ID` may be the same chat on both.
+5. Boot both. Retention runs on the btc instance only; the /bot
+   restart guard is cross-instance by decision (F1).
+
+## Instance ids (CONFIRMED 2026-11: `btc` / `metal`)
 
 The operator green-lit the migration with instance ids `btc` / `metal`
 baked into the backfill. If an id ever changes, the backfill in
