@@ -315,7 +315,7 @@ export async function createMetalTrade(
   const minSilver = parseDecimal(silverMeta.minQuantityBase || "0", "minSilver");
   if (goldQty < Math.max(minGold, 1e-8) || silverQty < Math.max(minSilver, 1e-8)) {
     throw new Error(
-      `Computed quantity below minimum (gold ${goldQty}, silver ${silverQty})`,
+      `Computed quantity below minimum (${ctx.strategy.entryAsset} ${goldQty}, ${ctx.strategy.hedgeAsset} ${silverQty})`,
     );
   }
 
@@ -413,7 +413,7 @@ export async function createMetalTrade(
     throw new Error(
       `Metal entry refused by the order-book gate: estimated entry drag ${entryDragBps.toFixed(1)} bps exceeds ${ctx.strategy.envPrefix}_MAX_ENTRY_SLIPPAGE_BPS=${maxEntrySlippageBps} bps ` +
         `(${ctx.strategy.hedgeAsset} book-walk slippage ${slippageBps.toFixed(1)} bps over ${walkLevelsUsed} level(s) vs mid $${formatDecimal(reference, 2)}, ` +
-        `top ${crossingSide === "bids" ? "bid" : "ask"} $${topLevel.priceUsd} x ${topLevel.sizeBase} SLV, ` +
+        `top ${crossingSide === "bids" ? "bid" : "ask"} $${topLevel.priceUsd} x ${topLevel.sizeBase} ${ctx.strategy.hedgeAsset}, ` +
         `${ctx.strategy.hedgeAsset} taker fee ${takerFeeBps ?? 0} bps + ${ctx.strategy.entryAsset} maker fee ${makerFeeBps ?? 0} bps). ` +
         `Wait for a deeper/tighter ${ctx.strategy.hedgeAsset} book or raise the threshold explicitly.`,
     );
@@ -736,7 +736,7 @@ export async function executeMetalTradeEntry(
       .where(eq(tradeLegs.id, entryLegRow.id));
     await ctx
       .notify(
-        `⏳ Trade #${tradeId}: limit ${entryLeg.side === "short" ? "SELL" : "BUY"} resting on GLD at $${formatDecimal(restingPrice, 2)} ` +
+        `⏳ Trade #${tradeId}: limit ${entryLeg.side === "short" ? "SELL" : "BUY"} resting on ${ctx.strategy.entryAsset} at $${formatDecimal(restingPrice, 2)} ` +
           `(${formatDecimal(progress.targetQty, 6)} ${ctx.strategy.entryAsset}). Hedging each fill on ${ctx.strategy.hedgeAsset} at market. ` +
           `Timeout in ${Math.round(ctx.strategyConfig.limitTimeoutMs / 1000)}s.`,
       )
@@ -835,7 +835,7 @@ export async function executeMetalTradeEntry(
               if (cancelFailures >= 3 && !cancelFailureAlerted) {
                 cancelFailureAlerted = true;
                 await ctx.notifyUrgent(
-                  `🚨 Trade #${tradeId}: GLD limit ${orderId} could not be cancelled after ${cancelFailures} attempts ` +
+                  `🚨 Trade #${tradeId}: ${ctx.strategy.entryAsset} limit ${orderId} could not be cancelled after ${cancelFailures} attempts ` +
                     `(resting at $${formatDecimal(restingPrice, 2)}). Repricing is SKIPPED to avoid a duplicate live limit. ` +
                     "Cancels are not reaching Arcus — check the adapter/market routing and cancel this order manually if needed.",
                 );
@@ -852,7 +852,7 @@ export async function executeMetalTradeEntry(
                   lastRepriceNotifyAt = Date.now();
                   await ctx
                     .notify(
-                      `🔁 Trade #${tradeId}: GLD limit not filled — repriced to $${formatDecimal(nextPrice, 2)} (resting).`,
+                      `🔁 Trade #${tradeId}: ${ctx.strategy.entryAsset} limit not filled — repriced to $${formatDecimal(nextPrice, 2)} (resting).`,
                     )
                     .catch(() => undefined);
                 }
@@ -1048,7 +1048,7 @@ export async function executeMetalTradeEntry(
     if (remainingQty >= Math.max(silverMin, 1e-9)) {
       throw new Error(
         `${ctx.strategy.hedgeAsset} hedge left ${formatDecimal(remainingQty, 8)} ${ctx.strategy.hedgeAsset} unhedged after ${maxAttempts} bounded attempt(s) ` +
-          `(last order ${lastTerminal?.id ?? "n/a"} ended ${lastTerminal?.status ?? "n/a"}) — aborting the entry; the rollback market-closes the covered gold`,
+          `(last order ${lastTerminal?.id ?? "n/a"} ended ${lastTerminal?.status ?? "n/a"}) — aborting the entry; the rollback market-closes the covered ${ctx.strategy.entryAsset}`,
       );
     }
     const hedgedQty = progress.silverFilledQty - qtyBefore;
@@ -1062,7 +1062,7 @@ export async function executeMetalTradeEntry(
     await ctx
       .notify(
         `⚖️ Trade #${tradeId} hedge: +${formatDecimal(incrementGoldQty, 6)} ${ctx.strategy.entryAsset} @ $${formatDecimal(goldPriceUsd, 2)} → ${hedgeLeg.side === "short" ? "sold" : "bought"} ${formatDecimal(hedgedQty, 4)} ${ctx.strategy.hedgeAsset} @ $${formatDecimal(hedgedVwap, 2)} (fee $${formatDecimal(feeThisIncrement, 4)})${attempt > 1 ? ` after ${attempt} attempts` : ""}. ` +
-          `Gold leg ${formatDecimal(progress.goldFilledQty, 6)}/${formatDecimal(progress.targetQty, 6)} filled.`,
+          `${ctx.strategy.entryAsset} leg ${formatDecimal(progress.goldFilledQty, 6)}/${formatDecimal(progress.targetQty, 6)} filled.`,
       )
       .catch(() => undefined);
     await ctx.db
@@ -1169,7 +1169,7 @@ export async function executeMetalTradeEntry(
           message: failure,
         });
         await ctx.notifyUrgent(
-          `🚨 Gold/silver trade #${tradeId}: DISASTER STOP MISSING on ${plan.market} (${failure}). ` +
+          `🚨 ${ctx.strategy.label} trade #${tradeId}: DISASTER STOP MISSING on ${plan.market} (${failure}). ` +
             "The leg has NO exchange-resting protection; the bot-driven SL still applies while the bot is alive. " +
             "Check Arcus order history for the rejection reason and consider a manual stop.",
         );
@@ -1213,7 +1213,7 @@ export async function executeMetalTradeEntry(
     );
     await ctx.notify(
       `${ctx.strategy.emoji} ${ctx.strategy.label} trade #${tradeId} OPEN ` +
-        `(${side === "short_gold_long_silver" ? "SHORT GOLD / LONG SILVER" : "LONG GOLD / SHORT SILVER"}).\n` +
+        `(${side === "short_gold_long_silver" ? `SHORT ${ctx.strategy.entryAsset} / LONG ${ctx.strategy.hedgeAsset}` : `LONG ${ctx.strategy.entryAsset} / SHORT ${ctx.strategy.hedgeAsset}`}).\n` +
         `Legs filled on Arcus. TP: RSI return to 50 with net >= breakeven + $${ctx.strategyConfig.tpMinNetUsd}. ` +
         `SL: -${ctx.strategyConfig.stopLossMarginPercent}% margin (market).`,
     );
