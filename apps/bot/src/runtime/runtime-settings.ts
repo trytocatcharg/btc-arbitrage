@@ -26,7 +26,9 @@ export type RuntimeSettingKey =
   | "etfLeverage"
   | "etfTpMinNetUsd"
   | "etfMaxEntrySlippageBps"
-  | "etfHedgeRetries";
+  | "etfHedgeRetries"
+  | "metalTimeStopHours"
+  | "etfTimeStopHours";
 
 export interface RuntimeSettingChange {
   key: RuntimeSettingKey;
@@ -51,6 +53,8 @@ export interface RuntimeSettingsBaseline {
   etfTpMinNetUsd: string;
   etfMaxEntrySlippageBps: number;
   etfHedgeRetries: number;
+  metalTimeStopHours: number;
+  etfTimeStopHours: number;
 }
 
 const MAX_COOLDOWN_MINUTES = 10_080; // 7 days
@@ -77,6 +81,8 @@ export function snapshotRuntimeSettings(
     etfTpMinNetUsd: config.spyQqq.tpMinNetUsd,
     etfMaxEntrySlippageBps: config.spyQqq.maxEntrySlippageBps,
     etfHedgeRetries: config.spyQqq.hedgeRetryAttempts,
+    metalTimeStopHours: config.goldSilver.timeStopHours,
+    etfTimeStopHours: config.spyQqq.timeStopHours,
   };
 }
 
@@ -270,6 +276,34 @@ function applyPairMaxEntrySlippageBps(
   };
 }
 
+/** Time-stop backstop bound: 720 hours = 30 days. The exit monitor reads
+ * `strategyConfig.timeStopHours` per tick, so the override affects the
+ * currently active trade too (same semantics as the TP floor). */
+const MAX_TIME_STOP_HOURS = 720;
+
+function applyPairTimeStopHours(
+  config: BotConfig,
+  section: ArcusPairSection,
+  key: RuntimeSettingKey,
+  label: string,
+  hours: number,
+): RuntimeSettingChange {
+  if (
+    !Number.isInteger(hours) ||
+    hours < 1 ||
+    hours > MAX_TIME_STOP_HOURS
+  ) {
+    throw new Error(
+      `${label} time-stop must be an integer between 1 and ${MAX_TIME_STOP_HOURS} hours.`,
+    );
+  }
+  config[section].timeStopHours = hours;
+  return {
+    key,
+    summary: `${label} time-stop: ${hours}h (market close at age ≥ threshold)`,
+  };
+}
+
 function applyPairHedgeRetries(
   config: BotConfig,
   section: ArcusPairSection,
@@ -328,6 +362,13 @@ export function applyMetalHedgeRetries(
   return applyPairHedgeRetries(config, "goldSilver", "metalHedgeRetries", "Metal", attempts);
 }
 
+export function applyMetalTimeStopHours(
+  config: BotConfig,
+  hours: number,
+): RuntimeSettingChange {
+  return applyPairTimeStopHours(config, "goldSilver", "metalTimeStopHours", "Metal", hours);
+}
+
 export function applyEtfMarginUsd(
   config: BotConfig,
   valueUsd: number,
@@ -361,6 +402,13 @@ export function applyEtfHedgeRetries(
   attempts: number,
 ): RuntimeSettingChange {
   return applyPairHedgeRetries(config, "spyQqq", "etfHedgeRetries", "ETF", attempts);
+}
+
+export function applyEtfTimeStopHours(
+  config: BotConfig,
+  hours: number,
+): RuntimeSettingChange {
+  return applyPairTimeStopHours(config, "spyQqq", "etfTimeStopHours", "ETF", hours);
 }
 
 export function applyAutoConfirm(
@@ -454,5 +502,9 @@ export function isRuntimeSettingOverridden(
       );
     case "etfHedgeRetries":
       return config.spyQqq.hedgeRetryAttempts !== baseline.etfHedgeRetries;
+    case "metalTimeStopHours":
+      return config.goldSilver.timeStopHours !== baseline.metalTimeStopHours;
+    case "etfTimeStopHours":
+      return config.spyQqq.timeStopHours !== baseline.etfTimeStopHours;
   }
 }

@@ -55,6 +55,7 @@ import {
   applyEtfMarginUsd,
   applyEtfHedgeRetries,
   applyEtfMaxEntrySlippageBps,
+  applyEtfTimeStopHours,
   applyEtfTpMinNetUsd,
   applyLeverage,
   applyMarginUsd,
@@ -62,6 +63,7 @@ import {
   applyMetalMarginUsd,
   applyMetalHedgeRetries,
   applyMetalMaxEntrySlippageBps,
+  applyMetalTimeStopHours,
   applyMetalTpMinNetUsd,
   applyMinSpreadUsd,
   applyTradingPair,
@@ -208,6 +210,8 @@ export class TelegramCommandPoller {
     | "etfTpFloor"
     | "etfMaxSlippage"
     | "etfHedgeRetries"
+    | "metalTimeStop"
+    | "etfTimeStop"
     | null = null;
 
   constructor(
@@ -618,6 +622,12 @@ export class TelegramCommandPoller {
           case "etfHedgeRetries":
             change = applyEtfHedgeRetries(this.config, value);
             break;
+          case "metalTimeStop":
+            change = applyMetalTimeStopHours(this.config, value);
+            break;
+          case "etfTimeStop":
+            change = applyEtfTimeStopHours(this.config, value);
+            break;
         }
       } catch (validationError) {
         // Invalid value: keep the prompt open so the operator can retry.
@@ -698,6 +708,8 @@ export class TelegramCommandPoller {
         data === "cfg:etfs" ||
         data.startsWith("set:metal") ||
         data.startsWith("set:etf") ||
+        data.startsWith("ts:metal") ||
+        data.startsWith("ts:etf") ||
         data.startsWith("pairtrade:open:");
       if (
         (btcOnlyCallback && this.config.strategy === "metal") ||
@@ -984,6 +996,89 @@ export class TelegramCommandPoller {
             });
           });
         }
+      } else if (data === "set:metaltimestop") {
+        const messageId = callback.message?.message_id;
+        if (typeof messageId === "number") {
+          await this.editMessageText(
+            messageId,
+            `Time-stop 🥇 — close at market when age ≥ threshold (current: ${this.config.goldSilver.timeStopHours}h)`,
+            {
+              inline_keyboard: [
+                [
+                  { text: "2 days (48h)", callback_data: "ts:metal:48" },
+                  { text: "3 days (72h)", callback_data: "ts:metal:72" },
+                ],
+                [
+                  { text: "4 days (96h)", callback_data: "ts:metal:96" },
+                  { text: "✏️ Custom (hours)", callback_data: "ts:metal:custom" },
+                ],
+                [{ text: "Cancel", callback_data: "set:cancel" }],
+              ],
+            },
+          ).catch((error: unknown) => {
+            console.warn("Telegram metal-time-stop-menu edit failed", {
+              messageId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
+      } else if (data.startsWith("ts:metal")) {
+        const option = data.slice("ts:metal:".length);
+        const messageId = callback.message?.message_id;
+        if (option === "custom") {
+          this.pendingSettingPrompt = "metalTimeStop";
+          if (typeof messageId === "number") {
+            await this.editMessageText(
+              messageId,
+              "Send me the new METAL TRADE time-stop in hours (e.g. 36). " +
+                "Market close once the trade age reaches the threshold " +
+                `(current: ${this.config.goldSilver.timeStopHours}h).`,
+              SETTING_CANCEL_MARKUP,
+            ).catch((error: unknown) => {
+              console.warn("Telegram metal-time-stop-custom edit failed", {
+                messageId,
+                message:
+                  error instanceof Error ? error.message : String(error),
+              });
+            });
+          }
+        } else {
+          try {
+            const change = applyMetalTimeStopHours(
+              this.config,
+              Number(option),
+            );
+            this.pendingSettingPrompt = null;
+            const persistNote = await this.persistAppliedChange(change);
+            if (typeof messageId === "number") {
+              await this.editMessageText(
+                messageId,
+                `✅ ${change.summary}${persistNote}`,
+                { inline_keyboard: CONFIG_METALS_BUTTONS },
+              ).catch((error: unknown) => {
+                console.warn("Telegram metal-time-stop-apply edit failed", {
+                  messageId,
+                  message:
+                    error instanceof Error ? error.message : String(error),
+                });
+              });
+            }
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : String(error);
+            if (typeof messageId === "number") {
+              await this.editMessageText(messageId, `❌ ${message}`).catch(
+                (error: unknown) => {
+                  console.warn("Telegram metal-time-stop-error edit failed", {
+                    messageId,
+                    message:
+                      error instanceof Error ? error.message : String(error),
+                  });
+                },
+              );
+            }
+          }
+        }
       } else if (data === "set:etfmargin") {
         this.pendingSettingPrompt = "etfMargin";
         const messageId = callback.message?.message_id;
@@ -1077,6 +1172,89 @@ export class TelegramCommandPoller {
               message: error instanceof Error ? error.message : String(error),
             });
           });
+        }
+      } else if (data === "set:etftimestop") {
+        const messageId = callback.message?.message_id;
+        if (typeof messageId === "number") {
+          await this.editMessageText(
+            messageId,
+            `Time-stop 📈 — close at market when age ≥ threshold (current: ${this.config.spyQqq.timeStopHours}h)`,
+            {
+              inline_keyboard: [
+                [
+                  { text: "2 days (48h)", callback_data: "ts:etf:48" },
+                  { text: "3 days (72h)", callback_data: "ts:etf:72" },
+                ],
+                [
+                  { text: "4 days (96h)", callback_data: "ts:etf:96" },
+                  { text: "✏️ Custom (hours)", callback_data: "ts:etf:custom" },
+                ],
+                [{ text: "Cancel", callback_data: "set:cancel" }],
+              ],
+            },
+          ).catch((error: unknown) => {
+            console.warn("Telegram etf-time-stop-menu edit failed", {
+              messageId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
+      } else if (data.startsWith("ts:etf")) {
+        const option = data.slice("ts:etf:".length);
+        const messageId = callback.message?.message_id;
+        if (option === "custom") {
+          this.pendingSettingPrompt = "etfTimeStop";
+          if (typeof messageId === "number") {
+            await this.editMessageText(
+              messageId,
+              "Send me the new ETF TRADE (SPY/QQQ) time-stop in hours (e.g. 36). " +
+                "Market close once the trade age reaches the threshold " +
+                `(current: ${this.config.spyQqq.timeStopHours}h).`,
+              SETTING_CANCEL_MARKUP,
+            ).catch((error: unknown) => {
+              console.warn("Telegram etf-time-stop-custom edit failed", {
+                messageId,
+                message:
+                  error instanceof Error ? error.message : String(error),
+              });
+            });
+          }
+        } else {
+          try {
+            const change = applyEtfTimeStopHours(
+              this.config,
+              Number(option),
+            );
+            this.pendingSettingPrompt = null;
+            const persistNote = await this.persistAppliedChange(change);
+            if (typeof messageId === "number") {
+              await this.editMessageText(
+                messageId,
+                `✅ ${change.summary}${persistNote}`,
+                { inline_keyboard: CONFIG_ETFS_BUTTONS },
+              ).catch((error: unknown) => {
+                console.warn("Telegram etf-time-stop-apply edit failed", {
+                  messageId,
+                  message:
+                    error instanceof Error ? error.message : String(error),
+                });
+              });
+            }
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : String(error);
+            if (typeof messageId === "number") {
+              await this.editMessageText(messageId, `❌ ${message}`).catch(
+                (error: unknown) => {
+                  console.warn("Telegram etf-time-stop-error edit failed", {
+                    messageId,
+                    message:
+                      error instanceof Error ? error.message : String(error),
+                  });
+                },
+              );
+            }
+          }
         }
       } else if (data === "set:autoconfirm") {
         // Two-step confirmation: this toggle turns the bot into an
@@ -3008,7 +3186,8 @@ const CONFIG_METALS_BUTTONS = [
     { text: "💰 Margin 🥇", callback_data: "set:metalmargin" },
     { text: "⚡️ Leverage 🥇", callback_data: "set:metalleverage" },
   ],
-  [{ text: "🎯 TP floor 🥇", callback_data: "set:metaltpfloor" }],
+  [{ text: "🎯 TP floor 🥇", callback_data: "set:metaltpfloor" },
+   { text: "⏳ Time-stop 🥇", callback_data: "set:metaltimestop" }],
   [
     { text: "📉 Max entry slippage 🥇", callback_data: "set:metalmaxslip" },
     { text: "🔁 Hedge retries 🥇", callback_data: "set:metalhedgeretries" },
@@ -3021,7 +3200,8 @@ const CONFIG_ETFS_BUTTONS = [
     { text: "💰 Margin 📈", callback_data: "set:etfmargin" },
     { text: "⚡️ Leverage 📈", callback_data: "set:etfleverage" },
   ],
-  [{ text: "🎯 TP floor 📈", callback_data: "set:etftpfloor" }],
+  [{ text: "🎯 TP floor 📈", callback_data: "set:etftpfloor" },
+   { text: "⏳ Time-stop 📈", callback_data: "set:etftimestop" }],
   [
     { text: "📉 Max entry slippage 📈", callback_data: "set:etfmaxslip" },
     { text: "🔁 Hedge retries 📈", callback_data: "set:etfhedgeretries" },
@@ -3290,6 +3470,12 @@ export function formatActiveConfigSummary(
   const etfHedgeRetriesOverridden =
     baseline != null &&
     isRuntimeSettingOverridden("etfHedgeRetries", baseline, config);
+  const metalTimeStopOverridden =
+    baseline != null &&
+    isRuntimeSettingOverridden("metalTimeStopHours", baseline, config);
+  const etfTimeStopOverridden =
+    baseline != null &&
+    isRuntimeSettingOverridden("etfTimeStopHours", baseline, config);
   const metalNotional = (
     Number(config.goldSilver.marginUsd) * config.goldSilver.leverage
   ).toFixed(2);
@@ -3324,7 +3510,7 @@ export function formatActiveConfigSummary(
     `  TP floor: breakeven + $${formatUsd(config.goldSilver.tpMinNetUsd)} net (evaluated every tick)${metalTpFloorOverridden ? " *" : ""}`,
     `  Max entry slippage: ${config.goldSilver.maxEntrySlippageBps} bps (order-book gate)${metalMaxSlippageOverridden ? " *" : ""}`,
     `  Hedge retries: ${config.goldSilver.hedgeRetryAttempts}${metalHedgeRetriesOverridden ? " *" : ""}`,
-    `  SL: -${config.goldSilver.stopLossMarginPercent}% of total margin · Time-stop: ${config.goldSilver.timeStopHours}h`,
+    `  SL: -${config.goldSilver.stopLossMarginPercent}% of total margin · Time-stop: ${config.goldSilver.timeStopHours}h${metalTimeStopOverridden ? " *" : ""}`,
     "",
     "SPY/QQQ ETF trade (Arcus SPY/QQQ perps):",
     `  Margin: $${formatUsd(config.spyQqq.marginUsd)} per leg (notional $${etfNotional} at ${config.spyQqq.leverage}x)${etfMarginOverridden ? " *" : ""}`,
@@ -3333,7 +3519,7 @@ export function formatActiveConfigSummary(
     `  TP floor: breakeven + $${formatUsd(config.spyQqq.tpMinNetUsd)} net (evaluated every tick)${etfTpFloorOverridden ? " *" : ""}`,
     `  Max entry slippage: ${config.spyQqq.maxEntrySlippageBps} bps (order-book gate)${etfMaxSlippageOverridden ? " *" : ""}`,
     `  Hedge retries: ${config.spyQqq.hedgeRetryAttempts}${etfHedgeRetriesOverridden ? " *" : ""}`,
-    `  SL: -${config.spyQqq.stopLossMarginPercent}% of total margin · Time-stop: ${config.spyQqq.timeStopHours}h`,
+    `  SL: -${config.spyQqq.stopLossMarginPercent}% of total margin · Time-stop: ${config.spyQqq.timeStopHours}h${etfTimeStopOverridden ? " *" : ""}`,
   ];
   if (
     minSpreadOverridden ||
@@ -3351,7 +3537,9 @@ export function formatActiveConfigSummary(
     etfLeverageOverridden ||
     etfTpFloorOverridden ||
     etfMaxSlippageOverridden ||
-    etfHedgeRetriesOverridden
+    etfHedgeRetriesOverridden ||
+    metalTimeStopOverridden ||
+    etfTimeStopOverridden
   ) {
     lines.push("", "(* adjusted at runtime — does not persist across restarts)");
   }

@@ -10,6 +10,7 @@ import {
   applyEtfLeverage,
   applyEtfMarginUsd,
   applyEtfMaxEntrySlippageBps,
+  applyEtfTimeStopHours,
   applyEtfTpMinNetUsd,
   applyLeverage,
   applyMarginUsd,
@@ -17,6 +18,7 @@ import {
   applyMetalLeverage,
   applyMetalMarginUsd,
   applyMetalMaxEntrySlippageBps,
+  applyMetalTimeStopHours,
   applyMetalTpMinNetUsd,
   applyMinSpreadUsd,
   applyTradingPair,
@@ -65,6 +67,10 @@ function readSettingValue(config: BotConfig, key: RuntimeSettingKey): string {
       return String(config.spyQqq.maxEntrySlippageBps);
     case "etfHedgeRetries":
       return String(config.spyQqq.hedgeRetryAttempts);
+    case "metalTimeStopHours":
+      return String(config.goldSilver.timeStopHours);
+    case "etfTimeStopHours":
+      return String(config.spyQqq.timeStopHours);
   }
 }
 
@@ -116,7 +122,9 @@ function parseStoredValue(
     case "etfLeverage":
     case "etfTpMinNetUsd":
     case "etfMaxEntrySlippageBps":
-    case "etfHedgeRetries": {
+    case "etfHedgeRetries":
+    case "metalTimeStopHours":
+    case "etfTimeStopHours": {
       const value = Number(raw);
       return Number.isFinite(value) ? value : null;
     }
@@ -169,6 +177,8 @@ export async function applyPersistedRuntimeOverrides(
       "etfTpMinNetUsd",
       "etfMaxEntrySlippageBps",
       "etfHedgeRetries",
+      "metalTimeStopHours",
+      "etfTimeStopHours",
     ];
     if (!knownKeys.includes(key)) {
       console.warn("Skipping unknown persisted runtime override", {
@@ -246,6 +256,12 @@ export async function applyPersistedRuntimeOverrides(
           break;
         case "etfHedgeRetries":
           changes.push(applyEtfHedgeRetries(config, value as number));
+          break;
+        case "metalTimeStopHours":
+          changes.push(applyMetalTimeStopHours(config, value as number));
+          break;
+        case "etfTimeStopHours":
+          changes.push(applyEtfTimeStopHours(config, value as number));
           break;
       }
     } catch (error) {
