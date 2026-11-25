@@ -543,17 +543,39 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
   }
 
   /** Best-effort recovery of the exit data for a leg the position monitor
-   * already detected as flat (exchange-side TP/SL fire): /v1/account/position
-   * drops the record once flat, so the closure is reconstructed from the
-   * stored TP/SL order ids instead — /v1/orders/tpsl for the fired trigger,
-   * /v1/orders for the triggered on-chain reduce-only order (VWAP fill
-   * price), /v1/trade-history for the realized PnL. Degrades to null on
-   * any endpoint failure (2026-09-29, trade #113). */
+   * already detected as flat: /v1/account/position drops the record once
+   * flat, so the closure is reconstructed from order/fill history in three
+   * levels (all sharing the same downstream exit-price / realized-PnL /
+   * fee extraction; degrades to null on any endpoint failure —
+   * 2026-09-29, trade #113):
+   *
+   * Level 1 — stored-id trigger match: /v1/orders/tpsl for the STORED
+   * TP/SL order ids with TPSL_ORDER_STATUS_SUCCESS, then the triggered
+   * on-chain reduce-only order in /v1/orders (VWAP fill price) and
+   * /v1/trade-history for the realized PnL.
+   *
+   * Level 2 — id-less fired-trigger attribution: when the operator moves
+   * the protection on the RISEx UI, the exchange CANCELS the bot's
+   * original TP/SL orders and fires NEW ones under different ids, so the
+   * stored ids never reach SUCCESS and level 1 resolves nothing
+   * (production-verified 2026-11, trade #1370: leg persisted with
+   * exit_price NULL / close_reason 'unknown'). The SAME tpsl payload is
+   * re-scanned for a SUCCESS trigger on the closing side with the leg
+   * size (±0.5%), anchored at the earliest created_at of the stored
+   * (cancelled) records when those are present. Safe under the operator
+   * guarantee of at most one open position per market.
+   *
+   * Level 3 — manual market close: when no SUCCESS trigger exists at
+   * all, /v1/orders is scanned for a filled reduce-only order on the
+   * closing side with the leg size (±0.5%) created after the same
+   * anchor; the most recent match is used directly as the closing order
+   * (closeReason "manual"). */
   async resolveLegClosure(input: {
     symbol: string;
     side: "long" | "short";
     tpOrderId?: string;
     slOrderId?: string;
+    quantityBase?: string;
   }): Promise<{
     exitPriceUsd?: string;
     realizedPnlUsd?: string;
@@ -573,22 +595,97 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
         priceSource: "last",
       });
       const marketId = String(info.marketId);
-      const tpslPayload = await this.http.get("/v1/orders/tpsl", {
-        account,
-        market_id: marketId,
-      });
-      // A fired trigger reports TPSL_ORDER_STATUS_SUCCESS and a
-      // triggered_at (unix SECONDS). triggered_order_id equals the on-chain
-      // record's wide_order_id (verified 2026-09-29, trade #128), but that
-      // id is a per-account sequence reused across orders — it only
-      // disambiguates together with the ±60s window, never alone.
-      const fired = asRisexArrayPayload(tpslPayload)
-        .filter(isRecord)
-        .map((record) => ({
-          record,
-          id: stringField(record, ["order_id", "orderId"]) ?? "",
-          triggeredAt: Number(stringField(record, ["triggered_at", "triggeredAt"])),
-        }))
+      // The tpsl `side` / order `side` is the side that CLOSES the
+      // position: closing a short buys back, closing a long sells.
+      const closingSide = input.side === "short" ? "BUY" : "SELL";
+      const quantityBase =
+        input.quantityBase !== undefined
+          ? Math.abs(parseDecimal(input.quantityBase, "leg quantityBase"))
+          : undefined;
+      const sizeTolerance =
+        quantityBase !== undefined
+          ? Math.max(1e-8, quantityBase * 0.005)
+          : undefined;
+      const sizeMatches = (record: Record<string, unknown>): boolean => {
+        if (quantityBase === undefined || sizeTolerance === undefined)
+          return true;
+        const size = optionalDecimalDeep(record, [
+          "size",
+          "size_base",
+          "sizeBase",
+          "quantity",
+          "quantity_base",
+          "quantityBase",
+          "filled_size",
+          "filledSize",
+          "filled_quantity",
+          "filledQuantity",
+        ]);
+        if (size === undefined) return false;
+        return Math.abs(parseDecimal(size) - quantityBase) <= sizeTolerance;
+      };
+
+      // The tpsl payload drives levels 1–2 and the shared time anchor. A
+      // tpsl read failure does NOT abort the call: level 3 can still
+      // attribute a manual close, with the anchor treated as absent.
+      let tpslCandidates: Array<{
+        record: Record<string, unknown>;
+        id: string;
+        triggeredAt: number;
+      }> = [];
+      try {
+        const tpslPayload = await this.http.get("/v1/orders/tpsl", {
+          account,
+          market_id: marketId,
+        });
+        // A fired trigger reports TPSL_ORDER_STATUS_SUCCESS and a
+        // triggered_at (unix SECONDS). triggered_order_id equals the on-chain
+        // record's wide_order_id (verified 2026-09-29, trade #128), but that
+        // id is a per-account sequence reused across orders — it only
+        // disambiguates together with the ±60s window, never alone.
+        tpslCandidates = asRisexArrayPayload(tpslPayload)
+          .filter(isRecord)
+          .map((record) => ({
+            record,
+            id: stringField(record, ["order_id", "orderId"]) ?? "",
+            triggeredAt: Number(stringField(record, ["triggered_at", "triggeredAt"])),
+          }));
+      } catch (error) {
+        console.warn(
+          "RISEx leg closure: /v1/orders/tpsl read failed; fallbacks run without a tpsl anchor",
+          {
+            marketId,
+            orderIds: [...wanted.keys()],
+            message: error instanceof Error ? error.message : String(error),
+          },
+        );
+      }
+
+      // Shared time anchor for levels 2–3: the earliest created_at of the
+      // STORED wanted-id records present in the tpsl payload (typically
+      // the CANCELLED originals — anything fired before them belongs to
+      // older activity on the market). Both timestamps are risex-clock,
+      // so the comparison is safe. Absent stored records (or a failed
+      // tpsl read), no anchor is applied.
+      const anchorCandidates = tpslCandidates
+        .filter(
+          (candidate) =>
+            candidate.id !== "" && wanted.has(normalizeHex(candidate.id)),
+        )
+        .map((candidate) =>
+          risexTimestampSeconds(
+            stringField(candidate.record, ["created_at", "createdAt"]),
+          ),
+        )
+        .filter(
+          (value): value is number =>
+            value !== undefined && Number.isFinite(value),
+        );
+      const anchor =
+        anchorCandidates.length > 0 ? Math.min(...anchorCandidates) : undefined;
+
+      // Level 1 — stored-id trigger match (original behavior).
+      const fired = tpslCandidates
         .filter(
           (candidate) =>
             candidate.id !== "" &&
@@ -599,100 +696,87 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
             candidate.triggeredAt > 0,
         )
         .sort((a, b) => a.triggeredAt - b.triggeredAt);
-      const trigger = fired[0];
-      if (!trigger) {
-        console.log("RISEx leg closure resolution: no fired TP/SL order", {
-          marketId,
-          orderIds: [...wanted.keys()],
-          source: "/v1/orders/tpsl",
-        });
-        return null;
-      }
-      const stopType = stringField(trigger.record, ["stop_type", "stopType"]);
-      const closeReason: "tp" | "sl" =
-        stopType === "TAKE_PROFIT" || stopType === "STOP_LOSS"
-          ? stopType === "TAKE_PROFIT"
-            ? "tp"
-            : "sl"
-          : wanted.get(normalizeHex(trigger.id))!;
+      let trigger = fired[0];
 
-      // The triggered on-chain order appears in /v1/orders history as a
-      // filled reduce-only record created within ~60s of triggered_at.
-      // Match by that time window, and when the trigger reports a
-      // wide_order_id, require it too (see note above: never alone).
-      // NOTE: /v1/orders created_at is unix NANOSECONDS (e.g.
-      // "1790694358000000000"), not microseconds — the previous /1e6
-      // conversion never matched, so exit price and PnL were silently
-      // lost (production-verified 2026-09-29, trade #128).
-      const triggeredOrderId = stringField(trigger.record, [
-        "triggered_order_id",
-        "triggeredOrderId",
-      ]);
-      const historyPayload = await this.http.get("/v1/orders", {
-        account,
-        market_id: marketId,
-        limit: "50",
-      });
-      const closingOrders = asRisexArrayPayload(historyPayload)
-        .filter(isRecord)
-        .map((record) => ({
-          record,
-          id: stringField(record, ["id", "order_id", "orderId"]) ?? "",
-          createdAtSec: risexTimestampSeconds(
-            stringField(record, ["created_at", "createdAt"]),
-          ),
-          wideOrderId: stringField(record, ["wide_order_id", "wideOrderId"]),
-        }))
-        .filter((candidate) => {
-          if (candidate.id === "") return false;
-          if (!isTruthyFlag(candidate.record, ["reduce_only", "reduceOnly"]))
-            return false;
-          if (
-            stringField(candidate.record, [
-              "status",
-              "order_status",
-              "orderStatus",
-            ]) !== "ORDER_STATUS_FILLED"
-          )
-            return false;
-          if (
-            candidate.createdAtSec == null ||
-            Math.abs(candidate.createdAtSec - trigger.triggeredAt) > 60
-          )
-            return false;
-          return (
-            triggeredOrderId == null ||
-            triggeredOrderId === "0" ||
-            candidate.wideOrderId === triggeredOrderId
-          );
-        })
-        .sort(
-          (a, b) =>
-            (a.createdAtSec ?? Number.MAX_VALUE) -
-            (b.createdAtSec ?? Number.MAX_VALUE),
+      // Level 2 — id-less fired-trigger attribution (trade #1370): the
+      // operator replaced the protection externally, so the fired trigger
+      // carries an id the bot never stored. Attribute it by closing side
+      // + leg size, anchored after the stored originals.
+      if (!trigger && tpslCandidates.length > 0) {
+        let candidates = tpslCandidates.filter(
+          (candidate) =>
+            candidate.id !== "" &&
+            stringField(candidate.record, ["status"]) ===
+              "TPSL_ORDER_STATUS_SUCCESS" &&
+            Number.isFinite(candidate.triggeredAt) &&
+            candidate.triggeredAt > 0 &&
+            stringField(candidate.record, ["side"])?.toUpperCase() ===
+              closingSide &&
+            (anchor === undefined || candidate.triggeredAt >= anchor),
         );
-      const closingOrder = closingOrders[0];
-      // avg_price is the VWAP of the closing order (verified 2026-09-28);
-      // fall back to a price×size VWAP computed from /v1/trade-history.
-      let exitPriceUsd = closingOrder
-        ? optionalDecimalDeep(closingOrder.record, [
-            "average_fill_price",
-            "averageFillPrice",
-            "avg_fill_price",
-            "avgFillPrice",
-            "avg_price",
-            "avgPrice",
-          ])
-        : undefined;
-      let exitOrderId: string | undefined;
-      let realizedPnlUsd: string | undefined;
-      // Exit fee accumulators: declared outside the closing-order block so
-      // the result/logging below can read them when the trade-history read
-      // succeeded.
-      let feeTotal = 0;
-      let feeSeen = false;
-      if (closingOrder) {
-        exitOrderId = closingOrder.id;
+        if (quantityBase !== undefined) {
+          candidates = candidates.filter((candidate) =>
+            sizeMatches(candidate.record),
+          );
+        } else if (candidates.length !== 1) {
+          // Without the leg quantity there is no size filter; the fallback
+          // only fires when exactly one candidate survives the other
+          // filters — anything more is unattributable.
+          candidates = [];
+        }
+        if (candidates.length > 0) {
+          candidates.sort((a, b) => b.triggeredAt - a.triggeredAt);
+          if (candidates.length > 1) {
+            console.warn(
+              "RISEx leg closure resolution: multiple id-less closure candidates; using most recent",
+              {
+                marketId,
+                candidateIds: candidates.map((candidate) => candidate.id),
+              },
+            );
+          }
+          trigger = candidates[0];
+          console.warn(
+            "RISEx leg closure resolved via id-less fallback (protection replaced externally)",
+            {
+              marketId,
+              orderId: trigger.id,
+              side: stringField(trigger.record, ["side"]),
+              size: stringField(trigger.record, [
+                "size",
+                "size_base",
+                "sizeBase",
+              ]),
+              triggeredAt: trigger.triggeredAt,
+            },
+          );
+        }
+      }
+
+      // Shared downstream for every level: avg_price is the VWAP of the
+      // closing order (verified 2026-09-28); fall back to a price×size
+      // VWAP computed from /v1/trade-history, which also yields realized
+      // PnL and per-fill fees.
+      const readClosingOrder = async (closingOrder: {
+        record: Record<string, unknown>;
+        id: string;
+      }): Promise<{
+        exitPriceUsd?: string;
+        realizedPnlUsd?: string;
+        exitOrderId: string;
+        feeUsd?: string;
+      }> => {
+        let exitPriceUsd = optionalDecimalDeep(closingOrder.record, [
+          "average_fill_price",
+          "averageFillPrice",
+          "avg_fill_price",
+          "avgFillPrice",
+          "avg_price",
+          "avgPrice",
+        ]);
+        let realizedPnlUsd: string | undefined;
+        let feeTotal = 0;
+        let feeSeen = false;
         try {
           const fillsPayload = await this.http.get("/v1/trade-history", {
             account,
@@ -753,23 +837,185 @@ export class RisexExecutionAdapter implements ExecutionAdapter {
             },
           );
         }
+        return {
+          exitPriceUsd,
+          realizedPnlUsd,
+          exitOrderId: closingOrder.id,
+          feeUsd: feeSeen ? formatDecimal(feeTotal, 8) : undefined,
+        };
+      };
+
+      if (trigger) {
+        const stopType = stringField(trigger.record, ["stop_type", "stopType"]);
+        const closeReason: "tp" | "sl" | undefined =
+          stopType === "TAKE_PROFIT"
+            ? "tp"
+            : stopType === "STOP_LOSS"
+              ? "sl"
+              : wanted.get(normalizeHex(trigger.id));
+
+        // The triggered on-chain order appears in /v1/orders history as a
+        // filled reduce-only record created within ~60s of triggered_at.
+        // Match by that time window, and when the trigger reports a
+        // wide_order_id, require it too (see note above: never alone).
+        // NOTE: /v1/orders created_at is unix NANOSECONDS (e.g.
+        // "1790694358000000000"), not microseconds — the previous /1e6
+        // conversion never matched, so exit price and PnL were silently
+        // lost (production-verified 2026-09-29, trade #128).
+        const triggeredOrderId = stringField(trigger.record, [
+          "triggered_order_id",
+          "triggeredOrderId",
+        ]);
+        const historyPayload = await this.http.get("/v1/orders", {
+          account,
+          market_id: marketId,
+          limit: "50",
+        });
+        const closingOrders = asRisexArrayPayload(historyPayload)
+          .filter(isRecord)
+          .map((record) => ({
+            record,
+            id: stringField(record, ["id", "order_id", "orderId"]) ?? "",
+            createdAtSec: risexTimestampSeconds(
+              stringField(record, ["created_at", "createdAt"]),
+            ),
+            wideOrderId: stringField(record, ["wide_order_id", "wideOrderId"]),
+          }))
+          .filter((candidate) => {
+            if (candidate.id === "") return false;
+            if (!isTruthyFlag(candidate.record, ["reduce_only", "reduceOnly"]))
+              return false;
+            if (
+              stringField(candidate.record, [
+                "status",
+                "order_status",
+                "orderStatus",
+              ]) !== "ORDER_STATUS_FILLED"
+            )
+              return false;
+            if (
+              candidate.createdAtSec == null ||
+              Math.abs(candidate.createdAtSec - trigger.triggeredAt) > 60
+            )
+              return false;
+            return (
+              triggeredOrderId == null ||
+              triggeredOrderId === "0" ||
+              candidate.wideOrderId === triggeredOrderId
+            );
+          })
+          .sort(
+            (a, b) =>
+              (a.createdAtSec ?? Number.MAX_VALUE) -
+              (b.createdAtSec ?? Number.MAX_VALUE),
+          );
+        const closingOrder = closingOrders[0];
+        const resolved = closingOrder
+          ? await readClosingOrder(closingOrder)
+          : undefined;
+        console.log("RISEx leg closure resolved", {
+          marketId,
+          closeReason,
+          exitOrderId: resolved?.exitOrderId,
+          exitPriceUsd: resolved?.exitPriceUsd,
+          realizedPnlUsd: resolved?.realizedPnlUsd,
+          feeUsd: resolved?.feeUsd,
+          triggeredAt: trigger.triggeredAt,
+          sources: ["/v1/orders/tpsl", "/v1/orders", "/v1/trade-history"],
+        });
+        return {
+          exitPriceUsd: resolved?.exitPriceUsd,
+          realizedPnlUsd: resolved?.realizedPnlUsd,
+          exitOrderId: resolved?.exitOrderId,
+          closeReason,
+          feeUsd: resolved?.feeUsd,
+        };
       }
+
+      // Level 3 — manual market close: no SUCCESS trigger at all, so the
+      // position was closed by a plain reduce-only order. Requires the
+      // leg quantity (the size match is the attribution signal); without
+      // it there is nothing safe to match on.
+      if (quantityBase === undefined) {
+        console.log(
+          "RISEx leg closure resolution: no fired TP/SL trigger and no quantityBase for the manual-close scan",
+          { marketId, orderIds: [...wanted.keys()] },
+        );
+        return null;
+      }
+      const historyPayload = await this.http.get("/v1/orders", {
+        account,
+        market_id: marketId,
+        limit: "50",
+      });
+      const manualCandidates = asRisexArrayPayload(historyPayload)
+        .filter(isRecord)
+        .map((record) => ({
+          record,
+          id: stringField(record, ["id", "order_id", "orderId"]) ?? "",
+          createdAtSec: risexTimestampSeconds(
+            stringField(record, ["created_at", "createdAt"]),
+          ),
+        }))
+        .filter((candidate) => {
+          if (candidate.id === "") return false;
+          if (!isTruthyFlag(candidate.record, ["reduce_only", "reduceOnly"]))
+            return false;
+          if (
+            stringField(candidate.record, [
+              "status",
+              "order_status",
+              "orderStatus",
+            ]) !== "ORDER_STATUS_FILLED"
+          )
+            return false;
+          if (
+            stringField(candidate.record, ["side"])?.toUpperCase() !==
+            closingSide
+          )
+            return false;
+          if (!sizeMatches(candidate.record)) return false;
+          if (
+            anchor !== undefined &&
+            (candidate.createdAtSec == null || candidate.createdAtSec < anchor)
+          )
+            return false;
+          return true;
+        })
+        .sort((a, b) => (b.createdAtSec ?? 0) - (a.createdAtSec ?? 0));
+      const closingOrder = manualCandidates[0];
+      if (!closingOrder) {
+        console.log(
+          "RISEx leg closure resolution: no fired TP/SL order and no manual-close order match",
+          {
+            marketId,
+            orderIds: [...wanted.keys()],
+            sources: ["/v1/orders/tpsl", "/v1/orders"],
+          },
+        );
+        return null;
+      }
+      console.warn("RISEx leg closure resolved via manual-close order scan", {
+        marketId,
+        orderId: closingOrder.id,
+        createdAtSec: closingOrder.createdAtSec,
+      });
+      const resolved = await readClosingOrder(closingOrder);
       console.log("RISEx leg closure resolved", {
         marketId,
-        closeReason,
-        exitOrderId,
-        exitPriceUsd,
-        realizedPnlUsd,
-        feeUsd: feeSeen ? formatDecimal(feeTotal, 8) : undefined,
-        triggeredAt: trigger.triggeredAt,
-        sources: ["/v1/orders/tpsl", "/v1/orders", "/v1/trade-history"],
+        closeReason: "manual",
+        exitOrderId: resolved.exitOrderId,
+        exitPriceUsd: resolved.exitPriceUsd,
+        realizedPnlUsd: resolved.realizedPnlUsd,
+        feeUsd: resolved.feeUsd,
+        sources: ["/v1/orders", "/v1/trade-history"],
       });
       return {
-        exitPriceUsd,
-        realizedPnlUsd,
-        exitOrderId,
-        closeReason,
-        feeUsd: feeSeen ? formatDecimal(feeTotal, 8) : undefined,
+        exitPriceUsd: resolved.exitPriceUsd,
+        realizedPnlUsd: resolved.realizedPnlUsd,
+        exitOrderId: resolved.exitOrderId,
+        closeReason: "manual",
+        feeUsd: resolved.feeUsd,
       };
     } catch (error) {
       console.warn("RISEx leg closure resolution failed; degrading to null", {
