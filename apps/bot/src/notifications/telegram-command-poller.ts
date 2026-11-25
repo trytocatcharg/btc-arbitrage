@@ -93,6 +93,7 @@ import {
   type ArcusPairStrategySpec,
 } from "../metal-ratio/arcus-pair-strategies.js";
 import { manualMarketCloseTrade } from "../trading/manual-trade-close.js";
+import { retryClosureResolution } from "../trading/closure-retry.js";
 import { renderMetalRatioChart } from "../metal-ratio/metal-ratio-chart.js";
 import { loadYahooRatioBuckets } from "../metal-ratio/yahoo-metals-client.js";
 import {
@@ -2145,6 +2146,41 @@ export class TelegramCommandPoller {
               console.error("Manual trade close failed", { tradeId, message });
               await this.sendMessage(
                 `🚨 Manual close of #${tradeId} failed: ${message}`,
+              );
+            }
+          },
+        });
+      } else if (data.startsWith("closureretry:")) {
+        // Closure-resolution retry (closure-resolution-retry, trade
+        // #1370): the 🔄 button on a closure notice that left exit data
+        // unresolved. Re-runs the post-hoc leg-closure resolution and
+        // backfills the NULL exit fields. Chat/user authorization is
+        // already enforced above for every callback.
+        const tradeId = Number(data.slice("closureretry:".length));
+        if (!Number.isInteger(tradeId)) {
+          await this.sendMessage(`⚠️ Malformed closure-retry callback: ${data}`);
+          return;
+        }
+        await this.sendMessage(
+          `⏳ Re-resolving closure data for trade #${tradeId}…`,
+        );
+        this.executionQueue.enqueue({
+          description: `closure-retry:${tradeId}`,
+          run: async () => {
+            try {
+              await retryClosureResolution({
+                db: this.db,
+                registry: this.registry,
+                config: this.config,
+                notify: (text) => this.sendMessage(text),
+                tradeId,
+              });
+            } catch (error) {
+              const message =
+                error instanceof Error ? error.message : String(error);
+              console.error("Closure retry failed", { tradeId, message });
+              await this.sendMessage(
+                `🚨 Closure retry for #${tradeId} failed: ${message}`,
               );
             }
           },

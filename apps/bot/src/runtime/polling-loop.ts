@@ -153,7 +153,7 @@ export async function runPollingLoop(input: {
         await monitorTrades({
           db: input.db,
           registry: input.registry,
-          notify: (text) => input.notifier.notifyUrgent(text),
+          notify: (text, keyboard) => input.notifier.notifyUrgent(text, keyboard),
           config: input.config,
         });
       } catch (error) {
@@ -464,7 +464,8 @@ export async function runPollingLoop(input: {
               await monitorTrades({
                 db: input.db,
                 registry: input.registry,
-                notify: (text) => input.notifier.notifyUrgent(text),
+                notify: (text, keyboard) =>
+                  input.notifier.notifyUrgent(text, keyboard),
                 config: input.config,
                 ...(onlySymbol != null ? { onlySymbol } : {}),
               });

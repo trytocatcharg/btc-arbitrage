@@ -12,6 +12,7 @@ import { loadActiveMetalTrade } from "../metal-ratio/metal-trade-service.js";
 import { resolveArcusPairConfig } from "../metal-ratio/arcus-pair-strategies.js";
 import { shouldNotifyLegClosure } from "./trade-guards.js";
 import { formatPnlColored } from "./trade-close.js";
+import type { TelegramInlineKeyboard } from "../notifications/telegram-notifier.js";
 
 /** Arcus position-poll throttle state (gold-silver-decouple): while a G/S
  * trade is active, the two metal legs would otherwise be polled at the
@@ -34,7 +35,10 @@ const CLOSURE_RESOLVE_RETRY_MS = 5_000;
 export async function monitorTrades(input: {
   db: Awaited<ReturnType<typeof getDb>>;
   registry: { get(id: string): ExchangeAdapter };
-  notify: (text: string) => Promise<void>;
+  // closure-resolution-retry: the closure notice carries a "retry
+  // resolution" inline button when it left unresolved exit data behind,
+  // so the notifier must accept an optional keyboard (notifyUrgent does).
+  notify: (text: string, keyboard?: TelegramInlineKeyboard) => Promise<void>;
   /** gold-silver-decouple: when an Arcus-pair trade is active, Arcus leg
    * position polls are throttled to the ACTIVE strategy's
    * pricePollIntervalMs (default 5 s) instead of the full monitor
@@ -365,7 +369,31 @@ export async function monitorTrades(input: {
         sibling: siblingSnapshot,
         siblingClosed: sibling?.status === "closed",
       });
-      await input.notify(message);
+      // closure-resolution-retry (trade #1370): when the closure left
+      // unresolved exit data behind — on the closed leg itself (merged
+      // position+resolver values) or on an already-closed sibling — the
+      // notice carries a retry button so the operator can re-run the
+      // post-hoc resolution once the exchange has indexed the closure.
+      const closedLegUnresolved = exitPriceUsd == null || realizedPnlUsd == null;
+      const siblingUnresolved =
+        siblingSnapshot != null &&
+        sibling?.status === "closed" &&
+        (siblingSnapshot.exitPriceUsd == null ||
+          siblingSnapshot.realizedPnlUsd == null);
+      const retryKeyboard: TelegramInlineKeyboard | undefined =
+        closedLegUnresolved || siblingUnresolved
+          ? {
+              inline_keyboard: [
+                [
+                  {
+                    text: "🔄 Reintentar resolución",
+                    callback_data: `closureretry:${row.trades.id}`,
+                  },
+                ],
+              ],
+            }
+          : undefined;
+      await input.notify(message, retryKeyboard);
     } catch (error) {
       console.warn(
         "Trade monitoring skipped adapter failure",
@@ -378,8 +406,8 @@ export async function monitorTrades(input: {
 /** Defensive read of the per-leg market symbol persisted in the leg's raw
  * JSON (metal-ratio trades: the trade symbol is the GOLDSILVER
  * pseudo-pair, not resolvable by any exchange). Falls back to undefined so
- * callers keep the trade-level symbol. */
-function readLegMarket(raw: unknown): string | undefined {
+ * callers keep the trade-level symbol. Exported for closure-retry. */
+export function readLegMarket(raw: unknown): string | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const market = (raw as Record<string, unknown>).market;
   return typeof market === "string" && market.length > 0 ? market : undefined;
@@ -387,8 +415,8 @@ function readLegMarket(raw: unknown): string | undefined {
 
 /** Defensive read of the protection order ids persisted in the leg's raw
  * JSON (set when the exchange TP/SL backstop was placed). Any other raw shape
- * is ignored. */
-function readProtectionOrderIds(raw: unknown): {
+ * is ignored. Exported for closure-retry. */
+export function readProtectionOrderIds(raw: unknown): {
   tpOrderId?: string;
   slOrderId?: string;
 } {
@@ -402,7 +430,7 @@ function readProtectionOrderIds(raw: unknown): {
   };
 }
 
-interface LegClosureSnapshot {
+export interface LegClosureSnapshot {
   side: "long" | "short";
   exchangeId: string;
   entryPriceUsd: string | null;
@@ -434,8 +462,9 @@ function knownLegFeesUsd(leg: LegClosureSnapshot): number | null {
  * from the exchange-reported realizedPnlUsd, whose fee convention varies by
  * exchange (Arcus nets the exit fee into it; Extended reports none at
  * all — trade #481: bot said -4.01, Extended's realized showed -4.17).
- * The exchange value is only a fallback when the exit price is unknown. */
-function deriveLegGrossPnlUsd(leg: LegClosureSnapshot): number | null {
+ * The exchange value is only a fallback when the exit price is unknown.
+ * Exported for closure-retry. */
+export function deriveLegGrossPnlUsd(leg: LegClosureSnapshot): number | null {
   const entry = leg.entryPriceUsd != null ? Number(leg.entryPriceUsd) : null;
   const exit = leg.exitPriceUsd != null ? Number(leg.exitPriceUsd) : null;
   const qty = leg.quantityBase != null ? Number(leg.quantityBase) : null;
@@ -450,8 +479,9 @@ function deriveLegGrossPnlUsd(leg: LegClosureSnapshot): number | null {
 
 /** One leg line for the closure notice: gross PnL, known fees, and net
  * (gross − fees). No entry/exit prices (operator request 2026-10-07).
- * The fees/net segments appear only when at least one fee is known. */
-function formatLegLine(leg: LegClosureSnapshot): string {
+ * The fees/net segments appear only when at least one fee is known.
+ * Exported for closure-retry. */
+export function formatLegLine(leg: LegClosureSnapshot): string {
   const gross = deriveLegGrossPnlUsd(leg);
   const fees = knownLegFeesUsd(leg);
   const parts = [`PnL ${formatPnlColored(gross)}`];
@@ -462,10 +492,31 @@ function formatLegLine(leg: LegClosureSnapshot): string {
   return `${leg.side.toUpperCase()} ${leg.exchangeId}: ` + parts.join(" · ");
 }
 
+/** Combined total line for a two-leg closure notice: gross sum, known
+ * fees, and net. Exported for closure-retry so the retried summary keeps
+ * the exact same formatting as the monitor's closure notice. */
+export function formatClosureTotalLine(
+  legA: LegClosureSnapshot,
+  legB: LegClosureSnapshot,
+): string {
+  const grossA = deriveLegGrossPnlUsd(legA);
+  const grossB = deriveLegGrossPnlUsd(legB);
+  const totalGross = grossA != null && grossB != null ? grossA + grossB : null;
+  const feeA = knownLegFeesUsd(legA);
+  const feeB = knownLegFeesUsd(legB);
+  const totalFees =
+    feeA != null || feeB != null ? (feeA ?? 0) + (feeB ?? 0) : null;
+  if (totalGross != null && totalFees != null) {
+    return `Total PnL: ${formatPnlColored(totalGross)} · fees $${totalFees.toFixed(2)} · net ${formatPnlColored(totalGross - totalFees)}`;
+  }
+  return `PnL total: ${formatPnlColored(totalGross)}`;
+}
+
 /** Telegram notice for a detected leg closure: per-leg entry → exit with
  * colored PnL, the exchange's close reason when known, the combined total
- * when both legs are closed, and an explicit unhedged warning otherwise. */
-function buildLegClosureMessage(input: {
+ * when both legs are closed, and an explicit unhedged warning otherwise.
+ * Exported for closure-retry. */
+export function buildLegClosureMessage(input: {
   tradeId: number;
   closedLeg: LegClosureSnapshot;
   closeReason: string | null;
@@ -484,21 +535,7 @@ function buildLegClosureMessage(input: {
     if (input.siblingClosed) {
       lines.push(formatLegLine(input.sibling));
       lines.push("———————————————");
-      const grossA = deriveLegGrossPnlUsd(input.closedLeg);
-      const grossB = deriveLegGrossPnlUsd(input.sibling);
-      const totalGross =
-        grossA != null && grossB != null ? grossA + grossB : null;
-      const feeA = knownLegFeesUsd(input.closedLeg);
-      const feeB = knownLegFeesUsd(input.sibling);
-      const totalFees =
-        feeA != null || feeB != null ? (feeA ?? 0) + (feeB ?? 0) : null;
-      if (totalGross != null && totalFees != null) {
-        lines.push(
-          `Total PnL: ${formatPnlColored(totalGross)} · fees $${totalFees.toFixed(2)} · net ${formatPnlColored(totalGross - totalFees)}`,
-        );
-      } else {
-        lines.push(`PnL total: ${formatPnlColored(totalGross)}`);
-      }
+      lines.push(formatClosureTotalLine(input.closedLeg, input.sibling));
     } else {
       lines.push(
         `⚠️ The remaining leg is still open: ` +
