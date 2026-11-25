@@ -26,7 +26,7 @@ market), so side+size+time attribution is safe.
 
 ## Tasks
 
-- [ ] T1 — risex `resolveLegClosure` fallback levels:
+- [x] T1 — risex `resolveLegClosure` fallback levels:
   - L2: when no stored tp/sl id matches a SUCCESS trigger, scan the same
     `/v1/orders/tpsl` payload for ANY `TPSL_ORDER_STATUS_SUCCESS` trigger
     with closing side (short leg → BUY, long leg → SELL), size ≈
@@ -38,7 +38,7 @@ market), so side+size+time attribution is safe.
     created after the protection anchor → `close_reason 'manual'`.
   - Downstream (closing-order VWAP, trade-history PnL/fees) is shared with
     the existing path. Loud logs when a fallback level is used.
-- [ ] T2 — retry button end to end:
+- [x] T2 — retry button end to end:
   - `monitorTrades` attaches `closureretry:<tradeId>` inline keyboard when
     the closed leg (or its closed sibling) has NULL exit price / PnL.
   - `notify` plumbing in trade-monitor + polling-loop gains an optional
@@ -50,16 +50,29 @@ market), so side+size+time attribution is safe.
     and `total_fees_usd` when the trade is closed, send corrected summary.
   - Poller: `closureretry:` callback → serial execution queue (same queue
     as `tradeclose:`), chat/user guard already global.
-- [ ] T3 — verification: `yarn typecheck` (repo lint), focused review of
+- [x] T3 — verification: `yarn typecheck` (repo lint), focused review of
   the diff.
-- [ ] T4 — DB correction for trade #1370 leg 2730 (operator-approved):
+- [x] T4 — DB correction for trade #1370 leg 2730 (operator-approved):
   exit 59557.6, exchange-reported realized +1.6648458464 (stored as-is per
   fee convention), exit fee 0.0497901536, close_reason 'sl', recompute
   trade totals. Done directly (no code), with before/after evidence.
 
 ## Evidence
 
-- T1: <commit>
-- T2: <commit>
-- T3: typecheck output
-- T4: before/after rows
+- T1: commit dfb1d83 (feat(bot): risex id-less leg-closure resolution fallback)
+- T2: commit 25c05eb (feat(bot): Telegram retry button for unresolved leg closures)
+- T3: `yarn typecheck` exit 0 + `yarn build:bot` exit 0 (independent
+  gentle-ai-verify run); diff scope exactly the 5 in-scope files
+- T4: leg 2730 → exit 59557.6, realized 1.66484585 (exchange-reported),
+  exit fee 0.04979015, entry fee 0.14988485 (was NULL, backfilled from
+  risex trade-history), close_reason 'sl', exit_order_id
+  0x…18acd…00af; trade 1370 → realized_pnl_usd -0.95996885 (GROSS),
+  total_fees_usd 0.32385900, net ≈ -$1.28
+
+## Follow-ups (out of scope, reported)
+
+- DB entry_price for risex taker legs may disagree with the exchange
+  fill (leg 2730: DB 59744.77119 vs exchange fill 59762.7, ~3 bps).
+  Entry-price derivation for taker hedge legs deserves its own look.
+- Extended has the same manual-stop-move attribution gap; its
+  resolveLegClosure was not extended (risex-only scope).
